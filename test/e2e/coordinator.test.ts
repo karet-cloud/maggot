@@ -1,20 +1,21 @@
-// Runs the real Worker (cf dev --mode offline) against the local Artifacts stand-in with Artifacts'
+// Runs the real Worker (vite dev --mode offline) against the local Artifacts stand-in with Artifacts'
 // concurrent-fork failures simulated. Slower than the unit tests: npm run test:e2e
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
-import type { Task, TaskAccess } from "../../src/api.ts";
+import { promisify } from "node:util";
+import type { GitCredentials, Project, Task, TaskAccess } from "../../src/api.ts";
 import { startLocalArtifacts } from "../../scripts/local-artifacts.ts";
 
 let api = "";
 let artifacts: Awaited<ReturnType<typeof startLocalArtifacts>>;
 let worker: ChildProcess;
 let root = "";
-// cf dev persists Durable Object state across runs, so every run uses fresh project names.
+// The dev server persists Durable Object state across runs, so every run uses fresh project names.
 const run = Date.now().toString(36);
 const name = (base: string) => `${base}-${run}`;
 
@@ -68,7 +69,7 @@ before(async () => {
 	root = await mkdtemp(join(tmpdir(), "megit-e2e-"));
 	artifacts = await startLocalArtifacts({ root: join(root, "artifacts"), port: 0, quiet: true });
 	const port = await freePort();
-	worker = spawn("npx", ["cf", "dev", "--mode", "offline"], {
+	worker = spawn("npx", ["vite", "dev", "--mode", "offline"], {
 		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1" },
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -132,4 +133,36 @@ test("a fork that is still provisioning returns 202 without credentials, then be
 	assert.ok(access.json.fork?.token);
 	const { json } = await call<{ events: { type: string }[] }>("GET", `/projects/${name("slow-fork")}/events`);
 	assert.ok(json.events.some((e) => e.type === "task.ready"));
+});
+
+test("a project created without a README accepts an existing repository pushed with plain git", async () => {
+	await control("POST", "/simulate", {});
+	const project = name("pushed");
+	await call("POST", "/projects", { name: project, readme: false });
+	const empty = await call<{ project: Project }>("GET", `/projects/${project}`);
+	assert.equal(empty.json.project.head, null);
+	const early = await call<TaskAccess>("POST", `/projects/${project}/tasks`, { title: "too early" });
+	assert.equal(early.status, 409);
+
+	// The commands the dashboard shows, against a repo whose local branch isn't called main.
+	const { json: creds } = await call<GitCredentials>("POST", `/projects/${project}/credentials`, {});
+	const url = new URL(creds.remote);
+	url.username = "x";
+	url.password = creds.token.split("?expires=")[0];
+	const dir = join(root, "pushed");
+	const git = (...args: string[]) => promisify(execFile)("git", args, { cwd: dir });
+	await promisify(execFile)("git", ["init", "-q", "-b", "master", dir]);
+	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first");
+	await git("remote", "add", "megit", url.toString());
+	await git("branch", "-M", creds.branch);
+	await git("push", "-q", "-u", "megit", creds.branch);
+	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "second");
+	await git("push", "-q");
+
+	const head = (await git("rev-parse", "HEAD")).stdout.trim();
+	const pushed = await call<{ project: Project }>("GET", `/projects/${project}`);
+	assert.equal(pushed.json.project.head, head);
+	const task = await call<TaskAccess>("POST", `/projects/${project}/tasks`, { title: "after push" });
+	assert.equal(task.status, 201);
+	assert.equal(task.json.task.baseOid, head);
 });

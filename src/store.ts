@@ -7,6 +7,7 @@ export interface RepoHandle extends Disposable {
 	fork(name: string, opts?: { description?: string; defaultBranchOnly?: boolean }): Promise<ArtifactsCreateRepoResult>;
 	log(opts?: { ref?: string; limit?: number; offset?: number }): Promise<ArtifactsCommitMetadata[]>;
 	readFile(args: { ref: string; path: string }): Promise<Blob | null>;
+	readTree(hash: string): Promise<ArtifactsTreeEntry[] | null>;
 }
 
 /** The subset of the `Artifacts` namespace binding megit uses. */
@@ -83,6 +84,7 @@ class LocalArtifacts implements RepoStore {
 				);
 				return result ? new Blob([result.content], { type: "text/plain;charset=utf-8" }) : null;
 			},
+			readTree: (hash) => this.call<ArtifactsTreeEntry[] | null>("GET", `${path}/tree?${new URLSearchParams({ hash })}`),
 			[Symbol.dispose]() {},
 		};
 	}

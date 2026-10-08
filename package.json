@@ -8,24 +8,35 @@
   },
   "scripts": {
     "dev": "node scripts/dev.ts",
-    "dev:worker": "cf dev --mode offline",
+    "dev:worker": "vite dev --mode offline",
     "local-artifacts": "node scripts/local-artifacts.ts",
     "build": "cf build",
     "deploy": "cf deploy",
     "types": "cf workers types",
-    "typecheck": "cf workers types && tsc && tsc -p tsconfig.node.json",
+    "typecheck": "cf workers types && tsc && tsc -p tsconfig.app.json && tsc -p tsconfig.node.json",
     "test": "node --test test/*.test.ts",
     "demo": "bash scripts/demo.sh",
     "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.ts"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.1",
+    "@tanstack/react-router": "^1.170.41",
+    "@tanstack/react-start": "^1.168.60",
     "hono": "^4.13.13",
-    "isomorphic-git": "^1.43.1"
+    "isomorphic-git": "^1.43.1",
+    "lucide-react": "^1.53.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^2.0.0-beta.sha-52b0dc0e9",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/node": "latest",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "cf": "^1.0.0-beta.12",
+    "tailwindcss": "^4.3.3",
     "typescript": "latest",
     "vite": "^8.3.3"
   }

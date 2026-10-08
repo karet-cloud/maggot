@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "es2024",
-    "lib": ["esnext"],
+    "lib": [
+      "esnext"
+    ],
     "module": "preserve",
     "moduleResolution": "bundler",
     "types": [],
@@ -13,5 +15,10 @@
     "erasableSyntaxOnly": true,
     "isolatedModules": true
   },
-  "include": ["src", "cloudflare.config.ts", ".cloudflare/types"]
+  "include": [
+    "src",
+    "app/server.ts",
+    "cloudflare.config.ts",
+    ".cloudflare/types"
+  ]
 }

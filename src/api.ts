@@ -127,6 +127,22 @@ export interface Commit {
 	committedAt: number;
 }
 
+export interface TreeEntry {
+	name: string;
+	/** Path from the repo root. */
+	path: string;
+	type: "tree" | "blob" | "exec" | "symlink" | "gitlink";
+	hash: string;
+}
+
+/** A directory listing; directories first, then files, each alphabetical. */
+export interface Tree {
+	/** Commit the listing was read from; null if the repo has no commits. */
+	commit: string | null;
+	path: string;
+	entries: TreeEntry[];
+}
+
 export interface ApiError {
 	error: { code: string; message: string };
 }

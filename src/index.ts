@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { cors } from "hono/cors";
 import type { ApiError, TaskStatus } from "./api.ts";
 import { HttpError, toHttpError } from "./errors.ts";
@@ -13,16 +14,53 @@ const app = new Hono<App>();
 
 app.use("/api/*", cors({ origin: (origin) => origin, allowHeaders: ["authorization", "content-type"], maxAge: 86400 }));
 
-// Single shared API key for the MVP. WebSockets can't set headers from browsers, so `?key=` is accepted too.
+// Single shared API key for the MVP. Agents send it as a bearer token; WebSockets can't set headers
+// from browsers, so `?key=` is accepted too. The web UI exchanges it for an HttpOnly session cookie.
+const SESSION_COOKIE = "megit_session";
+const SESSION_MAX_AGE = 30 * 24 * 3600;
+
+app.post("/api/session", async (c) => {
+	const { key } = await body<{ key?: string }>(c);
+	if (!key || key !== apiKey(c.env)) throw new HttpError(401, "UNAUTHORIZED", "Invalid API key");
+	setCookie(c, SESSION_COOKIE, await sessionValue(key), {
+		httpOnly: true,
+		secure: new URL(c.req.url).protocol === "https:",
+		sameSite: "Strict",
+		path: "/",
+		maxAge: SESSION_MAX_AGE,
+	});
+	return c.json({ ok: true });
+});
+
 app.use("/api/*", async (c, next) => {
 	if (c.req.method === "OPTIONS") return next();
-	const expected = c.env.MEGIT_API_KEY;
-	if (!expected) throw new HttpError(500, "MISCONFIGURED", "MEGIT_API_KEY is not set");
+	const expected = apiKey(c.env);
 	const header = c.req.header("authorization");
 	const given = header?.startsWith("Bearer ") ? header.slice(7) : c.req.query("key");
-	if (given !== expected) throw new HttpError(401, "UNAUTHORIZED", "Missing or invalid API key");
-	await next();
+	if (given !== undefined ? given === expected : getCookie(c, SESSION_COOKIE) === (await sessionValue(expected))) {
+		return next();
+	}
+	throw new HttpError(401, "UNAUTHORIZED", "Missing or invalid API key");
 });
+
+app.get("/api/session", (c) => c.json({ ok: true }));
+
+app.delete("/api/session", (c) => {
+	deleteCookie(c, SESSION_COOKIE, { path: "/" });
+	return c.json({ ok: true });
+});
+
+function apiKey(env: Env): string {
+	if (!env.MEGIT_API_KEY) throw new HttpError(500, "MISCONFIGURED", "MEGIT_API_KEY is not set");
+	return env.MEGIT_API_KEY;
+}
+
+/** The cookie holds an HMAC of the key rather than the key; rotating the key ends every session. */
+async function sessionValue(key: string): Promise<string> {
+	const hmac = await crypto.subtle.importKey("raw", new TextEncoder().encode(key), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+	const mac = await crypto.subtle.sign("HMAC", hmac, new TextEncoder().encode("megit-session-v1"));
+	return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 app.onError((err, c) => {
 	const e = toHttpError(err);
@@ -32,8 +70,8 @@ app.onError((err, c) => {
 
 app.notFound((c) => c.json<ApiError>({ error: { code: "NOT_FOUND", message: `No route for ${c.req.method} ${c.req.path}` } }, 404));
 
-app.get("/", (c) =>
-	c.json({ name: "megit", description: "A Git platform for many concurrent agents, on Cloudflare Artifacts.", api: "/api" }),
+app.get("/api", (c) =>
+	c.json({ name: "megit", description: "A Git platform for many concurrent agents, on Cloudflare Artifacts." }),
 );
 
 // cloudflare.config.ts binds these by worker name, which the generated types can't resolve to a class.
@@ -58,7 +96,14 @@ app.get("/api/projects", async (c) => {
 });
 
 app.post("/api/projects", async (c) => {
-	const input = await body<{ name: string; description?: string; defaultBranch?: string; importUrl?: string; importBranch?: string }>(c);
+	const input = await body<{
+		name: string;
+		description?: string;
+		defaultBranch?: string;
+		importUrl?: string;
+		importBranch?: string;
+		readme?: boolean;
+	}>(c);
 	const name = assertProjectName(input.name ?? "");
 	const created = await projects(c.env).getByName(name).create({ ...input, name });
 	await registry(c.env).add(name);
@@ -73,10 +118,20 @@ app.delete("/api/projects/:project", async (c) => {
 	return c.json({ deleted: true });
 });
 
-app.get("/api/projects/:project/queue", async (c) => c.json({ queue: await project(c).queue() }));
+// Credentials for pushing to (or cloning) the project repo directly. Write by default.
+app.post("/api/projects/:project/credentials", async (c) => {
+	const { scope } = (await c.req.json().catch(() => ({}))) as { scope?: "read" | "write" };
+	if (scope !== undefined && scope !== "read" && scope !== "write") throw new HttpError(400, "INVALID_INPUT", "scope is read or write");
+	return c.json(await project(c).repoAccess(scope));
+});
+
+app.get("/api/projects/:project/queue", async (c) => c.json({ queue: await project(c).mergeQueue() }));
 
 app.get("/api/projects/:project/events", async (c) => {
-	const events = await project(c).events(Number(c.req.query("after") ?? 0), Number(c.req.query("limit") ?? 100));
+	const limit = Number(c.req.query("limit") ?? 100);
+	const after = c.req.query("after");
+	// Without `after`, returns the newest `limit` events (for a feed); with it, pages forward from `after`.
+	const events = after === undefined ? await project(c).recentEvents(limit) : await project(c).events(Number(after), limit);
 	return c.json({ events });
 });
 
@@ -88,6 +143,11 @@ app.get("/api/projects/:project/live", async (c) => {
 app.get("/api/projects/:project/log", async (c) => {
 	const commits = await project(c).log(c.req.query("ref"), Number(c.req.query("limit") ?? 50));
 	return c.json({ commits });
+});
+
+app.get("/api/projects/:project/tree", async (c) => {
+	c.header("cache-control", "no-store");
+	return c.json({ tree: await project(c).tree(c.req.query("ref"), c.req.query("path") ?? "") });
 });
 
 app.get("/api/projects/:project/files/*", async (c) => {

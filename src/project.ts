@@ -12,6 +12,7 @@ import {
 	type Task,
 	type TaskAccess,
 	type TaskStatus,
+	type Tree,
 } from "./api.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
@@ -24,6 +25,8 @@ const INTERNAL_TOKEN_TTL = 900;
 /** Drop the cached workspace after this many merges to bound memory. */
 const WORKSPACE_MAX_MERGES = 50;
 const MAX_PUSH_ATTEMPTS = 3;
+/** Direct push tokens for people are long-lived; they end up in a git remote URL. */
+const REPO_TOKEN_TTL = 30 * 24 * 3600;
 /**
  * Artifacts fails a large share of concurrent forks of the same repo (40% at 8 at once, 0% at 2 in
  * our measurements), while forks of different repos don't interfere. So forks are throttled per
@@ -43,6 +46,8 @@ export interface CreateProjectInput {
 	defaultBranch?: string;
 	importUrl?: string;
 	importBranch?: string;
+	/** Seed a README so the repo starts with a commit (default true). Leave it out to push an existing repo. */
+	readme?: boolean;
 }
 
 export interface CreateTaskInput {
@@ -84,6 +89,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private workspace: Workspace | undefined;
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
+	/** Once the default branch has a commit it always will; skips re-checking on every task. */
+	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
 	/** In-flight provisioning per task, so a request and the recovery alarm never fork twice. */
 	private readonly provisioning = new Map<string, Promise<ArtifactsCreateRepoResult | null>>();
@@ -163,7 +170,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			using repo = await this.store.get(created.name);
 			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
 		})();
-		if (empty && !input.importUrl) {
+		if (empty && !input.importUrl && input.readme !== false) {
 			const seed = new Workspace(created.defaultBranch, MERGE_IDENTITY);
 			await seed.seed(
 				{ url: created.remote, token: created.token },
@@ -182,6 +189,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
 		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl) });
 		return this.getProject();
+	}
+
+	/**
+	 * Git credentials for the project repo itself, for people pushing to it directly (for example the
+	 * first push of an existing repository). Agents should use tasks instead, so the merge queue applies.
+	 */
+	async repoAccess(scope: "read" | "write" = "write"): Promise<GitCredentials> {
+		const meta = this.meta();
+		return this.credentials(meta.name, meta.defaultBranch, scope, REPO_TOKEN_TTL);
 	}
 
 	async getProject(): Promise<Project> {
@@ -241,6 +257,31 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return blob ? { content: await blob.text(), contentType: blob.type || "text/plain;charset=utf-8" } : null;
 	}
 
+	/** Lists a directory at `ref` (same refs as readFile). `commit` is null for an empty repo. */
+	async tree(ref: string | undefined, path = ""): Promise<Tree> {
+		const meta = this.meta();
+		const { repoName, ref: resolved } = this.resolveRef(ref ?? meta.defaultBranch);
+		using repo = await this.store.get(repoName);
+		const [commit] = await repo.log({ ref: resolved, limit: 1 });
+		const parts = path.split("/").filter(Boolean);
+		const dir = parts.join("/");
+		if (!commit) return { commit: null, path: dir, entries: [] };
+		let hash = commit.treeHash;
+		for (const [i, part] of parts.entries()) {
+			const next = (await repo.readTree(hash))?.find((e) => e.name === part && e.type === "tree");
+			if (!next) throw new HttpError(404, "NOT_FOUND", `${parts.slice(0, i + 1).join("/")} is not a directory`);
+			hash = next.hash;
+		}
+		const entries = (await repo.readTree(hash)) ?? [];
+		return {
+			commit: commit.hash,
+			path: dir,
+			entries: entries
+				.map((e) => ({ name: e.name, path: dir ? `${dir}/${e.name}` : e.name, type: e.type, hash: e.hash }))
+				.sort((a, b) => Number(b.type === "tree") - Number(a.type === "tree") || a.name.localeCompare(b.name)),
+		};
+	}
+
 	// ── Tasks ────────────────────────────────────────────────────────────────
 
 	/**
@@ -253,6 +294,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const title = input.title?.trim();
 		if (!title) throw new HttpError(400, "INVALID_INPUT", "title is required");
 		const paths = [...new Set((input.paths ?? []).map(normalizeClaim))];
+		// Forks of an empty repo have nothing to merge against; the first commit has to land directly.
+		this.hasCommits ||= await (async () => {
+			using repo = await this.store.get(meta.name);
+			return (await repo.log({ ref: meta.defaultBranch, limit: 1 })).length > 0;
+		})();
+		if (!this.hasCommits) {
+			throw new HttpError(409, "EMPTY_REPO", `Push a first commit to ${meta.defaultBranch} before creating tasks`);
+		}
 		const id = newTaskId();
 		const now = new Date().toISOString();
 		this.sql.exec(
@@ -354,7 +403,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.getTask(id);
 	}
 
-	async queue(): Promise<QueueEntry[]> {
+	async mergeQueue(): Promise<QueueEntry[]> {
 		this.meta();
 		return this.sql
 			.exec<{ task_id: string; enqueued_at: string; title: string; agent: string | null; status: TaskStatus }>(
@@ -363,6 +412,19 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			)
 			.toArray()
 			.map((r, i) => ({ position: i + 1, taskId: r.task_id, title: r.title, agent: r.agent, status: r.status, enqueuedAt: r.enqueued_at }));
+	}
+
+	/** The newest `limit` events, oldest first. */
+	async recentEvents(limit = 100): Promise<ProjectEvent[]> {
+		this.meta();
+		return this.sql
+			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
+				"SELECT * FROM events ORDER BY seq DESC LIMIT ?",
+				Math.min(limit, 1000),
+			)
+			.toArray()
+			.reverse()
+			.map(toEvent);
 	}
 
 	async events(after = 0, limit = 100): Promise<ProjectEvent[]> {
