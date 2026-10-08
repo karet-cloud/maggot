@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Fully local stack: local Artifacts (git + control API) and the megit Worker under `cf dev --mode offline`.
+// Fully local stack: local Artifacts (git + control API) and the megit Worker + UI under `vite dev --mode offline`.
+// (`cf dev` hands TanStack Start projects to `vite dev` and rejects `--mode`, so Vite is run directly.)
 // Ports are random unless MEGIT_PORT / LOCAL_ARTIFACTS_PORT are set. HOST=0.0.0.0 to expose on a LAN/tailnet.
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
@@ -31,7 +32,7 @@ const artifacts = await startLocalArtifacts({
 });
 console.log(`local artifacts  ${artifacts.url}`);
 
-const worker = spawn("npx", ["cf", "dev", "--mode", "offline"], {
+const worker = spawn("npx", ["vite", "dev", "--mode", "offline"], {
 	stdio: "inherit",
 	env: {
 		...process.env,

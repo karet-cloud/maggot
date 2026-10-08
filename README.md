@@ -5,8 +5,9 @@
 A Git platform for many agents working on the same codebase at once, built on
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/), Workers, and Durable Objects.
 
-This is the headless MVP: an HTTP + WebSocket API, a merge-queue coordinator, and an agent CLI.
-There is no UI yet; the API is meant to be built against (types in [`src/api.ts`](src/api.ts)).
+The MVP is an HTTP + WebSocket API, a merge-queue coordinator, an agent CLI, and a web UI that
+watches it all live. The UI is a plain client of the public API (types in [`src/api.ts`](src/api.ts)),
+so anything it shows can be built against directly.
 
 ## The model
 
@@ -42,14 +43,36 @@ Task lifecycle: `provisioning → open → queued → merging → merged`, with 
 `queued` on resubmit, and `abandoned` from any non-terminal state. Merged and abandoned forks are
 deleted.
 
+## Web UI
+
+The same Worker serves the UI at `/` and the API at `/api`. Sign in with the API key; the UI swaps it
+for an HttpOnly session cookie (an HMAC of the key, so rotating the key signs everyone out).
+
+- **Projects**: every project with its task mix, queue length and head; create or import a project.
+- **Push with plain git**: create a project without a README, and its page shows the commands to push an
+  existing repository (`git remote add megit <url>`, `git branch -M main`, `git push -u megit main`).
+  The URL carries a 30-day write token, so no credential helper is needed. "Clone / push" on any project
+  shows them again. People can keep pushing to `main` directly; the merge queue re-fetches `main` before
+  every merge, so agent tasks still land on top. Tasks can't be created until the first commit exists.
+- **Board**: tasks in four columns (working, merge queue, needs attention, merged), updated live over
+  the project WebSocket. Cards glow as events touch them; tasks still waiting for a fork show "Forking".
+- **Activity**: the project's event stream, in plain sentences, next to every page.
+- **Task**: status, git details, changed files, conflict details with the tasks it collided with, the
+  task's own timeline, Submit / Abandon, and copyable `git clone` / `git pull` commands with fresh tokens.
+- **Code**: browse the default branch, any task's fork, or the commit a task merged as.
+- **History**: first-parent history of the default branch, with merge commits linked to their tasks.
+
+It's TanStack Start + React Query + Tailwind, in [`app/`](app/). `app/server.ts` is the Worker entry:
+it routes `/api/*` to the Hono API and everything else to TanStack Start.
+
 ## Run it locally (no Cloudflare account needed)
 
 ```sh
 npm install
-npm run dev          # local Artifacts stand-in + `cf dev --mode offline`, on random free ports
+npm run dev          # local Artifacts stand-in + Worker and UI (`vite dev --mode offline`), on random free ports
 ```
 
-`npm run dev` prints the API URL. The local stack uses `scripts/local-artifacts.ts`, which serves
+`npm run dev` prints the URL; open it in a browser and sign in with the key `dev`. The local stack uses `scripts/local-artifacts.ts`, which serves
 real Git smart HTTP (via `git http-backend`) with Artifacts-style tokens and mirrors the parts of the
 Workers binding megit uses, so the Worker code path is the same as production. State lives in
 `.megit-local/`. Set `HOST=0.0.0.0 PUBLIC_HOST=<your-tailscale-host>` to expose it to other machines.
@@ -96,21 +119,25 @@ Point the CLI at it with `MEGIT_URL=https://megit.<subdomain>.workers.dev` and `
 `.secrets/prod.env`. The "megit" Artifacts namespace is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
 
-`cloudflare.config.ts` is a function of the `--mode` flag: `offline` (used by `npm run dev`) binds
-the local stand-in, and any other mode binds the real Artifacts namespace. Vite reserves the mode name
-`local`, which is why the local mode is called `offline`. Types are generated from the config with
+`cloudflare.config.ts` is a function of the Vite mode: `offline` (used by `npm run dev`) binds the
+local stand-in, and any other mode binds the real Artifacts namespace. Vite reserves the mode name
+`local`, which is why the local mode is called `offline`. Because the project is TanStack Start,
+`cf dev` hands off to `vite dev` and won't pass `--mode` through, so the dev script runs Vite itself;
+`cf build` and `cf deploy` work as usual. Types are generated from the config with
 `cf workers types` into `.cloudflare/types/`.
 
 ## API
 
 All routes are under `/api` and need `Authorization: Bearer <MEGIT_API_KEY>` (or `?key=` for
-WebSockets). Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
+WebSockets, or the UI's session cookie). Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
 shapes are the types in [`src/api.ts`](src/api.ts).
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
+| POST | `/session` | `{ key }` | sets the UI's session cookie (no auth needed) |
+| DELETE | `/session` | | clears it |
 | GET | `/projects` | | `{ projects: Project[] }` |
-| POST | `/projects` | `{ name, description?, defaultBranch?, importUrl?, importBranch? }` | `{ project }` |
+| POST | `/projects` | `{ name, description?, defaultBranch?, importUrl?, importBranch?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
 | GET | `/projects/:p` | | `{ project: Project }` (head, per-status counts, queue length) |
 | DELETE | `/projects/:p` | | deletes repo, forks, and state |
 | GET | `/projects/:p/tasks` | `?status=` | `{ tasks: Task[] }` newest first |
@@ -119,10 +146,12 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | POST | `/projects/:p/tasks/:id/access` | | `TaskAccess` with fresh tokens (`fork: null` while provisioning) |
 | POST | `/projects/:p/tasks/:id/submit` | | `{ task }`, enqueues for merge (202) |
 | POST | `/projects/:p/tasks/:id/abandon` | | `{ task }`, deletes the fork |
+| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days |
 | GET | `/projects/:p/queue` | | `{ queue: QueueEntry[] }` |
-| GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }` |
+| GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }`: from `after` forward, or the newest `limit` without it |
 | WS | `/projects/:p/live` | `?key=&after=<seq>` | stream of `ProjectEvent` JSON; replays from `after`; send `ping` → `pong` |
 | GET | `/projects/:p/log` | `?ref=&limit=` | `{ commits: Commit[] }` first-parent history |
+| GET | `/projects/:p/tree` | `?ref=&path=` | `{ tree: Tree }` directory listing, same refs as files |
 | GET | `/projects/:p/files/<path>` | `?ref=` | raw file; `ref` is a branch/commit or `task:<id>` |
 
 Event types: `project.created`, `task.created`, `task.ready` (repo, remote, baseOid, forkAttempts),
@@ -134,7 +163,9 @@ Event types: `project.created`, `task.created`, `task.ready` (repo, remote, base
 
 ```
 cloudflare.config.ts  Worker config (bindings, Durable Objects) for the cf CLI
-src/index.ts          Worker: routing, auth, errors
+app/server.ts         Worker entry: /api/* to the API, everything else to the UI
+app/routes/           UI pages (TanStack Start file routes); app/lib/live.ts streams project events
+src/index.ts          API: routing, auth, errors
 src/project.ts        ProjectCoordinator DO (tasks, fork + merge queues, events, WebSocket) + Registry DO
 src/git/workspace.ts  In-memory git workspace: fetch, 3-way merge, changed files, push
 src/store.ts          Artifacts binding interface + local stand-in client
@@ -142,7 +173,7 @@ src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
 scripts/              local Artifacts server, dev launcher, demo
 test/                 merge engine tests against real git
-test/e2e/             the Worker under cf dev against the local stand-in with simulated fork failures
+test/e2e/             the Worker under vite dev against the local stand-in with simulated fork failures
 ```
 
 ```sh
@@ -167,7 +198,9 @@ npm run typecheck
 
 - Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).
 - Artifacts push event subscriptions (auto-submit on push, live "agent pushed" events).
-- Per-agent identities and tokens instead of one shared API key.
+- Per-agent identities and tokens instead of one shared API key, and real user accounts for the UI
+  (Better Auth) instead of signing in with that key.
+- Diffs in the UI (it lists changed files and shows file contents, but not line-level changes yet).
 - Stacked tasks (a task based on another unmerged task) and splitting merges into batches.
 - Large repos: the coordinator keeps an in-memory clone, so repos near the 128 MB Worker memory
   limit need ArtifactFS or a Sandbox-backed merge.

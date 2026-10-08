@@ -222,6 +222,22 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 				return [];
 			}
 		},
+		async "GET /repos/:name/tree"(_b, params, name) {
+			requireRepo(name);
+			try {
+				const { stdout } = await git(["ls-tree", "-z", `${params.get("hash")}^{tree}`], repoPath(name));
+				return stdout
+					.split("\0")
+					.filter(Boolean)
+					.map((line) => {
+						const [meta, entryName] = line.split("\t");
+						const [mode, , hash] = meta.split(" ");
+						return { name: entryName, mode: mode.replace(/^0+/, ""), hash, type: treeEntryType(mode) };
+					});
+			} catch {
+				return null;
+			}
+		},
 		async "GET /repos/:name/file"(_b, params, name) {
 			requireRepo(name);
 			try {
@@ -331,6 +347,14 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 	const port = typeof address === "object" && address ? address.port : opts.port;
 	baseUrl = opts.publicUrl ?? `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${port}`;
 	return { url: baseUrl, server, close: () => new Promise((ok) => server.close(() => ok())) };
+}
+
+function treeEntryType(mode: string): string {
+	if (mode === "040000") return "tree";
+	if (mode === "100755") return "exec";
+	if (mode === "120000") return "symlink";
+	if (mode === "160000") return "gitlink";
+	return "blob";
 }
 
 function readBody(req: IncomingMessage): Promise<Buffer> {

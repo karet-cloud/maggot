@@ -1,5 +1,5 @@
 import { bindings, defineConfig, exports } from "cf/config";
-import * as entrypoint from "./src/index.ts" with { type: "cf-worker" };
+import * as entrypoint from "./app/server.ts" with { type: "cf-worker" };
 
 // Config is evaluated in Node, but type-checked with the Worker's types (no @types/node).
 declare const process: { env: Record<string, string | undefined> };
