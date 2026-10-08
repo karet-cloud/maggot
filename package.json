@@ -1,0 +1,32 @@
+{
+  "name": "megit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "megit": "./cli/megit.ts"
+  },
+  "scripts": {
+    "dev": "node scripts/dev.ts",
+    "dev:worker": "cf dev --mode offline",
+    "local-artifacts": "node scripts/local-artifacts.ts",
+    "build": "cf build",
+    "deploy": "cf deploy",
+    "types": "cf workers types",
+    "typecheck": "cf workers types && tsc && tsc -p tsconfig.node.json",
+    "test": "node --test test/*.test.ts",
+    "demo": "bash scripts/demo.sh",
+    "test:e2e": "node --test --test-concurrency=1 test/e2e/*.test.ts"
+  },
+  "dependencies": {
+    "hono": "^4.13.13",
+    "isomorphic-git": "^1.43.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-beta.sha-52b0dc0e9",
+    "@types/node": "latest",
+    "cf": "^1.0.0-beta.12",
+    "typescript": "latest",
+    "vite": "^8.3.3"
+  }
+}

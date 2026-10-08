@@ -1,0 +1,8 @@
+node_modules/
+.cloudflare/
+dist/
+.dev.vars
+.megit-local/
+*.log
+.wrangler/
+.secrets/
