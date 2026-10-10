@@ -69,9 +69,11 @@ before(async () => {
 	root = await mkdtemp(join(tmpdir(), "megit-e2e-"));
 	artifacts = await startLocalArtifacts({ root: join(root, "artifacts"), port: 0, quiet: true });
 	const port = await freePort();
-	worker = spawn("npx", ["vite", "dev", "--mode", "offline"], {
+	// Its own process group, so after() can stop Vite and the workerd processes it starts in one go.
+	worker = spawn("node_modules/.bin/vite", ["dev", "--mode", "offline"], {
 		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1" },
-		stdio: ["ignore", "pipe", "pipe"],
+		stdio: "ignore",
+		detached: true,
 	});
 	api = `http://127.0.0.1:${port}`;
 	await until(async () => {
@@ -84,7 +86,7 @@ before(async () => {
 });
 
 after(async () => {
-	worker.kill("SIGINT");
+	if (worker.pid) process.kill(-worker.pid, "SIGTERM");
 	await artifacts.close();
 	await rm(root, { recursive: true, force: true });
 });
