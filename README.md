@@ -115,6 +115,11 @@ npx cf deploy --secrets-file .secrets/prod.env
 npm run deploy
 ```
 
+CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
+pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
+needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
+Workers" template, plus Artifacts edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
+
 Point the CLI at it with `MEGIT_URL=https://megit.<subdomain>.workers.dev` and `MEGIT_API_KEY` from
 `.secrets/prod.env`. The "megit" Artifacts namespace is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
