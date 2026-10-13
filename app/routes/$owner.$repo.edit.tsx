@@ -104,6 +104,9 @@ function Editor() {
 	if (!info.data?.repo.canWrite) {
 		return <Empty title="You can't edit this repository">Only its owner can commit to it.</Empty>;
 	}
+	if (info.data.repo.archivedAt) {
+		return <Empty title="This repository is archived">It's read-only. Its owner can unarchive it in Settings.</Empty>;
+	}
 	if (editing && original.error) return <ErrorNote error={original.error} />;
 	if (content === null) return <Spinner className="m-4" />;
 

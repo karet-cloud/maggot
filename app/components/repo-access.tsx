@@ -1,9 +1,9 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { KeyRound } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api, keys, type GitCredentials, type RepoInfo } from "../lib/api.ts";
-import { Button, CopyField, ErrorNote } from "./ui.tsx";
+import { Button, CopyField, cx, ErrorNote } from "./ui.tsx";
 
 /** An Artifacts remote URL with the token as the password (task forks; agents use these directly). */
 export function authUrl(creds: GitCredentials) {
@@ -44,6 +44,7 @@ export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }
 				<Section title="Clone">
 					<CopyField value={`git clone ${sh(repo.cloneUrl)}`} />
 				</Section>
+				<SshSection repo={repo} />
 				<p className="text-faint">
 					{repo.visibility === "public" ? "Anyone can clone this repository. Only its owner can push." : "Only the owner can push."}
 				</p>
@@ -98,6 +99,58 @@ export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }
 				)}
 			</div>
 			<ErrorNote error={token.error} />
+			<SshSection repo={repo} />
+		</div>
+	);
+}
+
+function SshSection({ repo }: { repo: RepoInfo }) {
+	return (
+		<Section title="Or over SSH">
+			<CopyField value={`git clone ${sh(repo.sshUrl)}`} />
+			<p className="text-faint">
+				Needs an SSH key on your account and a short ssh config entry; both are on the{" "}
+				<Link to="/settings/ssh" className="text-accent hover:underline">
+					SSH keys
+				</Link>{" "}
+				page.
+			</p>
+		</Section>
+	);
+}
+
+const CLONE_KIND = "megit.cloneKind";
+
+/** The repository's clone URL, HTTPS or SSH; the choice is remembered in this browser. */
+export function CloneUrl({ repo }: { repo: RepoInfo }) {
+	const [kind, setKind] = useState<"https" | "ssh">("https");
+	// Read after mounting, so the server-rendered page and the first client render agree.
+	useEffect(() => {
+		if (localStorage.getItem(CLONE_KIND) === "ssh") setKind("ssh");
+	}, []);
+	const choose = (next: "https" | "ssh") => {
+		setKind(next);
+		localStorage.setItem(CLONE_KIND, next);
+	};
+	const option = (value: "https" | "ssh", label: string) => (
+		<button
+			type="button"
+			onClick={() => choose(value)}
+			aria-pressed={kind === value}
+			className={cx("rounded px-2 py-1 text-[11px] font-medium", kind === value ? "bg-raised text-fg" : "text-faint hover:text-dim")}
+		>
+			{label}
+		</button>
+	);
+	return (
+		<div className="flex min-w-0 items-center gap-1.5">
+			<div className="flex shrink-0 rounded-md border border-line p-0.5" role="group" aria-label="Clone over">
+				{option("https", "HTTPS")}
+				{option("ssh", "SSH")}
+			</div>
+			<div className="min-w-0 flex-1">
+				<CopyField value={kind === "ssh" ? repo.sshUrl : repo.cloneUrl} />
+			</div>
 		</div>
 	);
 }

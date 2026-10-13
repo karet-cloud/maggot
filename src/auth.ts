@@ -10,14 +10,14 @@ import { verificationRequired } from "./policy.ts";
 
 export type Principal =
 	| { kind: "admin" }
-	| { kind: "user"; id: string; username: string; via: "session" | "token"; verified: boolean }
+	| { kind: "user"; id: string; username: string; via: "session" | "token" | "ssh"; verified: boolean }
 	| { kind: "anonymous" };
 
 /** Usernames become URL segments, so app routes can't be taken. */
 const RESERVED = new Set([
 	"api", "assets", "login", "signup", "logout", "new", "settings", "explore", "p", "admin", "about", "help",
 	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "megit", "forgot-password", "reset-password",
-	"verify-email", "search", "notifications", "stars", "dashboard", "parity",
+	"verify-email", "search", "notifications", "stars", "dashboard", "parity", "transfers", "ssh",
 ]);
 const USERNAME = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 

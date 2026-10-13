@@ -42,13 +42,13 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 |---|---------|-------|--------|
 | 14 | **Blame** | Per-line last commit. Expensive; compute lazily and cache in the DO or KV. | M |
 | 15 | **File history** | Commits that touched a path. | S–M |
-| 16 | **Code search** (done: repository search, and per-repository code search on the default branch) | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
+| 16 | **Code search** (done: repository search, per-repository code search on the default branch, and "Go to file") | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
 | 17 | **Commit graph** | A branch and merge visualization in history. Useful to show agent merges. | M |
 | 18 | **Edit in browser** (done) | Edit a file, commit it to a branch, and optionally open a PR. | M |
 | 19 | **Forks** (done; stars too; PRs across forks next) | Artifacts fork into another project, then PR back across forks. | M |
 | 20 | **Signed commit badges** | Verify GPG/SSH signatures and show "Verified". | M |
 | 21 | **Git LFS** | Store large files in R2 behind the LFS batch API. | L |
-| 22 | **SSH push/clone** | Depends on what Artifacts exposes; HTTPS-only may be fine. | ? |
+| 22 | **SSH push/clone** (done, through a WebSocket ProxyCommand) | Port 22 itself would need Spectrum. | L |
 
 ## Tier 4: platform and integrations
 
@@ -61,7 +61,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 27 | **Organizations and teams** | Group projects and share permissions. | L |
 | 28 | **Mirror from or to GitHub** | Keep a GitHub repo in sync both ways. Useful for adoption. | M |
 | 29 | **Audit log** | Who pushed, merged, or changed settings. Mostly the existing event log plus users. | S (after 12) |
-| 30 | **Project settings page** | Rename, default branch, visibility, delete, and token management. | S |
+| 30 | **Project settings page** (done: rename, transfer, archive, visibility, delete; default branch next) | Rename, default branch, visibility, delete, and token management. | S |
 
 ## Suggested order
 

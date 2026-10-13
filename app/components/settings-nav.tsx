@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { KeyRound, LockKeyhole } from "lucide-react";
+import { KeyRound, KeySquare, LockKeyhole } from "lucide-react";
 
 /** Tabs across the account settings pages. */
 export function SettingsNav() {
@@ -10,6 +10,10 @@ export function SettingsNav() {
 			<Link to="/settings/tokens" className={tab}>
 				<KeyRound className="size-3.5" />
 				Access tokens
+			</Link>
+			<Link to="/settings/ssh" className={tab}>
+				<KeySquare className="size-3.5" />
+				SSH keys
 			</Link>
 			<Link to="/settings/password" className={tab}>
 				<LockKeyhole className="size-3.5" />
