@@ -1,10 +1,10 @@
 /// <reference types="vite/client" />
 import { QueryClientProvider, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useParams } from "@tanstack/react-router";
-import { KeyRound, LogOut } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
-import { Button, ErrorNote, Input, Spinner } from "../components/ui.tsx";
-import { api, ApiError } from "../lib/api.ts";
+import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useNavigate, useParams } from "@tanstack/react-router";
+import { KeyRound, LogOut, MailWarning, Plus } from "lucide-react";
+import type { ReactNode } from "react";
+import { Button } from "../components/ui.tsx";
+import { api, keys } from "../lib/api.ts";
 import css from "../styles.css?url";
 
 export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
@@ -13,7 +13,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 			{ charSet: "utf-8" },
 			{ name: "viewport", content: "width=device-width, initial-scale=1" },
 			{ title: "megit" },
-			{ name: "description", content: "A Git platform for many concurrent agents, on Cloudflare Artifacts." },
+			{ name: "description", content: "Git hosting for people and many concurrent agents, on Cloudflare Artifacts." },
 		],
 		links: [
 			{ rel: "stylesheet", href: css },
@@ -26,7 +26,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 		<div className="mx-auto max-w-md py-24 text-center">
 			<p className="text-sm text-dim">Nothing here.</p>
 			<Link to="/" className="mt-3 inline-block text-sm text-accent hover:underline">
-				Back to projects
+				Back home
 			</Link>
 		</div>
 	),
@@ -50,21 +50,77 @@ function Root() {
 	const { queryClient } = Route.useRouteContext();
 	return (
 		<QueryClientProvider client={queryClient}>
-			<AuthGate>
-				<TopBar />
-				<Outlet />
-			</AuthGate>
+			<TopBar />
+			<VerifyBanner />
+			<Outlet />
 		</QueryClientProvider>
 	);
 }
 
+/** The signed-in user, or null. Shared by every page through the query cache. */
+export function useViewer() {
+	return useQuery({ queryKey: keys.me, queryFn: api.me, staleTime: 60_000 });
+}
+
+export function useConfig() {
+	return useQuery({ queryKey: keys.config, queryFn: api.config, staleTime: Infinity });
+}
+
+/** Whether the signed-in user still has to verify their email before creating or pushing. */
+export function useNeedsVerification(): boolean {
+	const me = useViewer().data;
+	const config = useConfig().data;
+	return Boolean(me && !me.emailVerified && config?.verificationRequired);
+}
+
+function VerifyBanner() {
+	const me = useViewer().data;
+	const config = useConfig().data;
+	const needed = useNeedsVerification();
+	const resend = useMutation({ mutationFn: () => api.resendVerification(me?.email ?? "") });
+	if (!needed || !me || !config) return null;
+	return (
+		<div className="border-b border-amber-400/20 bg-amber-400/10">
+			<div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2 text-xs text-amber-200">
+				<MailWarning className="size-4 shrink-0" />
+				<span>
+					Verify your email address to create repositories and push.{" "}
+					{config.emailDelivery ? (
+						<>
+							We sent a link to <span className="font-medium text-amber-100">{me.email}</span>.
+						</>
+					) : (
+						"This server can't send email yet, so ask its administrator for a verification link."
+					)}
+				</span>
+				{config.emailDelivery && (
+					<button
+						type="button"
+						onClick={() => resend.mutate()}
+						disabled={resend.isPending || resend.isSuccess}
+						className="ml-auto rounded-md px-2 py-1 font-medium text-amber-100 hover:bg-amber-400/10 disabled:opacity-60"
+					>
+						{resend.isSuccess ? "Sent" : resend.isError ? "Couldn't send; try again" : "Resend the email"}
+					</button>
+				)}
+			</div>
+		</div>
+	);
+}
+
 function TopBar() {
-	const params = useParams({ strict: false }) as { project?: string };
+	const params = useParams({ strict: false }) as { owner?: string; repo?: string };
 	const queryClient = useQueryClient();
-	const logout = useMutation({
-		mutationFn: api.logout,
-		onSuccess: () => queryClient.resetQueries(),
+	const navigate = useNavigate();
+	const viewer = useViewer();
+	const signOut = useMutation({
+		mutationFn: api.signOut,
+		onSuccess: async () => {
+			await queryClient.resetQueries();
+			void navigate({ to: "/" });
+		},
 	});
+	const me = viewer.data;
 	return (
 		<header className="sticky top-0 z-30 border-b border-line bg-bg/85 backdrop-blur">
 			<div className="mx-auto flex h-12 max-w-[1600px] items-center gap-3 px-5">
@@ -72,95 +128,52 @@ function TopBar() {
 					<img src="/favicon.svg" alt="" className="size-6" />
 					megit
 				</Link>
-				{params.project && (
-					<>
+				{params.owner && (
+					<nav className="flex min-w-0 items-center gap-1.5 font-mono text-sm">
 						<span className="text-faint">/</span>
-						<Link to="/p/$project" params={{ project: params.project }} className="font-mono text-sm text-fg hover:text-accent">
-							{params.project}
+						<Link to="/$owner" params={{ owner: params.owner }} className="text-dim hover:text-fg">
+							{params.owner}
 						</Link>
-					</>
+						{params.repo && (
+							<>
+								<span className="text-faint">/</span>
+								<Link to="/$owner/$repo" params={{ owner: params.owner, repo: params.repo }} className="truncate text-fg hover:text-accent">
+									{params.repo}
+								</Link>
+							</>
+						)}
+					</nav>
 				)}
-				<div className="ml-auto">
-					<Button variant="ghost" onClick={() => logout.mutate()} className="text-xs">
-						<LogOut className="size-3.5" />
-						Sign out
-					</Button>
+				<div className="ml-auto flex items-center gap-1">
+					{viewer.isPending ? null : me ? (
+						<>
+							<Link to="/new" className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
+								<Plus className="size-3.5" />
+								New repository
+							</Link>
+							<Link to="/settings/tokens" className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
+								<KeyRound className="size-3.5" />
+								Settings
+							</Link>
+							<Link to="/$owner" params={{ owner: me.username }} className="rounded-md px-2.5 py-1.5 font-mono text-xs text-fg hover:bg-raised">
+								{me.username}
+							</Link>
+							<Button variant="ghost" onClick={() => signOut.mutate()} className="text-xs" title="Sign out">
+								<LogOut className="size-3.5" />
+							</Button>
+						</>
+					) : (
+						<>
+							<Link to="/login" className="rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
+								Sign in
+							</Link>
+							<Link to="/signup" className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-indigo-400">
+								Sign up
+							</Link>
+						</>
+					)}
 				</div>
 			</div>
 		</header>
-	);
-}
-
-function AuthGate({ children }: { children: ReactNode }) {
-	const session = useQuery({ queryKey: ["session"], queryFn: api.session, staleTime: Infinity, retry: false });
-	if (session.isPending) {
-		return (
-			<div className="flex min-h-screen items-center justify-center">
-				<Spinner />
-			</div>
-		);
-	}
-	if (session.error instanceof ApiError && session.error.status === 401) return <Login />;
-	if (session.error) {
-		return (
-			<div className="mx-auto max-w-md py-24">
-				<ErrorNote error={session.error} />
-			</div>
-		);
-	}
-	return children;
-}
-
-function Login() {
-	const queryClient = useQueryClient();
-	const [key, setKey] = useState("");
-	const login = useMutation({
-		mutationFn: (k: string) => api.login(k),
-		onSuccess: () => queryClient.resetQueries(),
-	});
-	// The local stack (`npm run dev`) always uses the key "dev"; sign in with it silently so local
-	// development skips this screen. Against a real deployment this just fails and the form shows.
-	const [tryingDev, setTryingDev] = useState(true);
-	useEffect(() => {
-		api.login("dev").then(
-			() => queryClient.resetQueries(),
-			() => setTryingDev(false),
-		);
-	}, [queryClient]);
-	if (tryingDev) {
-		return (
-			<div className="flex min-h-screen items-center justify-center">
-				<Spinner />
-			</div>
-		);
-	}
-	return (
-		<div className="flex min-h-screen items-center justify-center px-5">
-			<form
-				onSubmit={(e) => {
-					e.preventDefault();
-					login.mutate(key.trim());
-				}}
-				className="w-full max-w-sm space-y-5"
-			>
-				<div className="space-y-2 text-center">
-					<img src="/favicon.svg" alt="" className="mx-auto size-10" />
-					<h1 className="text-lg font-semibold">megit</h1>
-					<p className="text-sm text-dim">Git for hundreds of agents at once, on Cloudflare Artifacts.</p>
-				</div>
-				<div className="space-y-3 rounded-xl border border-line bg-panel p-5">
-					<label className="block space-y-1.5">
-						<span className="text-xs font-medium text-dim">API key</span>
-						<Input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder="MEGIT_API_KEY" autoFocus required />
-					</label>
-					<ErrorNote error={login.error} />
-					<Button type="submit" variant="primary" busy={login.isPending} className="w-full">
-						<KeyRound className="size-4" />
-						Sign in
-					</Button>
-				</div>
-				<p className="text-center text-[11px] text-faint">Local dev key is "dev". In production it's in .secrets/prod.env.</p>
-			</form>
-		</div>
 	);
 }

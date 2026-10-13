@@ -10,7 +10,13 @@ import type { GitCredentials, ProjectEvent, Task, TaskAccess } from "../src/api.
 
 const exec = promisify(execFile);
 const API = (process.env.MEGIT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
-const KEY = process.env.MEGIT_API_KEY ?? "dev";
+// A personal access token (megit_pat_…) for user repositories, or the admin API key.
+const KEY = process.env.MEGIT_TOKEN ?? process.env.MEGIT_API_KEY ?? "dev";
+
+/** API base path for a repository: `owner/repo` for user repositories, or an internal project name. */
+function repoPath(project: string): string {
+	return project.includes("/") ? `/repos/${project.split("/").map(encodeURIComponent).join("/")}` : `/projects/${project}`;
+}
 
 interface Checkout {
 	api: string;
@@ -30,8 +36,19 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<T> 
 }
 
 async function git(args: string[], cwd?: string): Promise<string> {
-	const { stdout } = await exec("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
-	return stdout.trim();
+	try {
+		const { stdout } = await exec("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+		return stdout.trim();
+	} catch (err) {
+		// The failed command line (and git's stderr) can include a remote URL with a token in it.
+		const e = err as { message?: string; stderr?: string };
+		throw new Error(redact([e.message, e.stderr].filter(Boolean).join("\n")));
+	}
+}
+
+/** Masks the password in any `scheme://user:password@host` URL. */
+function redact(text: string): string {
+	return text.replace(/(\/\/[^\s/:@]+:)[^\s@]+@/g, "$1***@");
 }
 
 /** Waits out the project's fork queue. Returns credentials once the task's fork exists. */
@@ -41,11 +58,11 @@ async function waitForFork(project: string, access: TaskAccess, timeoutMs = 180_
 	while (current.task.status === "provisioning") {
 		if (Date.now() > deadline) throw new Error(`Timed out waiting for task ${current.task.id} to get its fork`);
 		await new Promise((r) => setTimeout(r, 1000));
-		const { task } = await api<{ task: Task }>("GET", `/projects/${project}/tasks/${current.task.id}`);
+		const { task } = await api<{ task: Task }>("GET", `${repoPath(project)}/tasks/${current.task.id}`);
 		current = { ...current, task };
 	}
 	// Past provisioning, the access endpoint itself rejects closed tasks and tasks whose fork failed.
-	if (!current.fork || !current.base) current = await api<TaskAccess>("POST", `/projects/${project}/tasks/${current.task.id}/access`);
+	if (!current.fork || !current.base) current = await api<TaskAccess>("POST", `${repoPath(project)}/tasks/${current.task.id}/access`);
 	if (!current.fork || !current.base) throw new Error(`Task ${current.task.id} has no credentials yet`);
 	return current as TaskAccess & { fork: GitCredentials; base: GitCredentials };
 }
@@ -66,7 +83,7 @@ async function loadCheckout(dir: string): Promise<Checkout> {
 
 /** Mints fresh tokens and rewrites the `origin` (fork) and `base` (project) remotes. */
 async function refreshAccess(dir: string, co: Checkout) {
-	const access = await waitForFork(co.project, await api<TaskAccess>("POST", `/projects/${co.project}/tasks/${co.taskId}/access`));
+	const access = await waitForFork(co.project, await api<TaskAccess>("POST", `${repoPath(co.project)}/tasks/${co.taskId}/access`));
 	await git(["remote", "set-url", "origin", authRemote(access.fork)], dir);
 	await git(["remote", "set-url", "base", authRemote(access.base)], dir);
 	return access;
@@ -81,7 +98,7 @@ function printTask(t: Task) {
 async function waitForTask(co: Checkout, timeoutMs = 300_000): Promise<Task> {
 	const deadline = Date.now() + timeoutMs;
 	while (true) {
-		const { task } = await api<{ task: Task }>("GET", `/projects/${co.project}/tasks/${co.taskId}`);
+		const { task } = await api<{ task: Task }>("GET", `${repoPath(co.project)}/tasks/${co.taskId}`);
 		if (!["queued", "merging"].includes(task.status)) return task;
 		if (Date.now() > deadline) throw new Error(`Timed out waiting for ${task.id} (still ${task.status})`);
 		await new Promise((r) => setTimeout(r, 500));
@@ -115,7 +132,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 		const [project, ...titleWords] = positionals;
 		const title = titleWords.join(" ");
 		if (!project || !title) throw new Error('usage: megit start <project> "<title>" [--agent name] [--paths a,b/] [--dir path]');
-		const created = await api<TaskAccess>("POST", `/projects/${project}/tasks`, {
+		const created = await api<TaskAccess>("POST", `${repoPath(project)}/tasks`, {
 			title,
 			agent: values.agent ?? process.env.MEGIT_AGENT,
 			paths: values.paths?.split(",").filter(Boolean),
@@ -138,7 +155,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
 	async status(args) {
 		const co = await loadCheckout(args[0] ?? ".");
-		const { task } = await api<{ task: Task }>("GET", `/projects/${co.project}/tasks/${co.taskId}`);
+		const { task } = await api<{ task: Task }>("GET", `${repoPath(co.project)}/tasks/${co.taskId}`);
 		printTask(task);
 	},
 
@@ -171,7 +188,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 			await git(["commit", "--quiet", "-m", values.message ?? access.task.title], dir);
 		}
 		await git(["push", "--quiet", "origin", `HEAD:${access.fork.branch}`], dir);
-		await api("POST", `/projects/${co.project}/tasks/${co.taskId}/submit`);
+		await api("POST", `${repoPath(co.project)}/tasks/${co.taskId}/submit`);
 		if (!values.wait) return console.log(`Submitted ${co.taskId}`);
 		const task = await waitForTask(co);
 		printTask(task);
@@ -180,7 +197,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
 	async abandon(args) {
 		const co = await loadCheckout(args[0] ?? ".");
-		const { task } = await api<{ task: Task }>("POST", `/projects/${co.project}/tasks/${co.taskId}/abandon`);
+		const { task } = await api<{ task: Task }>("POST", `${repoPath(co.project)}/tasks/${co.taskId}/abandon`);
 		printTask(task);
 	},
 
@@ -188,19 +205,19 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 		const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { status: { type: "string" } } });
 		if (!positionals[0]) throw new Error("usage: megit tasks <project> [--status <status>]");
 		const q = values.status ? `?status=${values.status}` : "";
-		const { tasks } = await api<{ tasks: Task[] }>("GET", `/projects/${positionals[0]}/tasks${q}`);
+		const { tasks } = await api<{ tasks: Task[] }>("GET", `${repoPath(positionals[0])}/tasks${q}`);
 		tasks.forEach(printTask);
 	},
 
 	async queue(args) {
 		if (!args[0]) throw new Error("usage: megit queue <project>");
-		const { queue } = await api<{ queue: { position: number; taskId: string; status: string; title: string }[] }>("GET", `/projects/${args[0]}/queue`);
+		const { queue } = await api<{ queue: { position: number; taskId: string; status: string; title: string }[] }>("GET", `${repoPath(args[0])}/queue`);
 		for (const q of queue) console.log(`${q.position}. ${q.taskId}  ${q.status}  ${q.title}`);
 	},
 
 	async watch(args) {
 		if (!args[0]) throw new Error("usage: megit watch <project>");
-		const url = new URL(`${API}/api/projects/${args[0]}/live`);
+		const url = new URL(`${API}/api${repoPath(args[0])}/live`);
 		url.protocol = url.protocol.replace("http", "ws");
 		url.searchParams.set("key", KEY);
 		const ws = new WebSocket(url);
@@ -231,10 +248,11 @@ if (!run) {
   queue <project>                            Show the merge queue
   watch <project>                            Stream live project events
 
-  env: MEGIT_URL (default http://127.0.0.1:8787), MEGIT_API_KEY (default "dev"), MEGIT_AGENT`);
+  env: MEGIT_URL (default http://127.0.0.1:8787), MEGIT_TOKEN (a personal access token) or MEGIT_API_KEY (admin; default "dev"), MEGIT_AGENT
+  <project> is owner/repo for a user repository`);
 	process.exit(command ? 1 : 0);
 }
 run(rest).catch((err) => {
-	console.error(`megit: ${err instanceof Error ? err.message : err}`);
+	console.error(`megit: ${redact(err instanceof Error ? err.message : String(err))}`);
 	process.exit(1);
 });

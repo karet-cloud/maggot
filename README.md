@@ -2,11 +2,13 @@
 
 # megit
 
-A Git platform for many agents working on the same codebase at once, built on
-[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/), Workers, and Durable Objects.
+Git hosting for people, and for many agents working on the same codebase at once, built on
+[Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/), Workers, Durable Objects and D1.
 
-The MVP is an HTTP + WebSocket API, a merge-queue coordinator, an agent CLI, and a web UI that
-watches it all live. The UI is a plain client of the public API (types in [`src/api.ts`](src/api.ts)),
+Sign up, create a public or private repository, and `git push` / `git clone` it over HTTPS at
+`https://<host>/<owner>/<repo>.git` with a personal access token. Browse it on the web: code, history,
+branches, diffs, archives. On top of that sits the agent layer: an HTTP + WebSocket API, a merge-queue
+coordinator, an agent CLI, and a live board. The UI is a plain client of the public API (types in [`src/api.ts`](src/api.ts)),
 so anything it shows can be built against directly.
 
 ## The model
@@ -15,14 +17,14 @@ GitHub's model (shared repo, branches, PRs, human review) breaks down when hundr
 push at once. megit replaces it with:
 
 - **Task = fork.** Each unit of agent work gets its own Artifacts fork with a repo-scoped write
-  token. Agents can never push to the project repo, so they can't race each other or clobber `main`.
+  token. Agents can never push to the project repo, so they can't race each other or clobber the default branch.
 - **Two queues per project, both in the project's Durable Object.** A *fork queue* creates task
   forks at most 2 at a time (Artifacts fails ~40% of forks of one repo when 8 run at once, 0% at 2;
   different repos don't interfere, so the limit is per project). A *merge queue* lands submissions
   strictly one at a time. Both are persisted in SQLite and resumed by the alarm after a restart.
 - **Single writer.** One Durable Object per project owns the default branch. Agents *submit*;
   the coordinator merges submissions one at a time (3-way merge with isomorphic-git, in memory)
-  and pushes. If someone moved `main` underneath it, it resyncs and retries.
+  and pushes. If someone moved the default branch underneath it, it resyncs and retries.
 - **Conflicts are data, not a review thread.** A conflicting task goes to `conflict` with the
   conflicting files *and the already-merged tasks that touched them*. The agent runs
   `megit sync`, resolves, and resubmits. Non-conflicting work never waits on a human.
@@ -35,7 +37,7 @@ push at once. megit replaces it with:
  agent ──megit start──▶ Worker ──▶ ProjectCoordinator (DO, SQLite) ──fork──▶ Artifacts: proj--t123
    │                                        │
    ├── git push (fork token) ──────────────────────────────────────────────▶ Artifacts: proj--t123
-   └──megit submit──▶ Worker ──▶ queue ──alarm──▶ fetch main + fork, merge, push ──▶ Artifacts: proj
+   └──megit submit──▶ Worker ──▶ queue ──alarm──▶ fetch master + fork, merge, push ──▶ Artifacts: proj
                                             └──▶ events ──▶ WebSocket / polling
 ```
 
@@ -45,22 +47,53 @@ deleted.
 
 ## Web UI
 
-The same Worker serves the UI at `/` and the API at `/api`. Sign in with the API key; the UI swaps it
-for an HttpOnly session cookie (an HMAC of the key, so rotating the key signs everyone out).
+One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI everywhere else.
 
-- **Projects**: every project with its task mix, queue length and head; create or import a project.
-- **Push with plain git**: create a project without a README, and its page shows the commands to push an
-  existing repository (`git remote add megit <url>`, `git branch -M main`, `git push -u megit main`).
-  The URL carries a 30-day write token, so no credential helper is needed. "Clone / push" on any project
-  shows them again. People can keep pushing to `main` directly; the merge queue re-fetches `main` before
-  every merge, so agent tasks still land on top. Tasks can't be created until the first commit exists.
-- **Board**: tasks in four columns (working, merge queue, needs attention, merged), updated live over
+- **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
+  in D1). Usernames are the first part of every repository URL.
+- **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
+  works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
+  Emails go out through Cloudflare Email Sending when the deploy sets `MEGIT_EMAIL_FROM` (a sender on a
+  domain set up for it; a repository variable in CI). Without it the page says email isn't available, the
+  link is logged, and an admin can issue one: `POST /api/admin/password-reset {"username": "…"}` with the
+  admin key.
+- **Email verification**: when the server can send email (or `MEGIT_POLICY` sets
+  `requireVerifiedEmail`), sign-up sends a link that works for a day, and until it's opened the account
+  can't create repositories or push (a banner offers to resend it). Without email, an admin issues the
+  link: `POST /api/admin/verify-email {"username": "…"}`.
+- **Abuse limits**: sign-ups, sign-ins (per address and per account), reset and verification emails,
+  API calls and Git requests are rate limited (429 with `Retry-After`; counters live in a `Limiter`
+  Durable Object per address, user or account). Each account has a repository count and storage quota,
+  each repository a size limit, and each push a size limit; pushes are counted as they stream through,
+  and once a repository is full git prints why. Defaults are in [`src/policy.ts`](src/policy.ts); set
+  `MEGIT_POLICY` (JSON, a repository variable in CI) to change them. The admin key isn't limited.
+- **Repositories**: `/<owner>/<repo>`, public (anyone can browse and clone; only the owner pushes) or
+  private (only the owner sees it; to anyone else it doesn't exist). Create one empty, with a README, or by
+  importing a public Git URL. Settings change the description and visibility, or delete it.
+- **Git over HTTPS**: `git clone https://<host>/<owner>/<repo>.git`. Pushing, and cloning private
+  repositories, needs the username plus a **personal access token** as the password (Tokens page, or
+  "Add a token" in a repository's Clone / push dialog, which puts it straight into the commands). The
+  Worker checks access, then streams Git's smart-HTTP exchange to Artifacts with a short-lived internal
+  token, so people only ever hold megit credentials. Each push emits a `repo.pushed` event.
+- **Push an existing project**: an empty repository shows GitHub-style quick-setup commands
+  (`git remote add megit <url>`, `git branch -M <branch>`, `git push -u megit <branch>`, plus `--all` and
+  `--tags`). The default branch is chosen at creation (`master` unless you change it).
+- **Agents**: the board: tasks in four columns (working, merge queue, needs attention, merged), updated live over
   the project WebSocket. Cards glow as events touch them; tasks still waiting for a fork show "Forking".
 - **Activity**: the project's event stream, in plain sentences, next to every page.
-- **Task**: status, git details, changed files, conflict details with the tasks it collided with, the
+- **Task**: status, git details, the agent's commits and the full diff of what it changed (live while
+  the fork is open, what landed once merged), conflict details with the tasks it collided with, the
   task's own timeline, Submit / Abandon, and copyable `git clone` / `git pull` commands with fresh tokens.
-- **Code**: browse the default branch, any task's fork, or the commit a task merged as.
-- **History**: first-parent history of the default branch, with merge commits linked to their tasks.
+- **Code**: browse any branch, any task's fork, or any commit. Files are syntax-highlighted; click a line
+  number (shift-click for a range) to link to `#L10-L20`, and "Permalink" copies that link pinned to the
+  commit. Markdown renders (relative links and images resolve inside the repo), images preview, and
+  every file has Raw and Download. "Download" on the tree gets the whole ref as `.zip` or `.tar.gz`.
+- **README**: the root README renders on the repository's front page (the Code tab), like GitHub.
+- **History**: first-parent history of the default branch; every commit opens a commit page with its
+  message, author, parents and diff (unified or split).
+- **Branches**: the default branch, other branches with ahead/behind counts against it (delete them
+  here), and each active task's fork grouped separately. "Compare" shows the commits and diff a branch
+  or fork adds since it split off.
 
 It's TanStack Start + React Query + Tailwind, in [`app/`](app/). `app/server.ts` is the Worker entry:
 it routes `/api/*` to the Hono API and everything else to TanStack Start.
@@ -118,7 +151,10 @@ npm run deploy
 CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
 pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
 needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
-Workers" template, plus Artifacts edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
+Workers" template, plus Artifacts edit and D1 edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
+The first deploy creates the `megit` D1 database; tables are created by the Worker on first use, so
+there's no migration step. Better Auth's secret is derived from `MEGIT_API_KEY` unless a
+`BETTER_AUTH_SECRET` secret is set.
 
 Point the CLI at it with `MEGIT_URL=https://megit.<subdomain>.workers.dev` and `MEGIT_API_KEY` from
 `.secrets/prod.env`. The "megit" Artifacts namespace is created on first use. A brand-new
@@ -133,16 +169,42 @@ local stand-in, and any other mode binds the real Artifacts namespace. Vite rese
 
 ## API
 
-All routes are under `/api` and need `Authorization: Bearer <MEGIT_API_KEY>` (or `?key=` for
-WebSockets, or the UI's session cookie). Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
+All routes are under `/api`. Callers are a signed-in user (Better Auth session cookie; writes must come
+from the same origin), a user's personal access token (`Authorization: Bearer megit_pat_…`, or `?key=` for
+WebSockets), the admin key (`Bearer <MEGIT_API_KEY>`), or anonymous.
+
+User repositories live at `/repos/:owner/:repo`, and every per-repository route below works there with
+the same suffix (`/repos/ada/hello/log`, `/repos/ada/hello/tasks`, …). Reads need read access (public, or
+the owner); anything else needs the owner. A private repository someone can't read is a 404. The
+`/projects/:p` routes address repositories by internal name and need the admin key.
+
+| Method | Path | Body / query | Returns |
+| --- | --- | --- | --- |
+| POST | `/auth/sign-up/email` | `{ email, password, name, username }` | Better Auth; sets the session cookie |
+| POST | `/auth/sign-in/username` | `{ username, password }` | Better Auth; sets the session cookie |
+| POST | `/auth/sign-out` | | clears it |
+| POST | `/auth/request-password-reset` | `{ email, redirectTo: "/reset-password" }` | always the same answer; emails a one-hour link if the account exists |
+| POST | `/auth/reset-password` | `{ token, newPassword }` | sets the password, signs out every session |
+| POST | `/auth/change-password` | `{ currentPassword, newPassword, revokeOtherSessions? }` | signed in |
+| POST | `/auth/send-verification-email` | `{ email, callbackURL: "/verify-email" }` | resends the verification link |
+| GET | `/config` | | `{ emailDelivery, verificationRequired }` |
+| POST | `/admin/password-reset` | `{ username }` or `{ email }` | `{ url }`: a reset link to hand over (admin key) |
+| POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
+| GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
+| GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
+| GET | `/repos` | `?owner=&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
+| POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, readme? }` | `{ repo, project }` (signed-in users) |
+| GET | `/repos/:owner/:repo` | | `{ project, repo }` |
+| PATCH | `/repos/:owner/:repo` | `{ visibility?, description? }` | `{ repo }` (owner) |
+| DELETE | `/repos/:owner/:repo` | | deletes it, its forks and state (owner) |
+
+Admin and per-repository routes: Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
 shapes are the types in [`src/api.ts`](src/api.ts).
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
-| POST | `/session` | `{ key }` | sets the UI's session cookie (no auth needed) |
-| DELETE | `/session` | | clears it |
 | GET | `/projects` | | `{ projects: Project[] }` |
-| POST | `/projects` | `{ name, description?, defaultBranch?, importUrl?, importBranch?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
+| POST | `/projects` | `{ name, description?, defaultBranch? (default `master`), importUrl?, importBranch?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
 | GET | `/projects/:p` | | `{ project: Project }` (head, per-status counts, queue length) |
 | DELETE | `/projects/:p` | | deletes repo, forks, and state |
 | GET | `/projects/:p/tasks` | `?status=` | `{ tasks: Task[] }` newest first |
@@ -158,21 +220,51 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | GET | `/projects/:p/log` | `?ref=&limit=` | `{ commits: Commit[] }` first-parent history |
 | GET | `/projects/:p/tree` | `?ref=&path=` | `{ tree: Tree }` directory listing, same refs as files |
 | GET | `/projects/:p/files/<path>` | `?ref=` | raw file; `ref` is a branch/commit or `task:<id>` |
+| GET | `/projects/:p/raw` | `?path=&ref=&download` | the file's bytes with its content type (sandboxed, `nosniff`); `download` forces a download |
+| GET | `/projects/:p/archive` | `?ref=&format=zip\|tar.gz` | the whole tree at `ref`, streamed |
+| GET | `/projects/:p/commits/:hash` | `?ref=` (`task:<id>` for fork commits) | `{ commit: CommitDetail, diff: Diff }` against the first parent |
+| GET | `/projects/:p/compare` | `?base=&head=` | `{ comparison: Comparison }`: commits on `head` since its merge base with `base`, and their diff |
+| GET | `/projects/:p/tasks/:id/changes` | | `{ comparison }` for the task: its fork against the default branch, or what it merged |
+| GET | `/projects/:p/branches` | `?counts=0` skips ahead/behind | `Branches`: project branches and active task forks |
+| DELETE | `/projects/:p/branches/<name>` | | deletes a branch (not the default one) |
 
 Event types: `project.created`, `task.created`, `task.ready` (repo, remote, baseOid, forkAttempts),
 `task.submitted`, `task.merging`, `task.merged`,
 `task.conflict` (files, withTasks), `task.failed` (code, message), `task.abandoned`,
 `main.advanced` (from, to, fastForward, changedFiles).
 
+## QA against real repositories
+
+`npm run qa:github` mirrors six small public GitHub repositories into a running megit, the way someone
+moving over would: `git push --all` and `--tags` with a personal access token (one goes through
+"Import from URL" instead). Then it checks:
+
+- every branch and tag against GitHub's
+- a clone back from megit, which must pass `git fsck` and keep the full history
+- that anonymous clones work for public repositories and are refused for private ones
+- that the API agrees with git: head, history, root tree, branches, README, a raw file, and a zip
+  archive with every file
+- that a follow-up push lands
+
+It signs up a throwaway user unless `MEGIT_USER` and `MEGIT_TOKEN` are set, deletes what it creates
+(`KEEP=1` keeps it), and works against production with `MEGIT_URL`.
+
 ## Layout
 
 ```
 cloudflare.config.ts  Worker config (bindings, Durable Objects) for the cf CLI
-app/server.ts         Worker entry: /api/* to the API, everything else to the UI
+app/server.ts         Worker entry: git smart HTTP, /api/* to the API, everything else to the UI
 app/routes/           UI pages (TanStack Start file routes); app/lib/live.ts streams project events
-src/index.ts          API: routing, auth, errors
+src/index.ts          API: routing, permissions, errors
+src/auth.ts           Better Auth, personal access tokens, who-may-do-what
+src/policy.ts         Rate limits (Limiter DO), quotas, email verification policy
+src/db.ts             D1 schema (created on first use), repositories, tokens
+src/git-http.ts       git clone/fetch/push at /<owner>/<repo>.git, proxied to Artifacts
 src/project.ts        ProjectCoordinator DO (tasks, fork + merge queues, events, WebSocket) + Registry DO
 src/git/workspace.ts  In-memory git workspace: fetch, 3-way merge, changed files, push
+src/git/diff.ts       Tree diffs and merge-base walks over the Artifacts object reads
+src/git/protocol.ts   Branch listing and deletion over Git smart HTTP (the binding has no ref API)
+src/archive.ts        Streaming .tar.gz / .zip of a tree
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
@@ -183,7 +275,8 @@ test/e2e/             the Worker under vite dev against the local stand-in with 
 
 ```sh
 npm test             # merge engine (needs git)
-npm run test:e2e     # coordinator end to end: fork throttling, retries, provisioning (~10s)
+npm run test:e2e     # end to end: accounts, git push/clone permissions, fork throttling, retries (~25s)
+npm run qa:github    # mirrors small public GitHub repos into a running megit and checks everything (see below)
 npm run typecheck
 ```
 
@@ -201,11 +294,17 @@ npm run typecheck
 
 ## Not done yet
 
+- Collaborators and organizations: a repository has one owner, who is the only one who can push.
+- Password reset and verification emails need a sending domain (see Passwords above).
+- Repository sizes are the bytes pushed (packs as sent), not what Artifacts stores after packing, and
+  imports aren't counted.
+- SSH remotes and Git LFS: HTTPS with personal access tokens only.
+- Pull requests and reviews for people (agents already land work through the merge queue).
 - Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).
-- Artifacts push event subscriptions (auto-submit on push, live "agent pushed" events).
-- Per-agent identities and tokens instead of one shared API key, and real user accounts for the UI
-  (Better Auth) instead of signing in with that key.
-- Diffs in the UI (it lists changed files and shows file contents, but not line-level changes yet).
+- Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's
+  Git URL already emit `repo.pushed`.
+- Per-agent identities: agents act as their owner's personal access token (or the admin key), not as
+  accounts of their own.
 - Stacked tasks (a task based on another unmerged task) and splitting merges into batches.
 - Large repos: the coordinator keeps an in-memory clone, so repos near the 128 MB Worker memory
   limit need ArtifactFS or a Sandbox-backed merge.

@@ -79,6 +79,7 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 	const remote = (name: string) => `${baseUrl}/git/${namespace}/${name}.git`;
 	const info = (meta: RepoMeta) => ({ ...meta, remote: remote(meta.name) });
 	const git = (args: string[], cwd?: string) => exec("git", args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+	const gitBytes = (args: string[], cwd?: string) => exec("git", args, { cwd, maxBuffer: 64 * 1024 * 1024, encoding: "buffer" });
 
 	function issueToken(repo: string, scope: "read" | "write", ttl = 86400) {
 		const record: TokenRecord = {
@@ -241,8 +242,18 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 		async "GET /repos/:name/file"(_b, params, name) {
 			requireRepo(name);
 			try {
-				const { stdout } = await git(["show", `${params.get("ref")}:${params.get("path")}`], repoPath(name));
-				return { content: stdout };
+				const file = String(params.get("path"));
+				const { stdout } = await gitBytes(["show", `${params.get("ref")}:${file}`], repoPath(name));
+				return { content: stdout.toString("base64"), type: contentType(file, stdout) };
+			} catch {
+				return null;
+			}
+		},
+		async "GET /repos/:name/blob"(_b, params, name) {
+			requireRepo(name);
+			try {
+				const { stdout } = await gitBytes(["cat-file", "blob", String(params.get("hash"))], repoPath(name));
+				return { content: stdout.toString("base64") };
 			} catch {
 				return null;
 			}
@@ -355,6 +366,15 @@ function treeEntryType(mode: string): string {
 	if (mode === "120000") return "symlink";
 	if (mode === "160000") return "gitlink";
 	return "blob";
+}
+
+const IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml" };
+
+/** Roughly what Artifacts' readFile reports: an image type by extension, else text or binary. */
+function contentType(path: string, bytes: Buffer): string {
+	const image = IMAGE_TYPES[path.split(".").pop()?.toLowerCase() ?? ""];
+	if (image) return image;
+	return bytes.subarray(0, 8000).includes(0) ? "application/octet-stream" : "text/plain;charset=utf-8";
 }
 
 function readBody(req: IncomingMessage): Promise<Buffer> {

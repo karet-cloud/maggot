@@ -2,20 +2,23 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowLeft, Bot, FileCode2, Send, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
+import { CommitList } from "../components/commits.tsx";
+import { DiffView } from "../components/diff.tsx";
 import { EventRow } from "../components/events.tsx";
 import { Connect } from "../components/new-task.tsx";
 import { Button, ErrorNote, Oid, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
-import { api, keys, type Task } from "../lib/api.ts";
+import { api, keys, type Task, repoParams } from "../lib/api.ts";
 import { duration } from "../lib/format.ts";
 import { useLive } from "../lib/live.ts";
 
-export const Route = createFileRoute("/p/$project/t/$task")({ component: TaskPage });
+export const Route = createFileRoute("/$owner/$repo/t/$task")({ component: TaskPage });
 
 const SUBMITTABLE: Task["status"][] = ["open", "conflict", "failed"];
 const ABANDONABLE: Task["status"][] = ["provisioning", "open", "queued", "conflict", "failed"];
 
 function TaskPage() {
-	const { project, task: id } = Route.useParams();
+	const { owner, repo, task: id } = Route.useParams();
+	const project = `${owner}/${repo}`;
 	const queryClient = useQueryClient();
 	const task = useQuery({ queryKey: keys.task(project, id), queryFn: () => api.task(project, id) });
 	const { events } = useLive();
@@ -25,6 +28,15 @@ function TaskPage() {
 	};
 	const submit = useMutation({ mutationFn: () => api.submit(project, id), onSuccess: onChange });
 	const abandon = useMutation({ mutationFn: () => api.abandon(project, id), onSuccess: onChange });
+	const status = task.data?.status;
+	const hasChanges = status !== undefined && status !== "provisioning" && (status !== "abandoned" || Boolean(task.data?.mergedOid));
+	const changes = useQuery({
+		queryKey: keys.taskChanges(project, id),
+		queryFn: () => api.taskChanges(project, id),
+		enabled: hasChanges,
+		// Agents push without telling the coordinator; re-read while the fork is live.
+		refetchInterval: status === "open" || status === "conflict" ? 15_000 : false,
+	});
 
 	if (task.isPending) return <Spinner />;
 	if (task.error) return <ErrorNote error={task.error} />;
@@ -36,7 +48,7 @@ function TaskPage() {
 
 	return (
 		<div className="space-y-4">
-			<Link to="/p/$project" params={{ project }} className="inline-flex items-center gap-1 text-xs text-dim hover:text-fg">
+			<Link to="/$owner/$repo/agents" params={repoParams(project)} className="inline-flex items-center gap-1 text-xs text-dim hover:text-fg">
 				<ArrowLeft className="size-3.5" />
 				Board
 			</Link>
@@ -94,7 +106,7 @@ function TaskPage() {
 							{t.conflict.withTasks.map((w, i) => (
 								<span key={w}>
 									{i > 0 && ", "}
-									<Link to="/p/$project/t/$task" params={{ project, task: w }} className="font-mono text-accent hover:underline">
+									<Link to="/$owner/$repo/t/$task" params={{ ...repoParams(project), task: w }} className="font-mono text-accent hover:underline">
 										{w}
 									</Link>
 								</span>
@@ -138,6 +150,27 @@ function TaskPage() {
 					)}
 				</Panel>
 
+				<Panel title={`Commits${changes.data ? ` (${changes.data.commits.length}${changes.data.capped ? "+" : ""})` : ""}`}>
+					{!hasChanges ? (
+						<p className="px-4 py-6 text-center text-xs text-faint">{t.status === "provisioning" ? "Waiting for the fork." : "The fork was deleted."}</p>
+					) : changes.isPending ? (
+						<Spinner className="m-4" />
+					) : changes.error ? (
+						<div className="p-3">
+							<ErrorNote error={changes.error} />
+						</div>
+					) : changes.data.commits.length === 0 ? (
+						<p className="px-4 py-6 text-center text-xs text-faint">No commits yet. The agent's pushes show up here.</p>
+					) : (
+						<div className="max-h-80 overflow-y-auto">
+							<CommitList commits={changes.data.commits} project={project} refName={t.mergedOid ? undefined : `task:${id}`} />
+						</div>
+					)}
+				</Panel>
+			</div>
+
+			{changes.data && <DiffView diff={changes.data.diff} project={project} viewRef={fileRef} title="Files changed" />}
+			{!changes.data && t.changedFiles.length > 0 && (
 				<Panel title={`Changed files${t.changedFiles.length ? ` (${t.changedFiles.length})` : ""}`}>
 					{t.changedFiles.length === 0 ? (
 						<p className="px-4 py-6 text-center text-xs text-faint">Known once the task is submitted.</p>
@@ -147,8 +180,8 @@ function TaskPage() {
 								<li key={f}>
 									{canBrowse ? (
 										<Link
-											to="/p/$project/code"
-											params={{ project }}
+											to="/$owner/$repo"
+											params={repoParams(project)}
 											search={{ ref: fileRef, path: f.split("/").slice(0, -1).join("/") || undefined, file: f }}
 											className="flex items-center gap-2 px-4 py-1.5 font-mono text-xs text-dim hover:bg-raised hover:text-fg"
 										>
@@ -163,7 +196,7 @@ function TaskPage() {
 						</ul>
 					)}
 				</Panel>
-			</div>
+			)}
 
 			<Panel title="Timeline">
 				{timeline.length === 0 ? (

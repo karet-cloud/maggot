@@ -2,8 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Terminal } from "lucide-react";
 import { useState } from "react";
-import { api, keys, type TaskAccess } from "../lib/api.ts";
-import { authUrl } from "./repo-access.tsx";
+import { api, keys, type TaskAccess, repoParams } from "../lib/api.ts";
+import { authUrl, sh } from "./repo-access.tsx";
 import { Button, CopyField, ErrorNote, Field, Input, Spinner, StatusBadge } from "./ui.tsx";
 
 export function NewTask({ project, onClose }: { project: string; onClose: () => void }) {
@@ -96,7 +96,7 @@ function Created({ project, created, onClose }: { project: string; created: Task
 				<Connect project={project} taskId={id} />
 			)}
 			<div className="flex justify-end gap-2">
-				<Link to="/p/$project/t/$task" params={{ project, task: id }} onClick={onClose} className="text-sm text-accent hover:underline">
+				<Link to="/$owner/$repo/t/$task" params={{ ...repoParams(project), task: id }} onClick={onClose} className="text-sm text-accent hover:underline">
 					Open task →
 				</Link>
 			</div>
@@ -126,11 +126,11 @@ export function Connect({ project, taskId }: { project: string; taskId: string }
 		<div className="space-y-3 text-xs">
 			<div className="space-y-1.5">
 				<p className="text-dim">Clone the task's fork (read/write)</p>
-				<CopyField value={`git clone ${authUrl(fork)} ${project}-${taskId}`} secret={forkSecret} />
+				<CopyField value={`git clone ${sh(authUrl(fork))} ${sh(`${project}-${taskId}`)}`} secret={forkSecret} />
 			</div>
 			<div className="space-y-1.5">
 				<p className="text-dim">Sync with the latest {base.branch} (read-only)</p>
-				<CopyField value={`git pull ${authUrl(base)} ${base.branch}`} secret={baseSecret} />
+				<CopyField value={`git pull ${sh(authUrl(base))} ${sh(base.branch)}`} secret={baseSecret} />
 			</div>
 			<p className="text-faint">
 				Tokens expire {new Date(fork.expiresAt).toLocaleString()}. Push to the fork, then submit it for merge.
