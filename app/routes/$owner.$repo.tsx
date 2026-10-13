@@ -189,7 +189,8 @@ function ForkDialog({ project, repo, onClose }: { project: string; repo: RepoInf
 	const needsVerification = useNeedsVerification();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const [name, setName] = useState(repo.name);
+	// Forking your own repository needs another name.
+	const [name, setName] = useState(repo.canWrite ? `${repo.name}-fork` : repo.name);
 	const fork = useMutation({
 		mutationFn: () => api.fork(project, name.trim()),
 		onSuccess: (created) => {

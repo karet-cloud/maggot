@@ -20,7 +20,7 @@ import {
 } from "./api.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, walkToMainline, type ObjectReader } from "./git/diff.ts";
-import { commitChanges, PathError, type FileChange } from "./git/commit.ts";
+import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
 import { deleteBranch, listBranches, RefUpdateRejected } from "./git/protocol.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
@@ -57,18 +57,21 @@ export interface CreateProjectInput {
 	importBranch?: string;
 	/** The README's heading, when the project name is an internal id. */
 	title?: string;
-	/** Fork this repository (an Artifacts repo name) with all of its branches and tags. */
-	forkFrom?: string;
+	/** The repository was already forked into `name` (by the source's coordinator); take it over. */
+	forked?: boolean;
 	/** Seed a README so the repo starts with a commit (default true). Leave it out to push an existing repo. */
 	readme?: boolean;
 }
 
 export interface CommitFilesInput {
+	/** The pack may be at most this big (the push limit, or the room left). */
+	maxPackBytes: number;
 	branch: string;
 	/** The branch head the edit started from; null for an empty repository. */
 	baseCommit?: string | null;
 	newBranch?: string;
-	changes: FileChange[];
+	/** `modeFrom`: the path whose mode the file takes (a rename). */
+	changes: (FileChange & { modeFrom?: string })[];
 	message: string;
 	author: Identity;
 }
@@ -77,6 +80,8 @@ export interface CommitFilesInput {
 export function validBranchName(name: string): boolean {
 	return (
 		/^[A-Za-z0-9._/-]{1,200}$/.test(name) &&
+		name !== "HEAD" &&
+		!name.startsWith("-") &&
 		!name.split("/").some((part) => part === "" || part.startsWith(".") || part.endsWith(".lock")) &&
 		!name.includes("..") &&
 		!name.endsWith(".")
@@ -182,9 +187,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
 		try {
 			created = await retrying(async () => {
-				if (input.forkFrom) {
-					using source = await this.store.get(input.forkFrom);
-					return source.fork(input.name, { description: input.description, defaultBranchOnly: false });
+				if (input.forked) {
+					await this.waitReady(input.name);
+					using repo = await this.store.get(input.name);
+					const [info, token] = await Promise.all([repo.info(), repo.createToken("write", INTERNAL_TOKEN_TTL)]);
+					return { ...info, token: token.plaintext };
 				}
 				return input.importUrl
 					? this.store.import({
@@ -208,7 +215,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			using repo = await this.store.get(created.name);
 			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
 		})();
-		if (empty && !input.importUrl && !input.forkFrom && input.readme !== false) {
+		if (empty && !input.importUrl && !input.forked && input.readme !== false) {
 			const seed = new Workspace(created.defaultBranch, MERGE_IDENTITY);
 			await seed.seed(
 				{ url: created.remote, token: created.token },
@@ -225,7 +232,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			createdAt: new Date().toISOString(),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
-		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forkFrom) });
+		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forked) });
 		return this.getProject();
 	}
 
@@ -488,12 +495,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		}
 		using repo = await this.store.get(meta.name);
 		const parent = head ? await resolveCommit(repo, head) : null;
+		const changes = await Promise.all(
+			input.changes.map(async ({ modeFrom, ...change }) => {
+				if (!modeFrom || !parent) return change;
+				const source = await entryAt(repo, parent.treeHash, modeFrom);
+				return { ...change, executable: source?.type === "exec", create: true };
+			}),
+		);
 		try {
 			const result = await commitChanges(repo, access, {
 				branch: target,
 				parent: parent ? { hash: parent.hash, treeHash: parent.treeHash } : null,
 				create: input.newBranch !== undefined || !head,
-				changes: input.changes,
+				maxPackBytes: input.maxPackBytes,
+				changes,
 				message: input.message,
 				author: input.author,
 				time: Math.floor(Date.now() / 1000),
@@ -502,8 +517,33 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			return { commit: result.commit, branch: target, packBytes: result.packBytes };
 		} catch (err) {
 			if (err instanceof PathError) throw new HttpError(400, "INVALID_PATH", err.message);
+			if (err instanceof NoChanges) throw new HttpError(400, "NO_CHANGES", "Nothing changed, so there's nothing to commit");
+			if (err instanceof TooLarge) throw new HttpError(413, "TOO_LARGE", `${err.message}; push it with git, or make room under the size limits`);
 			if (err instanceof RefUpdateRejected) throw new HttpError(409, "BRANCH_MOVED", `${target} changed while committing; reload and try again`);
 			throw err;
+		}
+	}
+
+	/**
+	 * Forks this repository, with every branch and tag, into a new Artifacts repo `name` for someone's
+	 * fork. It goes through the same fork queue as agent tasks, since Artifacts fails concurrent forks
+	 * of one repo. A failed attempt's name may be half-created, so it's queued for deletion and the
+	 * caller starts over with a new name.
+	 */
+	async forkInto(name: string, description?: string): Promise<void> {
+		const meta = this.meta();
+		try {
+			await this.forkSlots.run(() =>
+				retrying(async () => {
+					using source = await this.store.get(meta.name);
+					await source.fork(name, { description, defaultBranchOnly: false });
+				}),
+			);
+			await this.waitReady(name);
+		} catch (err) {
+			await this.queueCleanup(name);
+			const e = toHttpError(err);
+			throw new HttpError(e.status >= 500 || FORK_RETRYABLE.has(e.code) ? 503 : e.status, "FORK_FAILED", `Couldn't fork ${meta.name}; try again (${e.detail})`);
 		}
 	}
 
@@ -1127,6 +1167,20 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
 		const e = toHttpError(err);
 		throw new HttpError(e.status, e.code, `${name}: ${e.detail}`);
 	}
+}
+
+/** The tree entry at `path` under the root tree `tree`, or null. */
+async function entryAt(repo: ObjectReader, tree: string, path: string) {
+	const parts = path.split("/");
+	let hash = tree;
+	for (const [i, part] of parts.entries()) {
+		const entry = (await repo.readTree(hash))?.find((e) => e.name === part);
+		if (!entry) return null;
+		if (i === parts.length - 1) return entry;
+		if (entry.type !== "tree") return null;
+		hash = entry.hash;
+	}
+	return null;
 }
 
 /** Reads a commit by full hash, or the tip of a branch or tag. */

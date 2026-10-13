@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitBranch, GitCommitHorizontal } from "lucide-react";
-import { useEffect, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
@@ -31,18 +31,24 @@ function Editor() {
 	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
 	const branch = ref ?? info.data?.defaultBranch;
 	const parentDir = editing ? editing.split("/").slice(0, -1).join("/") : (dir ?? "");
-	// The commit the edit starts from; the server refuses the commit if the branch has moved since.
+	// The commit the edit starts from, fixed for this editing session: the file is read at that commit,
+	// and the server refuses the commit if the branch has moved since. These queries sit outside the
+	// repository's keys, so live updates never move the base under an open draft.
+	const [session] = useState(() => crypto.randomUUID());
 	const base = useQuery({
-		queryKey: [...keys.code(project), "edit-base", branch ?? "", parentDir],
+		queryKey: ["edit", project, session, "base"],
 		queryFn: () => api.tree(project, parentDir, branch),
 		enabled: Boolean(branch),
 		staleTime: Infinity,
+		gcTime: 0,
 	});
+	const baseCommit = base.data?.commit ?? null;
 	const original = useQuery({
-		queryKey: [...keys.code(project), "edit-file", branch ?? "", editing ?? ""],
-		queryFn: () => api.file(project, editing as string, branch),
-		enabled: Boolean(editing && branch),
+		queryKey: ["edit", project, session, "file", baseCommit],
+		queryFn: () => api.file(project, editing as string, baseCommit ?? branch),
+		enabled: Boolean(editing && branch && base.data),
 		staleTime: Infinity,
+		gcTime: 0,
 	});
 
 	const [path, setPath] = useState(editing ?? (dir ? `${dir}/` : ""));
@@ -50,26 +56,38 @@ function Editor() {
 	const [message, setMessage] = useState("");
 	const [target, setTarget] = useState<"same" | "new">("same");
 	const [newBranch, setNewBranch] = useState("");
+	// Text areas turn every line ending into \n; a file that used \r\n gets them back on commit.
+	const [eol, setEol] = useState("\n");
 	useEffect(() => {
-		if (original.data !== undefined && content === null) setContent(original.data);
+		if (original.data === undefined || content !== null) return;
+		setEol(/\r\n/.test(original.data) ? "\r\n" : "\n");
+		setContent(original.data);
 	}, [original.data, content]);
+	const seeded = useRef(false);
 	useEffect(() => {
-		if (viewer.data && !newBranch) setNewBranch(`${viewer.data.username}-patch-1`);
-	}, [viewer.data, newBranch]);
+		if (viewer.data && !seeded.current) {
+			seeded.current = true;
+			setNewBranch(`${viewer.data.username}-patch-1`);
+		}
+	}, [viewer.data]);
 
 	const cleanPath = path.trim().replace(/^\/+|\/+$/g, "");
 	const renamed = Boolean(editing && cleanPath !== editing);
 	const defaultMessage = editing ? (renamed ? `Rename ${editing} to ${cleanPath}` : `Update ${editing}`) : `Create ${cleanPath || "file"}`;
 	const tooBig = content !== null && new TextEncoder().encode(content).length > MAX_EDIT_BYTES;
+	const unchanged = Boolean(editing) && !renamed && original.data !== undefined && content?.replace(/\r?\n/g, eol) === original.data;
 
 	const commit = useMutation({
 		mutationFn: () =>
 			api.commitFiles(project, {
 				branch: branch as string,
-				baseCommit: base.data?.commit ?? null,
+				baseCommit,
 				newBranch: target === "new" ? newBranch.trim() : undefined,
 				message: message.trim() || defaultMessage,
-				files: [...(renamed ? [{ path: editing as string, content: null }] : []), { path: cleanPath, content: content ?? "" }],
+				files: [
+					...(renamed ? [{ path: editing as string, content: null }] : []),
+					{ path: cleanPath, content: (content ?? "").replace(/\r?\n/g, eol), previousPath: renamed ? editing : undefined },
+				],
 			}),
 		onSuccess: async (result) => {
 			await queryClient.invalidateQueries({ queryKey: ["project", project] });
@@ -153,7 +171,7 @@ function Editor() {
 							<GitBranch className="size-4 text-faint" />
 							Create a new branch
 							{target === "new" && (
-								<Input value={newBranch} onChange={(e) => setNewBranch(e.target.value)} className="ml-1 w-64 font-mono" required pattern="[A-Za-z0-9._/\-]+" />
+								<Input value={newBranch} onChange={(e) => setNewBranch(e.target.value)} className="ml-1 w-64 font-mono" required pattern="[A-Za-z0-9._\/\-]+" />
 							)}
 						</label>
 					</fieldset>
@@ -173,7 +191,7 @@ function Editor() {
 						>
 							Cancel
 						</Link>
-						<Button type="submit" variant="primary" busy={commit.isPending} disabled={!cleanPath || tooBig || needsVerification || !base.data}>
+						<Button type="submit" variant="primary" busy={commit.isPending} disabled={!cleanPath || tooBig || unchanged || needsVerification || !base.data} title={unchanged ? "Nothing has changed yet" : undefined}>
 							Commit changes
 						</Button>
 					</div>

@@ -111,7 +111,14 @@ export const api = {
 	/** Commits files from the web editor; `content: null` deletes a file. */
 	commitFiles: (
 		project: string,
-		input: { branch: string; baseCommit: string | null; newBranch?: string; message: string; files: { path: string; content: string | null }[] },
+		input: {
+			branch: string;
+			baseCommit: string | null;
+			newBranch?: string;
+			message: string;
+			/** `previousPath`: the file this one was renamed from, whose mode it keeps. */
+			files: { path: string; content: string | null; previousPath?: string }[];
+		},
 	) => call<{ commit: string; branch: string }>("POST", `${p(project)}/contents`, input),
 	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
 	forks: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/forks`).then((r) => r.repos),
