@@ -194,7 +194,8 @@ export const api = {
 		call<{ pull: Pull }>("POST", `${p(project)}/pulls`, input).then((r) => r.pull),
 	review: (project: string, number: number, input: { state: ReviewState; body: string; commit?: string; comments: { path: string; line: number; side: "new" | "old"; body: string }[] }) =>
 		call<{ review: string }>("POST", `${p(project)}/pulls/${number}/reviews`, input),
-	mergePull: (project: string, number: number, method: MergeMethod) => call<{ pull: Pull; commit: string }>("POST", `${p(project)}/pulls/${number}/merge`, { method }),
+	mergePull: (project: string, number: number, method: MergeMethod, expectedHead?: string) =>
+		call<{ pull: Pull; commit: string }>("POST", `${p(project)}/pulls/${number}/merge`, { method, expectedHead }),
 	myOrgs: () => call<{ orgs: { name: string; displayName: string; role: OrgRole }[] }>("GET", "/orgs").then((r) => r.orgs),
 	createOrg: (name: string, displayName: string) => call<{ org: Org }>("POST", "/orgs", { name, displayName }).then((r) => r.org),
 	org: (name: string) => call<{ org: Org }>("GET", `/orgs/${encodeURIComponent(name)}`).then((r) => r.org),

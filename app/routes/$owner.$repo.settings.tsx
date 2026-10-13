@@ -87,7 +87,7 @@ function RepoSettings() {
 			<Webhooks project={project} archived={archived} />
 			<Panel title="Danger zone" className="border-red-500/30">
 				<div className="divide-y divide-line">
-					<Transfer project={project} />
+					{current.isOwner && <Transfer project={project} />}
 					<div className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
 						{archived ? (
 							<p className="min-w-0 flex-1 text-dim">
@@ -109,13 +109,17 @@ function RepoSettings() {
 							{archived ? "Unarchive" : "Archive"}
 						</Button>
 					</div>
-					<div className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
-						<p className="min-w-0 flex-1 text-dim">Delete the repository, its history, every agent fork, and all task records. This can't be undone.</p>
-						<Button variant="danger" busy={remove.isPending} onClick={() => prompt(`Type ${project} to delete it`) === project && remove.mutate()}>
-							<Trash2 className="size-4" />
-							Delete
-						</Button>
-					</div>
+					{current.isOwner ? (
+						<div className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
+							<p className="min-w-0 flex-1 text-dim">Delete the repository, its history, every agent fork, and all task records. This can't be undone.</p>
+							<Button variant="danger" busy={remove.isPending} onClick={() => prompt(`Type ${project} to delete it`) === project && remove.mutate()}>
+								<Trash2 className="size-4" />
+								Delete
+							</Button>
+						</div>
+					) : (
+						<p className="p-4 text-sm text-dim">Only {current.owner} (or its owners, for an organization) can transfer or delete this repository.</p>
+					)}
 				</div>
 				<div className="px-4 pb-3">
 					<ErrorNote error={remove.error} />
