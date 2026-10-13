@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Bot, GitBranch, GitCompareArrows, ShieldCheck, Trash2 } from "lucide-react";
-import { protectionFor } from "../../src/protection.ts";
+import { protectionFor } from "../../src/branch-rules.ts";
 import type { ReactNode } from "react";
 import { Button, Empty, ErrorNote, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type BranchSummary, repoParams } from "../lib/api.ts";
@@ -18,6 +18,10 @@ function BranchesPage() {
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
 	const rules = useQuery({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
 	const protectedBranch = (name: string) => protectionFor(rules.data ?? [], name).patterns.length > 0;
+	const deletable = (name: string) => {
+		const p = protectionFor(rules.data ?? [], name);
+		return !p.blockDeletions && !p.requireMergeQueue;
+	};
 	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
 	const remove = useMutation({ mutationFn: (name: string) => api.deleteBranch(project, name), onSuccess: refresh });
 	const abandon = useMutation({
@@ -61,7 +65,7 @@ function BranchesPage() {
 									scale={scale}
 									protectedBranch={protectedBranch(b.name)}
 									actions={
-										writable && !protectionFor(rules.data ?? [], b.name).blockDeletions && !protectionFor(rules.data ?? [], b.name).requireMergeQueue && <Button
+										writable && deletable(b.name) && <Button
 											variant="ghost"
 											className="px-2 text-xs hover:text-red-300"
 											busy={remove.isPending && remove.variables === b.name}

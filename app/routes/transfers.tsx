@@ -31,8 +31,9 @@ function Transfers() {
 			<div>
 				<h1 className="text-lg font-semibold">Repository transfers</h1>
 				<p className="mt-1 text-sm text-dim">
-					Repositories other people want to hand to you. Accepting moves the repository, its history, stars and webhooks into your account,
-					and counts it against your quota; the old address keeps working.
+					Repositories other people want to hand to you. Accepting moves the repository, its history, issues and stars into your account,
+					and counts it against your quota; the old address keeps working. Its webhooks come along paused, since they point at the
+					previous owner's endpoints.
 				</p>
 			</div>
 			{list.isPending && <Spinner />}

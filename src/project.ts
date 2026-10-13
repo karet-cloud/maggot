@@ -31,8 +31,8 @@ import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
-import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef } from "./git/protocol.ts";
-import { protectionFor, validPattern } from "./protection.ts";
+import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef, type TagRef } from "./git/protocol.ts";
+import { protectionFor, validPattern } from "./branch-rules.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
@@ -143,6 +143,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
 	private readToken: { token: string; expires: number } | undefined;
+	/** Tags as last listed, for resolving tag names; the announced set is in meta. */
+	private tagCache: { tags: Record<string, string>; at: number } | undefined;
 	/** Once the default branch has a commit it always will; skips re-checking on every task. */
 	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
@@ -195,6 +197,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				created_at TEXT NOT NULL,
 				updated_at TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS commit_summaries (hash TEXT PRIMARY KEY, summary TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS graph_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS branch_rules (
 				pattern TEXT PRIMARY KEY,
 				block_deletions INTEGER NOT NULL,
@@ -301,6 +305,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { url: meta.remote, token: this.readToken.token };
 	}
 
+	/** What a push needs: write access to the repository and its branch rules, in one round trip. */
+	async pushContext(): Promise<{ remote: RemoteAccess; rules: BranchRule[] }> {
+		return { remote: await this.gitRemote("write"), rules: this.branchRules() };
+	}
+
 	/** Called after a push through the Git proxy: records the new head so live views refresh. */
 	async pushed(): Promise<void> {
 		const meta = this.meta();
@@ -312,7 +321,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			.filter((branch) => before[branch] !== now[branch])
 			.map((branch) => ({ branch, from: before[branch] ?? null, to: now[branch] ?? null }));
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(now));
-		this.recordTags(Object.fromEntries([...listed.tags].map(([name, t]) => [name, t.commit])), true);
+		this.recordTags(tagCommits(listed.tags));
 		const head = now[meta.defaultBranch] ?? null;
 		if (head) this.hasCommits = true;
 		const main = refs.find((r) => r.branch === meta.defaultBranch);
@@ -336,13 +345,44 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return row ? JSON.parse(row.value) : {};
 	}
 
-	/** Records the tags; with `announce`, tags that appeared or went away become events (and push webhooks). */
-	private recordTags(now: Record<string, string>, announce: boolean) {
+	/**
+	 * Records the tags after a change: those that appeared or went away become events (and push
+	 * webhooks). The first time, there's nothing to compare with, so they're only recorded; a
+	 * repository's existing tags aren't news.
+	 */
+	private recordTags(now: Record<string, string>) {
+		const seen = this.sql.exec("SELECT 1 FROM meta WHERE key = 'tags'").toArray().length > 0;
 		const before = this.knownTags();
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('tags', ?)", JSON.stringify(now));
-		if (!announce) return;
+		this.tagCache = { tags: now, at: Date.now() };
+		if (!seen) return;
 		for (const name of Object.keys(now)) if (before[name] !== now[name]) this.emit("tag.created", null, { tag: name, commit: now[name], from: before[name] ?? null });
 		for (const name of Object.keys(before)) if (!(name in now)) this.emit("tag.deleted", null, { tag: name, commit: before[name] });
+	}
+
+	/**
+	 * Tags read for a listing: kept for resolving tag names in URLs, but not recorded as seen (unless
+	 * nothing ever was), so a tag pushed a moment ago still gets its event when the push is recorded.
+	 */
+	private observeTags(now: Record<string, string>) {
+		this.tagCache = { tags: now, at: Date.now() };
+		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'tags'").toArray().length === 0) {
+			this.sql.exec("INSERT INTO meta (key, value) VALUES ('tags', ?)", JSON.stringify(now));
+		}
+	}
+
+	/**
+	 * resolveRef, after looking the refs up again if `ref` isn't a branch or tag seen yet (a tag that
+	 * predates megit tracking them, typed into a URL). At most every few seconds.
+	 */
+	private async freshRef(ref: string): Promise<{ repoName: string; ref: string }> {
+		const meta = this.meta();
+		const known = ref.startsWith("task:") || /^[0-9a-f]{40}$/.test(ref) || ref in this.knownRefs(meta) || ref in this.knownTags() || (this.tagCache && ref in this.tagCache.tags);
+		if (!known && (!this.tagCache || this.tagCache.at < Date.now() - 5_000)) {
+			const { tags } = await listRefs(await this.baseAccess(meta));
+			this.observeTags(tagCommits(tags));
+		}
+		return this.resolveRef(ref);
 	}
 
 	private recordRef(meta: Meta, branch: string, oid: string) {
@@ -390,6 +430,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	// ── Webhooks ─────────────────────────────────────────────────────────────
 
 	/** How payloads name this repository; set by the API when a user repository is created. */
+	/**
+	 * After a transfer: the old owner's webhook endpoints shouldn't keep hearing about a repository
+	 * they may no longer see, so every hook is paused until the new owner turns it back on.
+	 */
+	async pauseHooks(): Promise<number> {
+		this.meta();
+		return this.hooks.pauseAll();
+	}
+
 	async setRepository(ref: RepositoryRef): Promise<void> {
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('repository', ?)", JSON.stringify(ref));
 	}
@@ -493,7 +542,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async log(ref?: string, limit = 50): Promise<Commit[]> {
 		const meta = this.meta();
-		const { repoName, ref: resolved } = this.resolveRef(ref ?? meta.defaultBranch);
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
 		using repo = await this.store.get(repoName);
 		const commits = await repo.log({ ref: resolved, limit: Math.max(1, Math.min(limit, 200)) });
 		return commits.map((c) => ({
@@ -508,7 +557,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** `ref` is a branch/commit of the project repo, or `task:<id>` for a task fork's head. */
 	async readFile(ref: string | undefined, path: string): Promise<{ content: string; contentType: string } | null> {
 		const meta = this.meta();
-		const { repoName, ref: resolved } = this.resolveRef(ref ?? meta.defaultBranch);
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
 		using repo = await this.store.get(repoName);
 		const blob = await repo.readFile({ ref: resolved, path });
 		return blob ? { content: await blob.text(), contentType: blob.type || "text/plain;charset=utf-8" } : null;
@@ -517,7 +566,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Lists a directory at `ref` (same refs as readFile). `commit` is null for an empty repo. */
 	async tree(ref: string | undefined, path = ""): Promise<Tree> {
 		const meta = this.meta();
-		const { repoName, ref: resolved } = this.resolveRef(ref ?? meta.defaultBranch);
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
 		using repo = await this.store.get(repoName);
 		const [commit] = await repo.log({ ref: resolved, limit: 1 });
 		const parts = path.split("/").filter(Boolean);
@@ -747,7 +796,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	/** Which repo and commit a ref names, for reads done outside the coordinator (raw files, archives). */
 	async locate(ref?: string): Promise<{ repo: string; commit: string; treeHash: string; committedAt: number }> {
-		const { repoName, ref: resolved } = this.resolveRef(ref ?? this.meta().defaultBranch);
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? this.meta().defaultBranch);
 		using repo = await this.store.get(repoName);
 		const commit = await resolveCommit(repo, resolved);
 		return { repo: repoName, commit: commit.hash, treeHash: commit.treeHash, committedAt: commit.committedAt };
@@ -1171,21 +1220,39 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	// ── Tags and releases ────────────────────────────────────────────────────
 
 	/** Every tag with its commit's first line, newest commit first (up to 300). */
-	async tags(): Promise<Tag[]> {
+	/**
+	 * Tags, newest commit first (up to 300, highest version names first if there are more). Commit
+	 * summaries are cached by hash, since a commit never changes; `summaries: false` skips them.
+	 */
+	async tags(summaries = true): Promise<Tag[]> {
 		const meta = this.meta();
 		const { tags } = await listRefs(await this.baseAccess(meta));
-		this.recordTags(Object.fromEntries([...tags].map(([name, t]) => [name, t.commit])), false);
-		using repo = await this.store.get(meta.name);
-		const listed = await mapLimit([...tags].slice(0, 300), 8, async ([name, t]) => {
-			const commit = await repo.readCommit(t.commit).catch(() => null);
-			return {
-				name,
-				commit: t.commit,
-				annotated: t.annotated,
-				summary: commit ? { message: commit.message.split("\n")[0], author: commit.author, committedAt: commit.committedAt } : null,
-			};
+		this.observeTags(tagCommits(tags));
+		const names = [...tags.keys()].sort((a, b) => b.localeCompare(a, undefined, { numeric: true })).slice(0, 300);
+		const cached = new Map(
+			this.sql
+				.exec<{ hash: string; summary: string }>(`SELECT hash, summary FROM commit_summaries WHERE hash IN (${names.map(() => "?").join(",") || "''"})`, ...names.map((n) => tags.get(n)?.commit))
+				.toArray()
+				.map((r) => [r.hash, JSON.parse(r.summary) as Tag["summary"]]),
+		);
+		const missing = summaries ? [...new Set(names.map((n) => (tags.get(n) as TagRef).commit).filter((h) => !cached.has(h)))] : [];
+		if (missing.length > 0) {
+			using repo = await this.store.get(meta.name);
+			await mapLimit(missing, 8, async (hash) => {
+				const commit = await repo.readCommit(hash).catch(() => null);
+				if (!commit) return;
+				const summary = { message: commit.message.split("\n")[0], author: commit.author, committedAt: commit.committedAt };
+				cached.set(hash, summary);
+				this.sql.exec("INSERT OR REPLACE INTO commit_summaries (hash, summary) VALUES (?, ?)", hash, JSON.stringify(summary));
+			});
+		}
+		const listed = names.map((name) => {
+			const t = tags.get(name) as TagRef;
+			return { name, commit: t.commit, annotated: t.annotated, summary: cached.get(t.commit) ?? null };
 		});
-		return listed.sort((a, b) => (b.summary?.committedAt ?? 0) - (a.summary?.committedAt ?? 0) || b.name.localeCompare(a.name));
+		return listed.sort(
+			(a, b) => (b.summary?.committedAt ?? 0) - (a.summary?.committedAt ?? 0) || b.name.localeCompare(a.name, undefined, { numeric: true }),
+		);
 	}
 
 	/** Creates a lightweight tag at `target` (a branch, tag or commit; the default branch if absent). */
@@ -1205,7 +1272,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			if (err instanceof RefUpdateRejected) throw new HttpError(409, "ALREADY_EXISTS", `Tag ${name} already exists`);
 			throw err;
 		}
-		this.recordTags({ ...this.knownTags(), [name]: commit.hash }, true);
+		this.recordTags({ ...tagCommits(tags), [name]: commit.hash });
 		return { name, commit: commit.hash, annotated: false, summary: { message: commit.message.split("\n")[0], author: commit.author, committedAt: commit.committedAt } };
 	}
 
@@ -1216,20 +1283,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const tag = (await listRefs(access)).tags.get(name);
 		if (!tag) throw new HttpError(404, "NOT_FOUND", `Tag ${name} not found`);
 		await setRef(access, `refs/tags/${name}`, tag.oid, null);
-		const { [name]: _gone, ...rest } = this.knownTags();
-		this.recordTags(rest, true);
+		const { tags: all } = await listRefs(access);
+		this.recordTags(tagCommits(all));
 	}
 
-	async releases(): Promise<Release[]> {
+	async releases(limit = 20): Promise<{ releases: Release[]; more: boolean }> {
 		const meta = this.meta();
 		// Fresh, so a release shows its tag's current commit (and tags pushed before megit tracked them).
-		const listed = (await listRefs(await this.baseAccess(meta))).tags;
-		const tags = Object.fromEntries([...listed].map(([name, t]) => [name, t.commit]));
-		this.recordTags(tags, false);
-		return this.sql
-			.exec<ReleaseRow>("SELECT * FROM releases ORDER BY created_at DESC")
-			.toArray()
-			.map((r) => toRelease(r, tags[r.tag] ?? null));
+		const tags = tagCommits((await listRefs(await this.baseAccess(meta))).tags);
+		this.observeTags(tags);
+		const rows = this.sql.exec<ReleaseRow>("SELECT * FROM releases ORDER BY created_at DESC LIMIT ?", limit + 1).toArray();
+		return { releases: rows.slice(0, limit).map((r) => toRelease(r, tags[r.tag] ?? null)), more: rows.length > limit };
 	}
 
 	/** Publishes a release of `tag`, creating the tag at `target` first if it doesn't exist. */
@@ -1239,6 +1303,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const tag = input.tag.trim();
 		if (this.sql.exec("SELECT 1 FROM releases WHERE tag = ?", tag).toArray().length > 0) {
 			throw new HttpError(409, "ALREADY_EXISTS", `There's already a release for ${tag}`);
+		}
+		if (this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM releases").one().n >= MAX_RELEASES) {
+			throw new HttpError(403, "QUOTA_EXCEEDED", `A repository can have at most ${MAX_RELEASES} releases; delete old ones first`);
 		}
 		const existing = (await listRefs(await this.baseAccess(meta))).tags.get(tag);
 		const commit = existing ? existing.commit : (await this.createTag(tag, input.target)).commit;
@@ -1283,7 +1350,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.assertWritable();
 		const row = this.sql.exec<ReleaseRow>("SELECT * FROM releases WHERE id = ?", id).toArray()[0];
 		if (!row) throw new HttpError(404, "NOT_FOUND", "No such release");
-		if (deleteTag && row.tag in this.knownTags()) await this.deleteTag(row.tag);
+		if (deleteTag) {
+			await this.deleteTag(row.tag).catch((err) => {
+				// Already gone is fine.
+				if (toHttpError(err).status !== 404) throw err;
+			});
+		}
 		this.sql.exec("DELETE FROM releases WHERE id = ?", id);
 	}
 
@@ -1299,6 +1371,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const max = Math.max(10, Math.min(limit, 400));
 		const access = await this.baseAccess(meta);
 		const { branches, tags } = await listRefs(access);
+		// The graph depends only on where the refs point, so it's computed once per set of heads.
+		const key = JSON.stringify([max, [...branches].sort(), [...tags].map(([n, t]) => [n, t.commit]).sort()]);
+		const cached = this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM graph_cache WHERE key = 'graph'").toArray()[0];
+		if (cached && JSON.parse(cached.value).key === key) return JSON.parse(cached.value).graph as Graph;
 		using repo = await this.store.get(meta.name);
 		const commits = new Map<string, Commit>();
 		const add = (list: ArtifactsCommitMetadata[]) => {
@@ -1306,9 +1382,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				if (!commits.has(c.hash)) commits.set(c.hash, { hash: c.hash, message: c.message, author: c.author, parents: c.parents, committedAt: c.committedAt });
 			}
 		};
-		// The default branch first, then the others, most recently moved first, up to 30.
-		const heads = [...branches].sort(([a], [b]) => Number(b === meta.defaultBranch) - Number(a === meta.defaultBranch)).slice(0, 30);
-		for (const list of await mapLimit(heads, 4, ([, head]) => repo.log({ ref: head, limit: max }).catch(() => []))) add(list);
+		// The default branch in full, then up to 29 others by name, each only as deep as it's likely to
+		// differ from what's already listed.
+		const heads = [...branches].sort(([a], [b]) => Number(b === meta.defaultBranch) - Number(a === meta.defaultBranch) || a.localeCompare(b)).slice(0, 30);
+		for (const list of await mapLimit(heads, 4, ([name, head]) => repo.log({ ref: head, limit: name === meta.defaultBranch ? max : Math.min(max, 100) }).catch(() => []))) add(list);
 		// Second parents of merges whose history isn't listed yet: follow them for a few rounds.
 		for (let round = 0; round < 3; round++) {
 			const newest = [...commits.values()].sort((a, b) => b.committedAt - a.committedAt).slice(0, max);
@@ -1326,7 +1403,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		for (const [name, t] of tags) label(t.commit).tags.push(name);
 		const shown: GraphCommit[] = sorted.slice(0, max).map((c) => ({ ...c, branches: labels.get(c.hash)?.branches ?? [], tags: labels.get(c.hash)?.tags ?? [] }));
 		// Older history exists unless every listed commit was found and a root commit is among them.
-		return { commits: shown, truncated: sorted.length > max || !shown.some((c) => c.parents.length === 0) };
+		const graph: Graph = { commits: shown, truncated: sorted.length > max || !shown.some((c) => c.parents.length === 0) };
+		this.sql.exec("INSERT OR REPLACE INTO graph_cache (key, value) VALUES ('graph', ?)", JSON.stringify({ key, graph }));
+		return graph;
 	}
 
 	// ── Branch protection ────────────────────────────────────────────────────
@@ -1346,7 +1425,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			}));
 	}
 
-	/** The rules, for git pushes checked in the Worker. */
+	/** The rules, for showing on the branches page and in settings. */
 	async getBranchRules(): Promise<BranchRule[]> {
 		this.meta();
 		return this.branchRules();
@@ -1390,10 +1469,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				using repo = await this.store.get(meta.name);
 				const commits = await repo.log({ ref: to, limit: 100 });
 				const fixes = new Map<number, string>();
+				let reachedFrom = from === null;
 				for (const commit of commits) {
-					if (commit.hash === from) break;
+					if (commit.hash === from) {
+						reachedFrom = true;
+						break;
+					}
 					for (const m of commit.message.matchAll(FIXES)) if (!fixes.has(Number(m[1]))) fixes.set(Number(m[1]), commit.hash);
 				}
+				// History was rewritten (or is very long): the old commits listed may have closed these
+				// issues before, and someone may have reopened them since. Leave them alone.
+				if (!reachedFrom) return;
 				if (fixes.size === 0) return;
 				const closed = await closeIssuesByCommits(this.env, meta.name, [...fixes].slice(0, 50));
 				for (const issue of closed) {
@@ -1486,7 +1572,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const meta = this.meta();
 		if (!ref.startsWith("task:")) {
 			// A tag name resolves to its commit, unless a branch has the same name: browsing means the branch.
-			const tag = ref.startsWith("refs/tags/") ? this.knownTags()[ref.slice("refs/tags/".length)] : this.knownTags()[ref];
+			const name = ref.startsWith("refs/tags/") ? ref.slice("refs/tags/".length) : ref;
+			const tag = this.knownTags()[name] ?? this.tagCache?.tags[name];
 			if (tag && !(ref in this.knownRefs(meta))) return { repoName: meta.name, ref: tag };
 			return { repoName: meta.name, ref };
 		}
@@ -1621,6 +1708,8 @@ const TRANSIENT = new Set(["INTERNAL_ERROR", "UPSTREAM_UNAVAILABLE", "FORK_IN_PR
 /** A fork attempt that failed this way is retried under a new name. NOT_FOUND/ALREADY_EXISTS mean a half-created fork. */
 const FORK_RETRYABLE = new Set([...TRANSIENT, "NOT_FOUND", "ALREADY_EXISTS", "CREATE_IN_PROGRESS"]);
 
+const MAX_RELEASES = 1000;
+
 /** "fixes #12", "Closes #3", "resolved: #7", as GitHub reads them. */
 const FIXES = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi;
 
@@ -1703,6 +1792,11 @@ async function resolveCommit(repo: RepoHandle, ref: string): Promise<ArtifactsCo
 function tokenExpiry(token: string): string {
 	const expires = Number(new URL(token, "https://token.invalid").searchParams.get("expires"));
 	return Number.isFinite(expires) && expires > 0 ? new Date(expires * 1000).toISOString() : "";
+}
+
+/** Tag name to the commit it names. */
+function tagCommits(tags: Map<string, TagRef>): Record<string, string> {
+	return Object.fromEntries([...tags].map(([name, t]) => [name, t.commit]));
 }
 
 type ReleaseRow = {

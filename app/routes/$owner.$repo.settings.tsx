@@ -82,7 +82,7 @@ function RepoSettings() {
 			</Panel>
 			<ErrorNote error={update.error} />
 			{!archived && <BranchProtection project={project} defaultBranch={current.defaultBranch} />}
-			{!archived && <Webhooks project={project} />}
+			<Webhooks project={project} archived={archived} />
 			<Panel title="Danger zone" className="border-red-500/30">
 				<div className="divide-y divide-line">
 					<Transfer project={project} />

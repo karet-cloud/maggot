@@ -3,8 +3,8 @@
 // sends becomes one HTTP request. Pushes are one request: the commands, then the pack.
 import type { Principal } from "../auth.ts";
 import { formatBytes, limit, policy, RateLimited, rules } from "../policy.ts";
-import { authorizeGit, enforceFastForward, upstreamFetch, watchPush } from "../git-http.ts";
-import { checkPush, parseCommands, refusalReport, type RefCommand } from "../protection.ts";
+import { authorizeGit, settleStaged, upstreamFetch, watchPush } from "../git-http.ts";
+import { checkPush, parseCommands, quarantine, refusalReport, type Staged } from "../protection.ts";
 import type { ProjectCoordinator } from "../project.ts";
 import type { Session, SshUser } from "./server.ts";
 import { concat } from "./wire.ts";
@@ -50,7 +50,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	const access = await authorizeGit(env, principal, parsed.owner, parsed.repo, pushing, origin);
 	if (!access.ok) return fail(`ERROR: ${access.message}`);
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(access.row.id);
-	const upstream = await coordinator.gitRemote(pushing ? "write" : "read");
+	const { remote: upstream, rules: branchRules } = pushing ? await coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
 	const input = new PktReader(session);
 	const protocol = session.env.get("GIT_PROTOCOL") ?? "";
 
@@ -101,8 +101,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	const maxPush = policy(env).pushBytes;
 	// Protected branches, as over HTTPS: refuse what the commands show isn't allowed, and check
 	// fast-forward-only branches once the push is stored.
-	let fastForwardOnly: RefCommand[] = [];
-	const branchRules = await coordinator.getBranchRules();
+	let staged: Staged[] = [];
 	if (branchRules.length > 0) {
 		const checked = checkPush(branchRules, updates);
 		if (checked.refused.size > 0) {
@@ -115,7 +114,11 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 			await session.write(refusalReport(updates, checked.refused, capabilities));
 			return 0;
 		}
-		fastForwardOnly = checked.fastForwardOnly;
+		if (checked.fastForwardOnly.length > 0) {
+			const held = quarantine(commands, checked.fastForwardOnly);
+			staged = held.staged;
+			head = concat([held.head, head.subarray(commands.length)]);
+		}
 	}
 	let sent = head.length;
 	const body = withPack
@@ -146,8 +149,8 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	}
 	if (!res.ok || !res.body) return fail(`ERROR: The storage backend answered ${res.status}.`);
 	let report = res.body;
-	if (fastForwardOnly.length > 0) {
-		const checked = await enforceFastForward(env, access.row, upstream, new Uint8Array(await res.arrayBuffer()), fastForwardOnly, capabilities);
+	if (staged.length > 0) {
+		const checked = await settleStaged(env, access.row, upstream, new Uint8Array(await res.arrayBuffer()), staged, capabilities);
 		report = new Response(checked).body as ReadableStream<Uint8Array>;
 	}
 	await pipe(watchPush(env, ctx, access.row, report, () => sent), session);
@@ -195,18 +198,39 @@ function pktPayloads(bytes: Uint8Array): string[] {
 
 /** Reads pkt-lines from a session's input. */
 class PktReader {
-	private buffer: Uint8Array = new Uint8Array(0);
+	/** Unread input is `store[start, end)`; the store grows by doubling, so filling it stays linear. */
+	private store = new Uint8Array(64 * 1024);
+	private start = 0;
+	private end = 0;
 	private readonly session: Session<GitUser>;
 
 	constructor(session: Session<GitUser>) {
 		this.session = session;
 	}
 
+	private get buffer(): Uint8Array {
+		return this.store.subarray(this.start, this.end);
+	}
+
+	private consume(n: number) {
+		this.start += n;
+		if (this.start === this.end) this.start = this.end = 0;
+	}
+
 	private async fill(n: number): Promise<boolean> {
-		while (this.buffer.length < n) {
+		while (this.end - this.start < n) {
 			const chunk = await this.session.read();
 			if (!chunk) return false;
-			this.buffer = this.buffer.length === 0 ? chunk : concat([this.buffer, chunk]);
+			if (this.end + chunk.length > this.store.length) {
+				const live = this.end - this.start;
+				const next = live + chunk.length > this.store.length / 2 ? new Uint8Array(Math.max(this.store.length * 2, live + chunk.length)) : this.store;
+				next.set(this.store.subarray(this.start, this.end), 0);
+				this.store = next;
+				this.start = 0;
+				this.end = live;
+			}
+			this.store.set(chunk, this.end);
+			this.end += chunk.length;
 		}
 		return true;
 	}
@@ -221,7 +245,7 @@ class PktReader {
 			const size = Number.parseInt(header, 16);
 			if (size === 0) {
 				const out = this.buffer.slice(0, offset + 4);
-				this.buffer = this.buffer.subarray(offset + 4);
+				this.consume(offset + 4);
 				return out;
 			}
 			const end = offset + (size < 4 ? 4 : size);
@@ -233,9 +257,9 @@ class PktReader {
 
 	/** The next raw bytes (what's buffered first), or null at end of input. */
 	async raw(): Promise<Uint8Array | null> {
-		if (this.buffer.length > 0) {
-			const out = this.buffer;
-			this.buffer = new Uint8Array(0);
+		if (this.end > this.start) {
+			const out = this.buffer.slice();
+			this.consume(this.end - this.start);
 			return out;
 		}
 		return this.session.read();
