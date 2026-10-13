@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, FileList, Project, RepoInfo, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, FileList, IssueState, Project, RepoInfo, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
 import {
@@ -26,6 +26,22 @@ import {
 	renameRepo,
 	setArchived,
 	TRANSFER_DAYS,
+	addComment,
+	cleanLabels,
+	createIssue,
+	deleteComment,
+	editComment,
+	getComment,
+	getIssue,
+	issueParticipants,
+	listComments,
+	listIssues,
+	MAX_ISSUE_BODY,
+	MAX_ISSUE_TITLE,
+	toIssue,
+	toIssueSummary,
+	updateIssue,
+	type IssueRow,
 	listNotifications,
 	notifiedRecently,
 	markRead,
@@ -538,6 +554,19 @@ const repo = new Hono<App>();
 
 /** Things anyone who can read a repository may do to it: star or unstar it, and fork it. Exact routes only. */
 const READER_ACTIONS: Record<string, string[]> = { "/star": ["PUT", "DELETE"], "/forks": ["POST"] };
+
+/**
+ * Whether a write is one a reader may make: starring and forking, and opening and discussing issues
+ * (whose routes check authorship themselves).
+ */
+function readerAction(rest: string, method: string): boolean {
+	if (READER_ACTIONS[rest]?.includes(method)) return true;
+	if (rest === "/issues") return method === "POST";
+	if (/^\/issues\/\d+$/.test(rest)) return method === "PATCH";
+	if (/^\/issues\/\d+\/comments$/.test(rest)) return method === "POST";
+	if (/^\/issues\/\d+\/comments\/[^/]+$/.test(rest)) return method === "PATCH" || method === "DELETE";
+	return false;
+}
 /** Changes the owner can still make to an archived repository: its settings (unarchiving included), deleting it, and handing it on. */
 const ARCHIVED_ACTIONS: Record<string, string[]> = { "/": ["PATCH", "DELETE"], "/transfer": ["POST", "DELETE"] };
 
@@ -558,7 +587,7 @@ repo.use("*", async (c, next) => {
 	const row = await findRepo(db(c.env), owner, c.req.param("repo") ?? "");
 	const p = c.var.principal;
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
-	const write = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS[routeRest(c, "")]?.includes(c.req.method);
+	const write = !["GET", "HEAD"].includes(c.req.method) && !readerAction(routeRest(c, ""), c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
 	if (write && row.archivedAt && !ARCHIVED_ACTIONS[routeRest(c, "")]?.includes(c.req.method)) {
 		throw new HttpError(403, "ARCHIVED", "This repository is archived, so it's read-only. Its owner can unarchive it in Settings.");
@@ -911,6 +940,246 @@ repo.get("/search", async (c) => {
 	const p = c.var.principal;
 	if (p.kind !== "admin") await limit(c.env, p.kind === "user" ? `user:${p.id}` : `ip:${clientIp(c.req.raw)}`, rules.search(policy(c.env)), "Too many searches");
 	return c.json(await project(c).searchCode(q));
+});
+
+// ── Tags and releases ────────────────────────────────────────────────────────
+
+repo.get("/tags", async (c) => c.json({ tags: await project(c).tags() }));
+
+repo.post("/tags", async (c) => {
+	const { name, target } = await body<{ name?: string; target?: string }>(c);
+	if (typeof name !== "string" || !name.trim()) throw new HttpError(400, "INVALID_INPUT", "name is required");
+	return c.json({ tag: await project(c).createTag(name.trim(), typeof target === "string" ? target : undefined) }, 201);
+});
+
+repo.delete("/tags/*", async (c) => {
+	const name = routeRest(c, "/tags/");
+	if (!name) throw new HttpError(400, "INVALID_INPUT", "Tag name is required");
+	await project(c).deleteTag(name);
+	return c.json({ deleted: true });
+});
+
+repo.get("/releases", async (c) => c.json({ releases: await project(c).releases() }));
+
+repo.post("/releases", async (c) => {
+	const input = await body<{ tag?: string; target?: string; name?: string; notes?: string; prerelease?: boolean }>(c);
+	if (typeof input.tag !== "string" || !input.tag.trim()) throw new HttpError(400, "INVALID_INPUT", "tag is required");
+	const p = c.var.principal;
+	const release = await project(c).createRelease({
+		tag: input.tag,
+		target: typeof input.target === "string" ? input.target : undefined,
+		name: typeof input.name === "string" ? input.name : undefined,
+		notes: typeof input.notes === "string" ? input.notes : undefined,
+		prerelease: input.prerelease === true,
+		author: p.kind === "user" ? p.username : null,
+	});
+	return c.json({ release }, 201);
+});
+
+repo.patch("/releases/:id", async (c) => {
+	const input = await body<{ name?: string; notes?: string; prerelease?: boolean }>(c);
+	return c.json({
+		release: await project(c).updateRelease(c.req.param("id"), {
+			name: typeof input.name === "string" ? input.name : undefined,
+			notes: typeof input.notes === "string" ? input.notes : undefined,
+			prerelease: typeof input.prerelease === "boolean" ? input.prerelease : undefined,
+		}),
+	});
+});
+
+repo.delete("/releases/:id", async (c) => {
+	await project(c).deleteRelease(c.req.param("id"), c.req.query("deleteTag") !== undefined);
+	return c.json({ deleted: true });
+});
+
+// ── Commit graph ─────────────────────────────────────────────────────────────
+
+repo.get("/graph", async (c) => c.json(await project(c).graph(intParam(c.req.query("limit"), 150, 400, 10))));
+
+// ── Branch protection (anyone who can read sees the rules; the owner sets them) ─
+
+repo.get("/protection", async (c) => c.json({ rules: await project(c).getBranchRules() }));
+
+repo.put("/protection", async (c) => {
+	const input = await body<{ pattern?: string; blockDeletions?: boolean; blockForcePushes?: boolean; requireMergeQueue?: boolean }>(c);
+	if (typeof input.pattern !== "string") throw new HttpError(400, "INVALID_INPUT", "pattern is required");
+	const rules = await project(c).setBranchRule({
+		pattern: input.pattern.trim(),
+		blockDeletions: input.blockDeletions === true,
+		blockForcePushes: input.blockForcePushes === true,
+		requireMergeQueue: input.requireMergeQueue === true,
+	});
+	return c.json({ rules });
+});
+
+repo.delete("/protection", async (c) => {
+	const pattern = c.req.query("pattern");
+	if (!pattern) throw new HttpError(400, "INVALID_INPUT", "pattern is required");
+	return c.json({ rules: await project(c).deleteBranchRule(pattern) });
+});
+
+// ── Issues (anyone signed in who can read the repository opens and comments; authors and the owner edit) ─
+
+function issueNumber(c: Context<App>): number {
+	const n = Number(c.req.param("number"));
+	if (!Number.isInteger(n) || n < 1) throw new HttpError(404, "NOT_FOUND", "No such issue");
+	return n;
+}
+
+async function loadIssue(c: Context<App>): Promise<IssueRow> {
+	const issue = await getIssue(db(c.env), userRepo(c).id, issueNumber(c));
+	if (!issue) throw new HttpError(404, "NOT_FOUND", `Issue #${c.req.param("number")} not found`);
+	return issue;
+}
+
+function issueText(input: { title?: unknown; body?: unknown }, creating: boolean): { title?: string; body?: string } {
+	if (input.title !== undefined || creating) {
+		if (typeof input.title !== "string" || !input.title.trim()) throw new HttpError(400, "INVALID_INPUT", "An issue needs a title");
+		if (input.title.trim().length > MAX_ISSUE_TITLE) throw new HttpError(400, "INVALID_INPUT", `Titles are up to ${MAX_ISSUE_TITLE} characters`);
+	}
+	if (input.body !== undefined && (typeof input.body !== "string" || input.body.length > MAX_ISSUE_BODY)) {
+		throw new HttpError(400, "INVALID_INPUT", `The text is up to ${MAX_ISSUE_BODY / 1024} KB`);
+	}
+	return { title: typeof input.title === "string" ? input.title.trim() : undefined, body: typeof input.body === "string" ? input.body : undefined };
+}
+
+/** Issues and comments cost a write each and count against the poster's hourly budget. */
+async function canPost(c: Context<App>) {
+	const user = requireUser(c);
+	requireVerified(c.env, user);
+	await limit(c.env, `user:${user.id}`, rules.post(policy(c.env)), "You're posting too fast; try again later");
+	return user;
+}
+
+const issueUrl = (c: Context<App>, row: RepoRow, number: number) => `${origin(c)}/${row.owner}/${row.name}/issues/${number}`;
+
+/** Tells everyone involved (except whoever did it) and records the event for the feed and webhooks. */
+function announceIssue(
+	c: Context<App>,
+	row: RepoRow,
+	issue: IssueRow,
+	action: "opened" | "closed" | "reopened" | "commented",
+	actor: { id: string; username: string },
+	extra: Record<string, unknown> = {},
+) {
+	c.executionCtx.waitUntil(
+		(async () => {
+			const people = new Set([row.ownerId, ...(action === "opened" ? [] : await issueParticipants(db(c.env), issue.id))]);
+			people.delete(actor.id);
+			const verb = { opened: "opened", closed: "closed", reopened: "reopened", commented: "commented on" }[action];
+			await Promise.all(
+				[...people].map((userId) =>
+					notifyUser(db(c.env), {
+						userId,
+						kind: "issue",
+						repoId: row.id,
+						title: `${actor.username} ${verb} #${issue.number}: ${issue.title}`,
+						url: `/${row.owner}/${row.name}/issues/${issue.number}`,
+						actor: actor.username,
+					}),
+				),
+			);
+			await project(c).recordEvent(`issue.${action}`, {
+				issue: { number: issue.number, title: issue.title, state: issue.state, url: issueUrl(c, row, issue.number) },
+				sender: actor.username,
+				...extra,
+			});
+		})().catch((err) => console.error("announcing issue activity failed", err)),
+	);
+}
+
+repo.get("/issues", async (c) => {
+	const state = c.req.query("state");
+	const q = c.req.query("q")?.trim().slice(0, 100) || undefined;
+	return c.json(
+		await listIssues(db(c.env), userRepo(c).id, {
+			state: state === "closed" || state === "all" ? state : "open",
+			query: q,
+			label: c.req.query("label")?.slice(0, 50) || undefined,
+			limit: intParam(c.req.query("limit"), 50, 200),
+		}),
+	);
+});
+
+repo.post("/issues", async (c) => {
+	const row = userRepo(c);
+	const user = await canPost(c);
+	const input = await body<{ title?: string; body?: string; labels?: unknown }>(c);
+	const text = issueText(input, true);
+	// Only the owner labels issues.
+	const labels = input.labels !== undefined && canWrite(user, row) ? cleanLabels(input.labels) : [];
+	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", labels);
+	announceIssue(c, row, issue, "opened", user);
+	return c.json({ issue: toIssue(issue, true, canWrite(user, row)) }, 201);
+});
+
+repo.get("/issues/:number", async (c) => {
+	const row = userRepo(c);
+	const issue = await loadIssue(c);
+	const p = c.var.principal;
+	const owner = canWrite(p, row);
+	const me = viewerId(p);
+	return c.json({
+		issue: toIssue(issue, owner || (me !== null && me === issue.authorId), owner),
+		comments: await listComments(db(c.env), issue.id, { id: me, owner }),
+	});
+});
+
+repo.patch("/issues/:number", async (c) => {
+	const row = userRepo(c);
+	const user = requireUser(c);
+	const issue = await loadIssue(c);
+	const owner = canWrite(user, row);
+	if (!owner && user.id !== issue.authorId) throw new HttpError(403, "FORBIDDEN", "Only the issue's author and the repository's owner can change it");
+	const input = await body<{ title?: string; body?: string; state?: IssueState; labels?: unknown }>(c);
+	if (input.state !== undefined && input.state !== "open" && input.state !== "closed") throw new HttpError(400, "INVALID_INPUT", "state is open or closed");
+	if (input.labels !== undefined && !owner) throw new HttpError(403, "FORBIDDEN", "Only the repository's owner can label issues");
+	const updated = await updateIssue(db(c.env), issue, {
+		...issueText(input, false),
+		state: input.state,
+		labels: input.labels === undefined ? undefined : cleanLabels(input.labels),
+		by: user.id,
+	});
+	if (input.state && input.state !== issue.state) announceIssue(c, row, updated, input.state === "closed" ? "closed" : "reopened", user);
+	return c.json({ issue: toIssue(updated, true, owner) });
+});
+
+repo.post("/issues/:number/comments", async (c) => {
+	const row = userRepo(c);
+	const user = await canPost(c);
+	const issue = await loadIssue(c);
+	const input = await body<{ body?: string }>(c);
+	const text = typeof input.body === "string" ? input.body.trim() : "";
+	if (!text) throw new HttpError(400, "INVALID_INPUT", "A comment needs some text");
+	if (text.length > MAX_ISSUE_BODY) throw new HttpError(400, "INVALID_INPUT", `Comments are up to ${MAX_ISSUE_BODY / 1024} KB`);
+	const comment = await addComment(db(c.env), issue, user.id, text, { id: user.id, owner: canWrite(user, row) });
+	announceIssue(c, row, issue, "commented", user, { comment: { id: comment.id, body: text.slice(0, 2000) } });
+	return c.json({ comment }, 201);
+});
+
+repo.patch("/issues/:number/comments/:id", async (c) => {
+	const row = userRepo(c);
+	const user = requireUser(c);
+	const issue = await loadIssue(c);
+	const comment = await getComment(db(c.env), issue.id, c.req.param("id"));
+	if (!comment) throw new HttpError(404, "NOT_FOUND", "No such comment");
+	// Only its author edits a comment; the owner can delete it but not put words in someone's mouth.
+	if (comment.authorId !== user.id) throw new HttpError(403, "FORBIDDEN", "Only a comment's author can edit it");
+	const input = await body<{ body?: string }>(c);
+	const text = typeof input.body === "string" ? input.body.trim() : "";
+	if (!text || text.length > MAX_ISSUE_BODY) throw new HttpError(400, "INVALID_INPUT", `A comment is 1 character to ${MAX_ISSUE_BODY / 1024} KB`);
+	return c.json({ comment: await editComment(db(c.env), comment, text, { id: user.id, owner: canWrite(user, row) }) });
+});
+
+repo.delete("/issues/:number/comments/:id", async (c) => {
+	const row = userRepo(c);
+	const user = requireUser(c);
+	const issue = await loadIssue(c);
+	const comment = await getComment(db(c.env), issue.id, c.req.param("id"));
+	if (!comment) throw new HttpError(404, "NOT_FOUND", "No such comment");
+	if (comment.authorId !== user.id && !canWrite(user, row)) throw new HttpError(403, "FORBIDDEN", "Only a comment's author and the repository's owner can delete it");
+	await deleteComment(db(c.env), issue.id, comment.id);
+	return c.json({ deleted: true });
 });
 
 // ── Webhooks (owner only, reads included: they show URLs and payloads) ─────────

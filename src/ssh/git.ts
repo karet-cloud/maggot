@@ -3,7 +3,8 @@
 // sends becomes one HTTP request. Pushes are one request: the commands, then the pack.
 import type { Principal } from "../auth.ts";
 import { formatBytes, limit, policy, RateLimited, rules } from "../policy.ts";
-import { authorizeGit, upstreamFetch, watchPush } from "../git-http.ts";
+import { authorizeGit, enforceFastForward, upstreamFetch, watchPush } from "../git-http.ts";
+import { checkPush, parseCommands, refusalReport, type RefCommand } from "../protection.ts";
 import type { ProjectCoordinator } from "../project.ts";
 import type { Session, SshUser } from "./server.ts";
 import { concat } from "./wire.ts";
@@ -88,7 +89,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	// Nothing to update: git hangs up after the advertisement, or sends just a flush.
 	if (!commands || commands.length === 4) return 0;
 	const lines = pktPayloads(commands);
-	const capabilities = (lines.find((l) => !l.startsWith("shallow "))?.split("\0")[1] ?? "").split(" ");
+	const { commands: updates, capabilities } = parseCommands(commands);
 	let head = commands;
 	if (capabilities.includes("push-options")) {
 		const options = await input.untilFlush();
@@ -98,6 +99,24 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	// Deleting branches sends no pack, and git then waits for the report without closing its side.
 	const withPack = lines.some((l) => !l.startsWith("shallow ") && l.split(" ")[1] !== ZERO);
 	const maxPush = policy(env).pushBytes;
+	// Protected branches, as over HTTPS: refuse what the commands show isn't allowed, and check
+	// fast-forward-only branches once the push is stored.
+	let fastForwardOnly: RefCommand[] = [];
+	const branchRules = await coordinator.getBranchRules();
+	if (branchRules.length > 0) {
+		const checked = checkPush(branchRules, updates);
+		if (checked.refused.size > 0) {
+			// git sends the whole pack before it reads the answer.
+			for (let read = 0; withPack && read <= maxPush; ) {
+				const chunk = await input.raw();
+				if (!chunk) break;
+				read += chunk.length;
+			}
+			await session.write(refusalReport(updates, checked.refused, capabilities));
+			return 0;
+		}
+		fastForwardOnly = checked.fastForwardOnly;
+	}
 	let sent = head.length;
 	const body = withPack
 		? new ReadableStream<Uint8Array>({
@@ -126,7 +145,12 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 		throw err;
 	}
 	if (!res.ok || !res.body) return fail(`ERROR: The storage backend answered ${res.status}.`);
-	await pipe(watchPush(env, ctx, access.row, res.body, () => sent), session);
+	let report = res.body;
+	if (fastForwardOnly.length > 0) {
+		const checked = await enforceFastForward(env, access.row, upstream, new Uint8Array(await res.arrayBuffer()), fastForwardOnly, capabilities);
+		report = new Response(checked).body as ReadableStream<Uint8Array>;
+	}
+	await pipe(watchPush(env, ctx, access.row, report, () => sent), session);
 	return 0;
 }
 

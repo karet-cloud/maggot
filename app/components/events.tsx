@@ -1,5 +1,22 @@
 import { Link } from "@tanstack/react-router";
-import { AlertTriangle, CircleDot, GitBranchPlus, GitCommitHorizontal, GitMerge, Inbox, Loader, Send, Sparkles, Trash2, Upload, XCircle } from "lucide-react";
+import {
+	AlertTriangle,
+	CircleCheck,
+	CircleDot,
+	GitBranchPlus,
+	GitCommitHorizontal,
+	GitMerge,
+	Inbox,
+	Loader,
+	MessageSquare,
+	Package,
+	Send,
+	Sparkles,
+	Tag,
+	Trash2,
+	Upload,
+	XCircle,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import type { EventType, ProjectEvent, Task } from "../lib/api.ts";
 import { repoParams } from "../lib/api.ts";
@@ -18,6 +35,13 @@ const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"task.failed": { icon: <XCircle className="size-3.5" />, tone: "text-red-400" },
 	"task.abandoned": { icon: <Trash2 className="size-3.5" />, tone: "text-zinc-400" },
 	"main.advanced": { icon: <GitCommitHorizontal className="size-3.5" />, tone: "text-emerald-300" },
+	"tag.created": { icon: <Tag className="size-3.5" />, tone: "text-sky-300" },
+	"tag.deleted": { icon: <Tag className="size-3.5" />, tone: "text-zinc-400" },
+	"release.published": { icon: <Package className="size-3.5" />, tone: "text-emerald-300" },
+	"issue.opened": { icon: <CircleDot className="size-3.5" />, tone: "text-emerald-300" },
+	"issue.closed": { icon: <CircleCheck className="size-3.5" />, tone: "text-violet-300" },
+	"issue.reopened": { icon: <CircleDot className="size-3.5" />, tone: "text-emerald-300" },
+	"issue.commented": { icon: <MessageSquare className="size-3.5" />, tone: "text-sky-300" },
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -57,6 +81,21 @@ export function describe(e: ProjectEvent): string {
 			return "Abandoned";
 		case "main.advanced":
 			return `main ${shortOid(d.from as string | null)} → ${shortOid(d.to as string)}${d.fastForward ? " (fast-forward)" : ""}`;
+		case "tag.created":
+			return `Tagged ${String(d.tag)} at ${shortOid(d.commit as string)}`;
+		case "tag.deleted":
+			return `Deleted tag ${String(d.tag)}`;
+		case "release.published":
+			return `Released ${String(d.name ?? d.tag)}`;
+		case "issue.opened":
+		case "issue.closed":
+		case "issue.reopened":
+		case "issue.commented": {
+			const issue = d.issue as { number: number; title: string } | undefined;
+			if (e.type === "issue.closed" && d.commit) return `Commit ${shortOid(d.commit as string)} closed #${issue?.number ?? "?"} ${issue?.title ?? ""}`.trim();
+			const verb = { "issue.opened": "opened", "issue.closed": "closed", "issue.reopened": "reopened", "issue.commented": "commented on" }[e.type];
+			return `${String(d.sender ?? "Someone")} ${verb} #${issue?.number ?? "?"} ${issue?.title ?? ""}`.trim();
+		}
 	}
 }
 

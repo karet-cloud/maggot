@@ -4,6 +4,7 @@ import { Archive, ArchiveRestore, ArrowRightLeft, PencilLine, Trash2, X } from "
 import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { Webhooks } from "../components/webhooks.tsx";
+import { BranchProtection } from "../components/branch-protection.tsx";
 import { Button, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type RepoInfo, type Visibility } from "../lib/api.ts";
 
@@ -80,6 +81,7 @@ function RepoSettings() {
 				</div>
 			</Panel>
 			<ErrorNote error={update.error} />
+			{!archived && <BranchProtection project={project} defaultBranch={current.defaultBranch} />}
 			{!archived && <Webhooks project={project} />}
 			<Panel title="Danger zone" className="border-red-500/30">
 				<div className="divide-y divide-line">

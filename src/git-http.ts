@@ -5,7 +5,9 @@ import { canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
 import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts";
 import { toHttpError } from "./errors.ts";
 import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
-import { pushAccepted } from "./git/protocol.ts";
+import { pushAccepted, setRef } from "./git/protocol.ts";
+import { acceptedRefs, checkPush, isAncestor, parseCommands, refusalReport, rewriteReport, type RefCommand } from "./protection.ts";
+import { repoStore } from "./store.ts";
 import type { RemoteAccess } from "./git/workspace.ts";
 import type { ProjectCoordinator } from "./project.ts";
 
@@ -109,6 +111,108 @@ export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: R
 	return client;
 }
 
+/** The longest command list a push may start with before its pack. */
+const MAX_COMMANDS_BYTES = 4 * 1024 * 1024;
+
+/** Splits a receive-pack request body into its commands (through the first flush) and the rest. */
+export async function splitCommands(body: ReadableStream<Uint8Array>): Promise<{ head: Uint8Array; rest: ReadableStream<Uint8Array> }> {
+	const reader = body.getReader();
+	let buffer = new Uint8Array(0);
+	const more = async (): Promise<boolean> => {
+		const { done, value } = await reader.read();
+		if (done) return false;
+		const next = new Uint8Array(buffer.length + value.length);
+		next.set(buffer);
+		next.set(value, buffer.length);
+		buffer = next;
+		if (buffer.length > MAX_COMMANDS_BYTES) throw new Error("Push commands too long");
+		return true;
+	};
+	const decoder = new TextDecoder();
+	let end = 0;
+	for (let offset = 0; ; ) {
+		while (buffer.length < offset + 4) if (!(await more())) break;
+		if (buffer.length < offset + 4) {
+			end = buffer.length;
+			break;
+		}
+		const size = Number.parseInt(decoder.decode(buffer.subarray(offset, offset + 4)), 16);
+		if (Number.isNaN(size)) throw new Error("Malformed push request");
+		if (size === 0) {
+			end = offset + 4;
+			break;
+		}
+		offset += Math.max(size, 4);
+		while (buffer.length < offset) if (!(await more())) break;
+		if (buffer.length < offset) {
+			end = buffer.length;
+			break;
+		}
+	}
+	const head = buffer.slice(0, end);
+	const leftover = buffer.slice(end);
+	const rest = new ReadableStream<Uint8Array>({
+		start(controller) {
+			if (leftover.length > 0) controller.enqueue(leftover);
+		},
+		async pull(controller) {
+			const { done, value } = await reader.read();
+			if (done) controller.close();
+			else controller.enqueue(value);
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		},
+	});
+	return { head, rest };
+}
+
+/** Reads and drops what's left of a request, up to `max` bytes, so the client gets to read the answer. */
+export async function discard(stream: ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>, max: number): Promise<void> {
+	let total = 0;
+	for await (const chunk of stream as AsyncIterable<Uint8Array>) {
+		total += chunk.length;
+		if (total > max) break;
+	}
+}
+
+/**
+ * After storage has accepted a push: any branch that may only fast-forward but was rewritten is put
+ * back where it was, and the report the client sees says so for that branch.
+ */
+export async function enforceFastForward(
+	env: Env,
+	row: RepoRow,
+	upstream: RemoteAccess,
+	response: Uint8Array,
+	commands: RefCommand[],
+	capabilities: string[],
+): Promise<Uint8Array> {
+	if (commands.length === 0) return response;
+	const accepted = acceptedRefs(response);
+	const checks = commands.filter((c) => accepted.has(c.ref));
+	if (checks.length === 0) return response;
+	const refused = new Map<string, string>();
+	using repo = await repoStore(env).get(row.id);
+	for (const c of checks) {
+		const fastForward = await isAncestor(repo, c.old, c.new).catch(() => null);
+		if (fastForward === true) continue;
+		try {
+			// Only if nobody has moved it since.
+			await setRef(upstream, c.ref, c.new, c.old);
+			refused.set(
+				c.ref,
+				fastForward === null ? "protected branch: too many new commits to confirm a fast-forward; push fewer at a time" : "protected branch: force pushes aren't allowed",
+			);
+		} catch (err) {
+			console.error("putting back a force push failed", err);
+		}
+	}
+	return rewriteReport(response, refused, capabilities);
+}
+
+const RESULT_HEADERS = { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-cache" };
+
 export async function handleGit(request: Request, env: Env, ctx: ExecutionContext, route: GitRoute): Promise<Response> {
 	const url = new URL(request.url);
 	const service = route.endpoint === "info/refs" ? url.searchParams.get("service") : route.endpoint;
@@ -142,11 +246,34 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(row.id);
 	const upstream = await coordinator.gitRemote(pushing ? "write" : "read");
 	const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
+	const receiving = pushing && route.endpoint === "git-receive-pack";
+	let requestBody = request.body;
+	// Protected branches: refuse what the commands alone show is not allowed, and note the branches
+	// that may only fast-forward, to check once the push is stored.
+	let protect: { commands: RefCommand[]; capabilities: string[] } | null = null;
+	if (receiving && requestBody) {
+		const branchRules = await coordinator.getBranchRules();
+		if (branchRules.length > 0) {
+			if (headers["content-encoding"] === "gzip") {
+				requestBody = requestBody.pipeThrough(new DecompressionStream("gzip") as ReadableWritablePair<Uint8Array, Uint8Array>);
+				headers["content-encoding"] = null;
+			}
+			const { head, rest } = await splitCommands(requestBody);
+			const { commands, capabilities } = parseCommands(head);
+			const { refused, fastForwardOnly } = checkPush(branchRules, commands);
+			if (refused.size > 0) {
+				await discard(rest, maxPush);
+				return new Response(refusalReport(commands, refused, capabilities), { headers: RESULT_HEADERS });
+			}
+			protect = { commands: fastForwardOnly, capabilities };
+			requestBody = concatStreams(head, rest);
+		}
+	}
 	// Counts what a push sends, for the repository's size, and stops one that runs past the limit.
 	let sent = 0;
 	const counted =
-		request.body && pushing && route.endpoint === "git-receive-pack"
-			? request.body.pipeThrough(
+		requestBody && receiving
+			? requestBody.pipeThrough(
 					new TransformStream<Uint8Array, Uint8Array>({
 						transform(chunk, controller) {
 							sent += chunk.byteLength;
@@ -155,7 +282,7 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 						},
 					}),
 				)
-			: request.body;
+			: requestBody;
 	let res: Response;
 	try {
 		res = await upstreamFetch(upstream, `${route.endpoint}${url.search}`, {
@@ -174,8 +301,31 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		if (value) out.set(name, value);
 	}
 	if (res.status === 401 || res.status === 403) return deny(502, "The storage backend refused the request.");
-	if (pushing && route.endpoint === "git-receive-pack" && res.ok && res.body) {
+	if (receiving && res.ok && res.body) {
+		if (protect && protect.commands.length > 0) {
+			// The report is small; hold it until any rewritten protected branch has been put back.
+			const report = await enforceFastForward(env, row, upstream, new Uint8Array(await res.arrayBuffer()), protect.commands, protect.capabilities);
+			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent), { status: res.status, headers: out });
+		}
 		return new Response(watchPush(env, ctx, row, res.body, () => sent), { status: res.status, headers: out });
 	}
 	return new Response(res.body, { status: res.status, headers: out });
+}
+
+/** `head`, then everything `rest` yields. */
+function concatStreams(head: Uint8Array, rest: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+	const reader = rest.getReader();
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(head);
+		},
+		async pull(controller) {
+			const { done, value } = await reader.read();
+			if (done) controller.close();
+			else controller.enqueue(value);
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		},
+	});
 }

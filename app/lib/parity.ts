@@ -53,13 +53,13 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "History, branches and tags",
 		items: [
-			{ feature: "Commit history", status: "partial", comment: "First-parent history of the default branch. No per-branch history page yet." },
+			{ feature: "Commit history", status: "done", comment: "Per branch, tag or agent fork, plus a graph of every branch." },
 			{ feature: "Commit page with diff", status: "done", comment: "Unified or split." },
 			{ feature: "Compare branches", status: "done", comment: "Commits and diff since the merge base." },
 			{ feature: "Branches page", status: "done", comment: "Ahead and behind counts, and delete." },
-			{ feature: "Tags and releases", status: "missing", comment: "Tags are stored, but not listed or released." },
-			{ feature: "Commit graph", status: "missing", comment: "" },
-			{ feature: "Branch protection rules", status: "missing", comment: "The owner is the only writer today." },
+			{ feature: "Tags and releases", status: "done", comment: "Tags from git or the web; releases with Markdown notes, pre-releases and source downloads. No uploaded release files yet." },
+			{ feature: "Commit graph", status: "done", comment: "History → Graph: recent commits across every branch in lanes, with branch and tag labels." },
+			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, or only the merge queue. Enforced for HTTPS, SSH and the web. No required checks or reviews yet; those features don't exist." },
 			{ feature: "Verified (signed) commit badges", status: "missing", comment: "" },
 		],
 	},
@@ -68,7 +68,7 @@ export const PARITY: ParitySection[] = [
 		items: [
 			{ feature: "Pull requests", status: "partial", comment: "Agents land work through tasks and a merge queue. Pull requests between people are next." },
 			{ feature: "Code review", status: "missing", comment: "Line comments, approvals and requested changes; comes after pull requests." },
-			{ feature: "Issues", status: "missing", comment: "" },
+			{ feature: "Issues", status: "done", comment: "Markdown, comments, labels, close and reopen, search, notifications, webhooks, and \"fixes #n\" closing on the default branch. No assignees or milestones yet." },
 			{ feature: "Discussions", status: "missing", comment: "" },
 			{ feature: "Collaborators with write access", status: "missing", comment: "One owner per repository for now." },
 			{ feature: "Organizations and teams", status: "missing", comment: "" },
@@ -91,7 +91,7 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "Automation and integrations",
 		items: [
-			{ feature: "Webhooks", status: "done", comment: "Push, merge and task events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
+			{ feature: "Webhooks", status: "done", comment: "Push (branches and tags), merge, release, issue and task events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
 			{ feature: "Actions / built-in CI", status: "missing", comment: "Planned: tests in Cloudflare Sandbox or Containers." },
 			{ feature: "Commit status checks API", status: "missing", comment: "For external CI to report into, and to gate merges." },
 			{ feature: "REST API", status: "partial", comment: "Everything the UI does goes through /api. No API reference page yet." },
