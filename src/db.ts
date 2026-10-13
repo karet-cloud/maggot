@@ -977,7 +977,7 @@ export function toPullSummary(row: PullRow): PullSummary {
 	};
 }
 
-export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge: boolean }, reviewRequired: boolean): Pull {
+export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge: boolean }, required: { review: boolean; checks: boolean }): Pull {
 	return {
 		...toPullSummary(row),
 		body: row.body,
@@ -988,7 +988,8 @@ export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge
 		canEdit: can.edit,
 		canLabel: can.label,
 		canMerge: can.merge,
-		reviewRequired,
+		reviewRequired: required.review,
+		checksRequired: required.checks,
 	};
 }
 

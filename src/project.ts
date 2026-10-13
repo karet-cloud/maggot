@@ -41,6 +41,9 @@ import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
+import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
+import type { CiJob } from "./ci/job.ts";
+import type { CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks } from "./api.ts";
 
 const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
 const AGENT_TOKEN_TTL = 6 * 3600;
@@ -142,6 +145,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly store: RepoStore;
 	private readonly code: CodeIndex;
 	private readonly hooks: Webhooks;
+	private readonly ci: CiRuns;
 	private workspace: Workspace | undefined;
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
@@ -202,6 +206,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				created_at TEXT NOT NULL,
 				updated_at TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS ci_pushes (id INTEGER PRIMARY KEY AUTOINCREMENT, branch TEXT NOT NULL, sha TEXT NOT NULL, actor TEXT, attempts INTEGER NOT NULL DEFAULT 0);
 			CREATE TABLE IF NOT EXISTS commit_summaries (hash TEXT PRIMARY KEY, summary TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS graph_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS history_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, at INTEGER NOT NULL);
@@ -214,7 +219,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			);
 		`);
 		// Columns added after the first schema; ALTER fails harmlessly when they already exist.
-		for (const column of ["ALTER TABLE tasks ADD COLUMN fork_attempts INTEGER NOT NULL DEFAULT 0", "ALTER TABLE branch_rules ADD COLUMN require_review INTEGER NOT NULL DEFAULT 0"]) {
+		for (const column of ["ALTER TABLE tasks ADD COLUMN fork_attempts INTEGER NOT NULL DEFAULT 0", "ALTER TABLE branch_rules ADD COLUMN require_review INTEGER NOT NULL DEFAULT 0", "ALTER TABLE branch_rules ADD COLUMN require_checks INTEGER NOT NULL DEFAULT 0"]) {
 			try {
 				this.sql.exec(column);
 			} catch {
@@ -224,6 +229,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 		this.code = new CodeIndex(this.sql);
 		this.hooks = new Webhooks(this.sql);
+		this.ci = new CiRuns({
+			sql: this.sql,
+			env,
+			store: this.store,
+			repoId: () => this.meta().name,
+			repository: () => this.repository(),
+			// Its own Worker's class, so a loopback namespace rather than a binding (a container can't be attached to a Durable Object bound by Worker name).
+			job: (id) => (ctx.exports.CiJob as unknown as DurableObjectNamespace<CiJob>).getByName(id),
+			emit: (data) => this.emit("ci.completed", null, data),
+			wake: (at) => this.scheduleAlarm(at),
+			archived: () => this.sql.exec("SELECT 1 FROM meta WHERE key = 'archived'").toArray().length > 0,
+		});
 	}
 
 	// ── Project ──────────────────────────────────────────────────────────────
@@ -318,8 +335,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { remote: await this.gitRemote("write"), rules: this.branchRules() };
 	}
 
-	/** Called after a push through the Git proxy: records the new head so live views refresh. */
-	async pushed(): Promise<void> {
+	/** Called after a push through the Git proxy: records the new head so live views refresh. `actor` is who pushed, if known. */
+	async pushed(actor: string | null = null): Promise<void> {
 		const meta = this.meta();
 		// The proxy can't see which refs a push touched, so compare every branch and tag with what was seen last.
 		const listed = await listRefs(await this.baseAccess(meta));
@@ -336,6 +353,60 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.emit("repo.pushed", null, { branch: meta.defaultBranch, from: main ? main.from : head, to: head, moved: Boolean(main), refs });
 		if (main) await this.requestIndex();
 		if (main?.to) this.closeReferencedIssues(main.from, main.to);
+		await this.startCi(refs, actor);
+	}
+
+	/**
+	 * Queues Actions for moved branches: this repository's push workflows, and the pull_request
+	 * workflows of open pull requests (here or in the repository this one was forked from) whose head is
+	 * one of them. The alarm starts them, so a push isn't held up reading workflow files, and nothing is
+	 * lost if this object restarts first.
+	 */
+	private async startCi(refs: { branch: string; from: string | null; to: string | null }[], actor: string | null) {
+		const moved = refs.filter((r) => r.to !== null && !r.branch.startsWith("megit-incoming/"));
+		if (moved.length === 0) return;
+		for (const r of moved) this.sql.exec("INSERT INTO ci_pushes (branch, sha, actor) VALUES (?, ?, ?)", r.branch, r.to, actor);
+		await this.scheduleAlarm(Date.now());
+	}
+
+	/** Starts the Actions queued by startCi. Each step is idempotent, so a push retried after a failure starts nothing twice. */
+	private async drainCiPushes(): Promise<void> {
+		const meta = this.meta();
+		for (const push of this.sql.exec<{ id: number; branch: string; sha: string; actor: string | null; attempts: number }>("SELECT * FROM ci_pushes ORDER BY id LIMIT 20").toArray()) {
+			try {
+				await this.ci.onPush(push.branch, push.sha, push.actor);
+				const pulls = await databaseOf(this.env)
+					.prepare(
+						`select p."repoId", i."number", p."baseBranch", a."username" as "author" from "pull" p join "issue" i on i."id" = p."issueId" left join "user" a on a."id" = i."authorId" where p."headRepoId" = ? and p."headBranch" = ? and i."state" = 'open'`,
+					)
+					.bind(meta.name, push.branch)
+					.all<{ repoId: string; number: number; baseBranch: string; author: string | null }>();
+				for (const p of pulls.results) {
+					const fork = p.repoId !== meta.name;
+					const input: PullTrigger = {
+						number: p.number,
+						headRepo: fork ? meta.name : null,
+						cloneUrl: this.repository().cloneUrl,
+						branch: push.branch,
+						sha: push.sha,
+						baseBranch: p.baseBranch,
+						fromFork: fork,
+						actor: push.actor,
+						action: "synchronize",
+						// Pushing here took write access to this repository; to the base, only if it's this one.
+						approved: !fork,
+						author: p.author,
+					};
+					if (fork) await (this.env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(p.repoId).ciPull(input);
+					else await this.ci.queuePull(input);
+				}
+				this.sql.exec("DELETE FROM ci_pushes WHERE id = ?", push.id);
+			} catch (err) {
+				console.error("ci: starting workflows for a push failed", err);
+				if (push.attempts + 1 >= 5) this.sql.exec("DELETE FROM ci_pushes WHERE id = ?", push.id);
+				else this.sql.exec("UPDATE ci_pushes SET attempts = attempts + 1 WHERE id = ?", push.id);
+			}
+		}
 	}
 
 	/** Branch heads as last seen (by a push or a merge). Older coordinators only kept the default branch's. */
@@ -534,6 +605,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Deletes every task fork, the project repo, and all coordinator state. */
 	async destroy(): Promise<void> {
 		const meta = this.meta();
+		// Jobs run (and may cost money) in their own objects; stop them before their runs are forgotten.
+		await this.ci.cancelAll("The repository was deleted");
 		const forks = [
 			...this.sql.exec<{ repo: string }>("SELECT repo FROM tasks WHERE status != 'abandoned'").toArray(),
 			...this.sql.exec<{ repo: string }>("SELECT repo FROM cleanup").toArray(),
@@ -706,8 +779,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					}
 					if (outcome.kind === "up-to-date") throw new HttpError(409, "NOTHING_TO_MERGE", `${input.base} already has everything in this pull request`);
 					if (await ws.push(base)) {
-						// Like a push: events, webhooks, the code index and "fixes #n" all follow.
-						await this.pushed();
+						// Like a push: events, webhooks, the code index, Actions and "fixes #n" all follow.
+						await this.pushed(input.author.name);
 						return { commit: outcome.oid, changedFiles: outcome.changedFiles };
 					}
 				}
@@ -845,7 +918,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.assertWritable();
 		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
 		const rule = protectionFor(this.branchRules(), name);
-		if (rule.blockDeletions || rule.requireMergeQueue || rule.requireReview) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
+		if (rule.blockDeletions || rule.requireMergeQueue || rule.requireReview || rule.requireChecks) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
 		const access = await this.baseAccess(meta);
 		const head = (await listBranches(access)).get(name);
 		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
@@ -877,6 +950,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (rule.requireMergeQueue) {
 			throw new HttpError(403, "PROTECTED_BRANCH", `${target} is a protected branch: changes to it go through the merge queue. Commit to a new branch instead.`);
 		}
+		if (rule.requireChecks) {
+			throw new HttpError(403, "PROTECTED_BRANCH", `${target} is a protected branch: changes to it go through pull requests whose Actions pass. Commit to a new branch instead.`);
+		}
 		if (input.newBranch !== undefined) {
 			if (!validBranchName(input.newBranch)) throw new HttpError(400, "INVALID_INPUT", `${input.newBranch} isn't a valid branch name`);
 			if (refs.has(input.newBranch)) throw new HttpError(409, "ALREADY_EXISTS", `Branch ${input.newBranch} already exists`);
@@ -901,7 +977,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				author: input.author,
 				time: Math.floor(Date.now() / 1000),
 			});
-			await this.pushed();
+			await this.pushed(input.author.name);
 			return { commit: result.commit, branch: target, packBytes: result.packBytes };
 		} catch (err) {
 			if (err instanceof PathError) throw new HttpError(400, "INVALID_PATH", err.message);
@@ -1147,7 +1223,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		// Each job fails on its own: one broken webhook or index update mustn't stall merges, or each other.
 		const run = (name: string, job: () => Promise<void>) => job().catch((err) => console.error(`alarm: ${name} failed`, err));
-		await Promise.all([run("merges", () => this.drainMerges()), run("provisioning", () => this.resumeProvisioning()), run("webhooks", () => this.deliverHooks())]);
+		await Promise.all([
+			run("merges", () => this.drainMerges()),
+			run("provisioning", () => this.resumeProvisioning()),
+			run("webhooks", () => this.deliverHooks()),
+			run("actions", async () => {
+				await this.drainCiPushes();
+				await this.ci.tick();
+			}),
+		]);
 		await run("indexing", () => this.indexIfWanted());
 		const pending = this.sql.exec<{ n: number }>(
 			"SELECT (SELECT COUNT(*) FROM tasks WHERE status = 'provisioning') + (SELECT COUNT(*) FROM cleanup) AS n",
@@ -1156,6 +1240,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const due = this.hooks.nextDue();
 		if (due !== null) await this.scheduleAlarm(Math.max(due, Date.now() + 1_000));
 		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0) await this.scheduleAlarm(Date.now() + 1_000);
+		if (this.sql.exec("SELECT 1 FROM ci_pushes LIMIT 1").toArray().length > 0) await this.scheduleAlarm(Date.now() + 5_000);
+		if (this.metaOrNull() && this.ci.busy()) await this.scheduleAlarm(Date.now() + 30_000);
+		const expiry = this.metaOrNull() ? this.ci.waitingExpiry() : null;
+		if (expiry !== null) await this.scheduleAlarm(Math.max(expiry, Date.now() + 60_000));
 	}
 
 	private async drainMerges(): Promise<void> {
@@ -1275,8 +1363,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		// "merging" here means a previous alarm died mid-merge; the merge is idempotent, so redo it.
 		if (row.status !== "queued" && row.status !== "merging") return;
 		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
-		if (protectionFor(this.branchRules(), meta.defaultBranch).requireReview) {
+		const rule = protectionFor(this.branchRules(), meta.defaultBranch);
+		if (rule.requireReview) {
 			return this.fail(id, "REVIEW_REQUIRED", `${meta.defaultBranch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
+		}
+		// The queue merges a fork's work without Actions having run on it, so a branch that wants them passed takes pull requests only.
+		if (rule.requireChecks) {
+			return this.fail(id, "CHECKS_REQUIRED", `${meta.defaultBranch} requires Actions to pass, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
 		}
 		this.setStatus(id, "merging");
 		this.emit("task.merging", id, {});
@@ -1336,6 +1429,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 						changedFiles: outcome.changedFiles,
 					});
 					this.closeReferencedIssues(baseHead, outcome.oid);
+					await this.startCi([{ branch: meta.defaultBranch, from: baseHead, to: outcome.oid }], row.agent);
 					this.sql.exec("INSERT OR IGNORE INTO cleanup (repo) VALUES (?)", row.repo);
 					return;
 				}
@@ -1561,7 +1655,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	branchRules(): BranchRule[] {
 		return this.sql
-			.exec<{ pattern: string; block_deletions: number; block_force_pushes: number; require_merge_queue: number; require_review: number; created_at: string }>(
+			.exec<{ pattern: string; block_deletions: number; block_force_pushes: number; require_merge_queue: number; require_review: number; require_checks: number; created_at: string }>(
 				"SELECT * FROM branch_rules ORDER BY created_at",
 			)
 			.toArray()
@@ -1571,6 +1665,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				blockForcePushes: Boolean(r.block_force_pushes),
 				requireMergeQueue: Boolean(r.require_merge_queue),
 				requireReview: Boolean(r.require_review),
+				requireChecks: Boolean(r.require_checks),
 				createdAt: r.created_at,
 			}));
 	}
@@ -1584,7 +1679,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async setBranchRule(rule: Omit<BranchRule, "createdAt">): Promise<BranchRule[]> {
 		this.meta();
 		if (!validPattern(rule.pattern)) throw new HttpError(400, "INVALID_INPUT", "A pattern is a branch name, optionally with * (within a segment) or ** (across them)");
-		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue && !rule.requireReview) {
+		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue && !rule.requireReview && !rule.requireChecks) {
 			throw new HttpError(400, "INVALID_INPUT", "Choose at least one protection");
 		}
 		const existing = this.sql.exec<{ created_at: string }>("SELECT created_at FROM branch_rules WHERE pattern = ?", rule.pattern).toArray()[0];
@@ -1592,12 +1687,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			throw new HttpError(403, "QUOTA_EXCEEDED", "A repository can have at most 50 branch rules");
 		}
 		this.sql.exec(
-			"INSERT OR REPLACE INTO branch_rules (pattern, block_deletions, block_force_pushes, require_merge_queue, require_review, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT OR REPLACE INTO branch_rules (pattern, block_deletions, block_force_pushes, require_merge_queue, require_review, require_checks, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 			rule.pattern,
 			rule.blockDeletions ? 1 : 0,
 			rule.blockForcePushes ? 1 : 0,
 			rule.requireMergeQueue ? 1 : 0,
 			rule.requireReview ? 1 : 0,
+			rule.requireChecks ? 1 : 0,
 			existing?.created_at ?? new Date().toISOString(),
 		);
 		return this.branchRules();
@@ -1662,6 +1758,145 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.emit(type, null, data);
 	}
 
+	// ── Actions (CI) ─────────────────────────────────────────────────────────
+
+	/** Progress from a CiJob Durable Object; the answer tells it to stop if its run was cancelled. */
+	async ciReport(jobId: string, report: SequencedReport): Promise<ReportAck> {
+		if (!this.metaOrNull()) return { cancel: true };
+		return this.ci.report(jobId, report);
+	}
+
+	/** A pull request was opened or reopened, or its head moved: record it and start its pull_request workflows (retried until they start). */
+	async ciPull(input: PullTrigger): Promise<void> {
+		this.meta();
+		await this.ci.queuePull(input);
+	}
+
+	/**
+	 * A pull request's checks on its head (the head of `branch` in `headRepo`, or `sha` when the caller
+	 * pinned one), judged as a merge into `base` would be.
+	 */
+	async ciPullChecks(input: { number: number; base: string; headRepo: string | null; branch: string; sha?: string }): Promise<Omit<PullChecks, "canStart">> {
+		const meta = this.meta();
+		let sha = input.sha;
+		if (!sha) {
+			using repo = await this.store.get(input.headRepo ?? meta.name);
+			sha = (await repo.log({ ref: input.branch, limit: 1 }))[0]?.hash;
+			if (!sha) throw new HttpError(409, "HEAD_GONE", `${input.branch} no longer exists, so its checks can't be read`);
+		}
+		const required = protectionFor(this.branchRules(), input.base).requireChecks;
+		return { ...(await this.ci.pullChecks({ number: input.number, base: input.base, headRepo: input.headRepo, sha })), required };
+	}
+
+	/** A pull request was closed or merged: stop what it no longer needs. */
+	async ciClosePull(number: number, merged: boolean): Promise<void> {
+		this.meta();
+		await this.ci.closePull(number, merged);
+	}
+
+	/** Creates the runs a pull request's checks list as missing (someone who can merge asked); they still wait for approval where its other runs would. */
+	async ciStartPull(input: Omit<PullTrigger, "action" | "approved" | "only">, missing: string[]): Promise<void> {
+		this.meta();
+		this.assertWritable();
+		await this.ci.startPull(input, missing);
+	}
+
+	async ciRuns(filter: { workflow?: string; branch?: string; pull?: number; sha?: string; before?: number; limit?: number }): Promise<CiRunList> {
+		this.meta();
+		return this.ci.listRuns(filter);
+	}
+
+	async ciRun(number: number): Promise<CiRun> {
+		this.meta();
+		return this.ci.getRun(number);
+	}
+
+	async ciLogs(number: number, job: string, after?: number): Promise<{ logs: CiLogChunk[]; next: number | null }> {
+		this.meta();
+		return this.ci.logs(number, job, after);
+	}
+
+	async ciChecks(sha: string): Promise<{ state: ChecksState; runs: CiRunSummary[] }> {
+		this.meta();
+		return this.ci.checksFor(sha);
+	}
+
+	async ciCancel(number: number): Promise<CiRun> {
+		this.meta();
+		return this.ci.cancel(number);
+	}
+
+	async ciRerun(number: number, actor: string | null): Promise<CiRun> {
+		this.meta();
+		this.assertWritable();
+		return this.ci.rerun(number, actor);
+	}
+
+	async ciApprove(number: number): Promise<CiRun> {
+		this.meta();
+		this.assertWritable();
+		return this.ci.approve(number);
+	}
+
+	/** Runs a workflow_dispatch workflow (as of the branch's head) on a branch. */
+	async ciDispatch(path: string, branch: string, actor: string | null): Promise<CiRunSummary[]> {
+		const meta = this.meta();
+		this.assertWritable();
+		const head = (await listBranches(await this.baseAccess(meta))).get(branch);
+		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${branch} not found`);
+		return this.ci.dispatch(path, branch, head, actor);
+	}
+
+	/** The workflow files at a branch, tag or commit (the default branch if none). */
+	async ciWorkflows(ref?: string): Promise<CiWorkflow[]> {
+		const meta = this.meta();
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
+		if (repoName !== meta.name) throw new HttpError(400, "INVALID_INPUT", "Workflows are read from this repository's branches, tags and commits");
+		using repo = await this.store.get(repoName);
+		const [commit] = await repo.log({ ref: resolved, limit: 1 });
+		if (!commit) {
+			if (ref === undefined) return [];
+			throw new HttpError(404, "NOT_FOUND", `${ref} not found`);
+		}
+		return this.ci.listWorkflows(commit.hash);
+	}
+
+	async ciSettings(): Promise<CiSettings> {
+		this.meta();
+		return this.ci.getSettings();
+	}
+
+	// An archived repository is read-only: settings can't be changed, but credentials can still be
+	// removed (a leaked token shouldn't wait), and runs cancelled.
+
+	async ciSetDefaultRunner(runner: unknown): Promise<CiSettings> {
+		this.meta();
+		this.assertWritable();
+		return this.ci.setDefaultRunner(runner);
+	}
+
+	async ciSetDepot(input: { token: unknown; orgId?: unknown }): Promise<CiSettings> {
+		this.meta();
+		this.assertWritable();
+		return this.ci.setDepot(input);
+	}
+
+	async ciRemoveDepot(): Promise<CiSettings> {
+		this.meta();
+		return this.ci.removeDepot();
+	}
+
+	async ciSetSecret(name: string, value: unknown): Promise<CiSettings> {
+		this.meta();
+		this.assertWritable();
+		return this.ci.setSecret(name, value);
+	}
+
+	async ciDeleteSecret(name: string): Promise<CiSettings> {
+		this.meta();
+		return this.ci.deleteSecret(name);
+	}
+
 	// ── Archiving ────────────────────────────────────────────────────────────
 
 	/**
@@ -1681,6 +1916,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before archiving`);
 		}
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('archived', '1')");
+		// Read-only from here: nothing new starts, and what's running stops rather than spending runner time.
+		await this.ci.cancelAll("The repository was archived");
 	}
 
 	private assertWritable() {

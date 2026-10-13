@@ -6,6 +6,7 @@ import { PROXY_SCRIPT, PROXY_SCRIPT_PATH } from "../src/ssh/proxy-script.ts";
 
 export { Limiter } from "../src/policy.ts";
 export { ProjectCoordinator, Registry } from "../src/project.ts";
+export { CiJob } from "../src/ci/job.ts";
 
 // One Worker serves everything: git smart HTTP at /<owner>/<repo>.git/..., SSH over a WebSocket at
 // /_ssh, the Hono API at /api/*, and the TanStack Start UI for the rest.

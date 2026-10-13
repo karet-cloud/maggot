@@ -120,7 +120,8 @@ export type EventType =
 	| "issue.commented"
 	| "pull.opened"
 	| "pull.reviewed"
-	| "pull.merged";
+	| "pull.merged"
+	| "ci.completed";
 
 export interface ProjectEvent {
 	seq: number;
@@ -328,7 +329,7 @@ export interface CodeSearch {
 	results: { path: string; matches: number; lines: { line: number; text: string }[] }[];
 }
 
-export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues" | "pull_request";
+export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues" | "pull_request" | "workflow_run";
 
 export interface Webhook {
 	id: string;
@@ -424,6 +425,8 @@ export interface BranchRule {
 	requireMergeQueue: boolean;
 	/** Pull requests into it need an approving review from someone who can merge, and no changes requested. */
 	requireReview: boolean;
+	/** Pull requests into it need their megit Actions runs on the head commit to have passed. */
+	requireChecks: boolean;
 	createdAt: string;
 }
 
@@ -516,6 +519,8 @@ export interface Pull extends PullSummary {
 	canMerge: boolean;
 	/** A branch rule on the base wants an approving review before merging. */
 	reviewRequired: boolean;
+	/** A branch rule on the base wants its Actions runs on the head commit to have passed before merging. */
+	checksRequired: boolean;
 }
 
 export interface Review {
@@ -596,4 +601,109 @@ export interface Invitation {
 	access: string;
 	from: string | null;
 	createdAt: string;
+}
+
+// ── Actions (CI) ─────────────────────────────────────────────────────────────
+
+/** Where jobs run: a Cloudflare container, or a Depot sandbox paid for with the repository's Depot token. */
+export type CiRunner = "cloudflare" | "depot";
+export type CiEvent = "push" | "pull_request" | "workflow_dispatch";
+/** `waiting`: a run from a fork's pull request, until someone who can merge approves it. */
+export type CiStatus = "queued" | "waiting" | "in_progress" | "completed";
+export type CiConclusion = "success" | "failure" | "cancelled" | "skipped";
+
+export interface CiStep {
+	name: string;
+	status: "pending" | "in_progress" | "completed";
+	conclusion: CiConclusion | null;
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
+export interface CiJob {
+	id: string;
+	key: string;
+	name: string;
+	runner: CiRunner;
+	vcpus: number | null;
+	needs: string[];
+	status: CiStatus;
+	conclusion: CiConclusion | null;
+	error: string | null;
+	steps: CiStep[];
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
+export interface CiRunSummary {
+	number: number;
+	workflow: string;
+	path: string;
+	event: CiEvent;
+	branch: string;
+	sha: string;
+	/** The pull request it ran for. */
+	pull: number | null;
+	fromFork: boolean;
+	actor: string | null;
+	status: CiStatus;
+	conclusion: CiConclusion | null;
+	error: string | null;
+	createdAt: string;
+	startedAt: string | null;
+	finishedAt: string | null;
+}
+
+export interface CiRun extends CiRunSummary {
+	jobs: CiJob[];
+}
+
+export interface CiRunList {
+	runs: CiRunSummary[];
+	/** Pass as `before` for older runs; null at the end. */
+	next: number | null;
+}
+
+/**
+ * A pull request's checks on its head commit, as the server judges them for "require Actions to pass":
+ * the same answer a merge gets.
+ */
+export interface PullChecks {
+	/** The head commit they're for. */
+	head: string;
+	/** A branch rule on the base requires them to pass before merging. */
+	required: boolean;
+	/** `missing`: a workflow that should run for this head has no run (start it with POST …/checks). */
+	state: "none" | "success" | "pending" | "waiting" | "missing" | "failure";
+	/** What's counted: the newest run of each workflow and event on the head (push, pull request and manual runs alike). */
+	runs: CiRunSummary[];
+	/** Workflow files that should run for this pull request at this head, but haven't. */
+	missing: string[];
+	/** Why the checks stop a merge (when required), or null when they don't. */
+	reason: string | null;
+	/** The caller may start the missing runs. */
+	canStart: boolean;
+}
+
+export interface CiLogChunk {
+	seq: number;
+	step: number;
+	text: string;
+}
+
+export interface CiWorkflow {
+	path: string;
+	name: string;
+	/** Why the file can't run, if it can't. */
+	error: string | null;
+	dispatch: boolean;
+}
+
+export interface CiSettings {
+	/** What `runs-on: ubuntu-latest` (or no runs-on) means here. */
+	defaultRunner: CiRunner;
+	cloudflareAvailable: boolean;
+	depot: { configured: boolean; orgId: string | null };
+	/** Secret names; values are never shown again. */
+	secrets: string[];
 }

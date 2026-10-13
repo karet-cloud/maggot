@@ -6,6 +6,7 @@ import { CommitList } from "../components/commits.tsx";
 import { DiffView, lineKey, type DiffNotes } from "../components/diff.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
+import { PullChecksBox, usePullChecks } from "../components/actions.tsx";
 import { Decision, PullStateBadge } from "../components/pulls.tsx";
 import { Button, cx, Empty, ErrorNote, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type IssueComment, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
@@ -163,6 +164,8 @@ function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDo
 	// The head shown in Files changed is the one that merges; if the branch moved since, the merge stops.
 	const files = useQuery({ queryKey: keys.pullFiles(project, pull.number), queryFn: () => api.pullFiles(project, pull.number), enabled: pull.pullState === "open" });
 	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.head), onSuccess: onDone });
+	// The server's own judgement of the checks (what a merge would get), so the two can't disagree.
+	const checks = usePullChecks(project, pull.number, pull.pullState === "open");
 	if (pull.pullState === "merged") {
 		return (
 			<div className="flex items-center gap-3 rounded-lg border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm">
@@ -183,38 +186,71 @@ function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDo
 		);
 	}
 	if (pull.pullState === "closed") return <p className="rounded-lg border border-line bg-panel px-4 py-3 text-sm text-dim">Closed without merging.</p>;
-	const blocked = pull.reviewRequired && pull.decision !== "approved";
+	const needsReview = pull.reviewRequired && pull.decision !== "approved";
+	// Until they're loaded, required checks count as not passed. If they can't be loaded, the merge itself is still refused with the server's reason.
+	const c = checks.data;
+	const stale = c && files.data && c.head !== files.data.head;
+	const checksReason =
+		pull.checksRequired && !checks.isError
+			? !c
+				? "Checking the required Actions runs…"
+				: stale
+					? `${pull.head} has new commits since this page loaded; reload to review them and see their checks.`
+					: c.reason
+			: null;
+	const reasons = [
+		needsReview && `${pull.base} is protected: someone who can merge has to approve, with no changes requested.`,
+		checksReason && `${pull.base} requires Actions to pass. ${checksReason}`,
+	].filter((r): r is string => Boolean(r));
+	const blocked = reasons.length > 0;
 	return (
-		<div className={cx("space-y-3 rounded-lg border px-4 py-3", blocked ? "border-amber-400/30 bg-amber-400/5" : "border-emerald-500/30 bg-emerald-500/5")}>
-			<div className="flex items-start gap-3 text-sm">
-				{blocked ? <CircleAlert className="mt-0.5 size-5 text-amber-300" /> : <Check className="mt-0.5 size-5 text-emerald-300" />}
-				<div>
-					<p className="font-medium">{blocked ? "An approving review is required" : pull.decision === "changes_requested" ? "Changes were requested" : "Ready to merge"}</p>
-					<p className="text-xs text-dim">
-						{blocked
-							? `${pull.base} is protected: someone who can merge has to approve, with no changes requested.`
-							: "Conflicts are found when merging; if there are any, nothing changes and the files are named."}
-					</p>
+		<div className="space-y-3">
+			<PullChecksBox project={project} number={pull.number} checks={c} canApprove={pull.canMerge} />
+			<div className={cx("space-y-3 rounded-lg border px-4 py-3", blocked ? "border-amber-400/30 bg-amber-400/5" : "border-emerald-500/30 bg-emerald-500/5")}>
+				<div className="flex items-start gap-3 text-sm">
+					{blocked ? <CircleAlert className="mt-0.5 size-5 text-amber-300" /> : <Check className="mt-0.5 size-5 text-emerald-300" />}
+					<div>
+						<p className="font-medium">
+							{needsReview && checksReason
+								? "An approving review and passing checks are required"
+								: needsReview
+									? "An approving review is required"
+									: checksReason
+										? "Required checks haven't passed"
+										: pull.decision === "changes_requested"
+											? "Changes were requested"
+											: "Ready to merge"}
+						</p>
+						{blocked ? (
+							reasons.map((r) => (
+								<p key={r} className="text-xs text-dim">
+									{r}
+								</p>
+							))
+						) : (
+							<p className="text-xs text-dim">Conflicts are found when merging; if there are any, nothing changes and the files are named.</p>
+						)}
+					</div>
 				</div>
+				{pull.canMerge && (
+					<div className="flex flex-wrap items-center gap-2">
+						<select
+							value={method}
+							onChange={(e) => setMethod(e.target.value as MergeMethod)}
+							aria-label="Merge method"
+							className="rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg"
+						>
+							<option value="merge">Create a merge commit</option>
+							<option value="squash">Squash and merge</option>
+						</select>
+						<Button variant="primary" busy={merge.isPending} disabled={blocked} onClick={() => merge.mutate()}>
+							<GitMerge className="size-4" />
+							{method === "squash" ? "Squash and merge" : "Merge pull request"}
+						</Button>
+					</div>
+				)}
+				<ErrorNote error={merge.error} />
 			</div>
-			{pull.canMerge && (
-				<div className="flex flex-wrap items-center gap-2">
-					<select
-						value={method}
-						onChange={(e) => setMethod(e.target.value as MergeMethod)}
-						aria-label="Merge method"
-						className="rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg"
-					>
-						<option value="merge">Create a merge commit</option>
-						<option value="squash">Squash and merge</option>
-					</select>
-					<Button variant="primary" busy={merge.isPending} disabled={blocked} onClick={() => merge.mutate()}>
-						<GitMerge className="size-4" />
-						{method === "squash" ? "Squash and merge" : "Merge pull request"}
-					</Button>
-				</div>
-			)}
-			<ErrorNote error={merge.error} />
 		</div>
 	);
 }

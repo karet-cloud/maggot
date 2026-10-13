@@ -16,6 +16,7 @@ import {
 	Tag,
 	Trash2,
 	Upload,
+	Workflow,
 	XCircle,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -46,6 +47,7 @@ const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"pull.opened": { icon: <GitPullRequest className="size-3.5" />, tone: "text-emerald-300" },
 	"pull.reviewed": { icon: <MessageSquare className="size-3.5" />, tone: "text-amber-300" },
 	"pull.merged": { icon: <GitMerge className="size-3.5" />, tone: "text-violet-300" },
+	"ci.completed": { icon: <Workflow className="size-3.5" />, tone: "text-sky-300" },
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -115,6 +117,13 @@ export function describe(e: ProjectEvent): string {
 								? "requested changes on"
 								: "reviewed";
 			return `${String(d.sender ?? "Someone")} ${verb} #${pull?.number ?? "?"} ${pull?.title ?? ""}`.trim();
+		}
+		case "ci.completed": {
+			const run = (d.run ?? {}) as { number?: number; workflow?: string; branch?: string; sha?: string; conclusion?: string; pull?: number | null };
+			const results: Record<string, string> = { success: "passed", failure: "failed", cancelled: "was cancelled", skipped: "was skipped" };
+			const result = results[run.conclusion ?? ""] ?? "finished";
+			const where = run.pull ? `pull request #${run.pull}` : `${run.branch ?? "?"} at ${shortOid(run.sha)}`;
+			return `${run.workflow ?? "A workflow"} #${run.number ?? "?"} ${result} on ${where}`;
 		}
 	}
 }

@@ -31,7 +31,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 7 | **Pull requests for humans** | Open a PR from any branch, show its diff, and merge it through the same merge queue the agents use. Reuses the task and queue machinery. | M |
 | 8 | **Code review** | Inline line comments on diffs, approve or request changes, and resolvable threads. | M |
 | 9 | **Compare view** | `base...head` for any two refs: commits plus diff. Becomes the "open PR" entry point. | S (after 1) |
-| 10 | **Branch protection** (done: no force pushes, no deletion, merge queue only; checks and reviews once they exist) | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
+| 10 | **Branch protection** (done: no force pushes, no deletion, merge queue only, required reviews, and required megit Actions runs) | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
 | 11 | **Issues** (done, with labels and "fixes #n"; agent task from an issue next) | Title, body, labels, open/closed, and a "fixes #n" link that closes the issue on merge. Can turn into an agent task in one click. | M |
 | 12 | **User accounts and permissions** (partly done: accounts, tokens, owner-only repos; password reset and change; email verification, rate limits and quotas; next: collaborators, orgs) | Better Auth with GitHub or email login. Per-project roles: read, write, admin. Per-user personal access tokens instead of one shared key. | L |
 | 13 | **Tags and releases** (done; uploaded release files next) | List tags. Create a release with notes and a downloadable archive. | S–M |
@@ -55,8 +55,8 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | # | Feature | Notes | Effort |
 |---|---------|-------|--------|
 | 23 | **Webhooks** (done) | Push, task, merge, and PR events posted to a URL, HMAC-signed. The event log already exists. | S–M |
-| 24 | **Checks / CI status** | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
-| 25 | **Built-in CI runner** | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
+| 24 | **Checks / CI status** (partly done: megit Actions runs show as checks on commits and PRs and can gate merges; an API for external CI is next) | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
+| 25 | **Built-in CI runner** (done: megit Actions on Cloudflare Containers or Depot sandboxes; matrix, caches, artifacts and third-party actions next) | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
 | 26 | **Notifications** (in-app done; email next) | An in-app inbox plus email for review requests, mentions, and failed merges. | M |
 | 27 | **Organizations and teams** | Group projects and share permissions. | L |
 | 28 | **Mirror from or to GitHub** | Keep a GitHub repo in sync both ways. Useful for adoption. | M |

@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, Comparison, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, PullChecks, Comparison, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
@@ -71,6 +71,7 @@ import { assertProjectName } from "./names.ts";
 import { measureRepository } from "./git/protocol.ts";
 import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
+import actions from "./ci/routes.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
@@ -770,6 +771,8 @@ function adminAction(rest: string, method: string): boolean {
 	if (rest === "/") return method === "PATCH" || method === "DELETE";
 	if (rest === "/transfer" || rest === "/hooks" || rest.startsWith("/hooks/") || rest === "/collaborators" || rest.startsWith("/collaborators/")) return true;
 	if (rest === "/protection") return method !== "GET";
+	// Actions settings name the secrets and the Depot organization; reads are admins' too.
+	if (rest === "/actions/settings" || rest === "/actions/depot" || rest.startsWith("/actions/secrets/")) return true;
 	return false;
 }
 
@@ -806,6 +809,9 @@ function readerAction(rest: string, method: string): boolean {
 function archivedAction(rest: string, method: string): boolean {
 	if (rest === "/") return method === "PATCH" || method === "DELETE";
 	if (rest === "/transfer") return method === "POST" || method === "DELETE";
+	// Likewise Actions credentials can be removed, and runs cancelled (archiving cancels them, but one may slip through).
+	if (method === "DELETE" && (rest === "/actions/depot" || /^\/actions\/secrets\/[^/]+$/.test(rest))) return true;
+	if (method === "POST" && /^\/actions\/runs\/\d+\/cancel$/.test(rest)) return true;
 	return /^\/hooks\/[^/]+$/.test(rest) && (method === "PATCH" || method === "DELETE");
 }
 
@@ -1327,7 +1333,7 @@ repo.get("/graph", async (c) => c.json(await project(c).graph(intParam(c.req.que
 repo.get("/protection", async (c) => c.json({ rules: await project(c).getBranchRules() }));
 
 repo.put("/protection", async (c) => {
-	const input = await body<{ pattern?: string; blockDeletions?: boolean; blockForcePushes?: boolean; requireMergeQueue?: boolean; requireReview?: boolean }>(c);
+	const input = await body<{ pattern?: string; blockDeletions?: boolean; blockForcePushes?: boolean; requireMergeQueue?: boolean; requireReview?: boolean; requireChecks?: boolean }>(c);
 	if (typeof input.pattern !== "string") throw new HttpError(400, "INVALID_INPUT", "pattern is required");
 	const rules = await project(c).setBranchRule({
 		pattern: input.pattern.trim(),
@@ -1335,6 +1341,7 @@ repo.put("/protection", async (c) => {
 		blockForcePushes: input.blockForcePushes === true,
 		requireMergeQueue: input.requireMergeQueue === true,
 		requireReview: input.requireReview === true,
+		requireChecks: input.requireChecks === true,
 	});
 	return c.json({ rules });
 });
@@ -1483,6 +1490,8 @@ repo.patch("/issues/:number", async (c) => {
 		by: user.id,
 	});
 	if (input.state && input.state !== issue.state) announceIssue(c, row, updated, input.state === "closed" ? "closed" : "reopened", user);
+	if (input.state === "open" && issue.state !== "open") reopenedPull(c, row, issue.number);
+	if (input.state === "closed" && issue.state !== "closed") closedPull(c, row, issue.number, false);
 	return c.json({ issue: toIssue(updated, true, owner) });
 });
 
@@ -1509,6 +1518,8 @@ repo.post("/issues/:number/comments", async (c) => {
 	if (changing) {
 		updated = await updateIssue(db(c.env), issue, { state: input.state, by: user.id });
 		announceIssue(c, row, updated, input.state === "closed" ? "closed" : "reopened", user);
+		if (input.state === "open") reopenedPull(c, row, issue.number);
+		else closedPull(c, row, issue.number, false);
 	}
 	return c.json({ comment, issue: toIssue(updated, true, owner) }, 201);
 });
@@ -1585,6 +1596,12 @@ async function reviewRequired(c: Context<App>, base: string): Promise<boolean> {
 	return protectionFor(await project(c).getBranchRules(), base).requireReview;
 }
 
+/** What branch rules on `base` want before a pull request merges into it. */
+async function mergeRequirements(c: Context<App>, base: string): Promise<{ review: boolean; checks: boolean }> {
+	const rule = protectionFor(await project(c).getBranchRules(), base);
+	return { review: rule.requireReview, checks: rule.requireChecks };
+}
+
 /** Tells the people involved and records the event (feed and pull_request webhooks). */
 function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.opened" | "pull.reviewed" | "pull.merged", actor: { id: string; username: string }, extra: Record<string, unknown> = {}) {
 	c.executionCtx.waitUntil(
@@ -1610,6 +1627,63 @@ function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.
 				...extra,
 			});
 		})().catch((err) => console.error("announcing pull request activity failed", err)),
+	);
+}
+
+/** What starts a pull request's runs: where its head is, and whether whoever caused it can write here (else they wait for approval). */
+function pullTrigger(c: Context<App>, row: RepoRow, pull: PullRow, head: string) {
+	const fork = pull.headRepoId !== null && pull.headRepoId !== row.id;
+	const owner = fork ? pull.headOwner : row.owner;
+	const name = fork ? pull.headName : row.name;
+	if (pull.headRepoId === null || !owner || !name) return null;
+	const user = c.var.principal;
+	return {
+		number: pull.number,
+		headRepo: fork ? pull.headRepoId : null,
+		cloneUrl: `${origin(c)}/${owner}/${name}.git`,
+		branch: pull.headBranch,
+		sha: head,
+		baseBranch: pull.baseBranch,
+		fromFork: fork,
+		actor: user.kind === "user" ? user.username : null,
+		author: pull.author,
+	};
+}
+
+/**
+ * Starts a pull request's pull_request workflows for its head commit, in the background. They wait for
+ * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here.
+ * If this doesn't get through, the pull request's checks show them missing, for a writer to start.
+ */
+function startPullChecks(c: Context<App>, row: RepoRow, pull: PullRow, head: string, action: "opened" | "reopened") {
+	const trigger = pullTrigger(c, row, pull, head);
+	if (!trigger) return;
+	c.executionCtx.waitUntil(
+		project(c)
+			.ciPull({ ...trigger, action, approved: canWrite(c.var.principal, row) })
+			.catch((err) => console.error("starting pull request Actions failed", err)),
+	);
+}
+
+/** A pull request closed or merged: its runs waiting for approval (and, if closed, the running ones) are cancelled. */
+function closedPull(c: Context<App>, row: RepoRow, number: number, merged: boolean) {
+	c.executionCtx.waitUntil(
+		(async () => {
+			if (!merged && !(await getPull(db(c.env), row.id, number))) return;
+			await project(c).ciClosePull(number, merged);
+		})().catch((err) => console.error("stopping pull request Actions failed", err)),
+	);
+}
+
+/** A pull request reopened: its head may have moved while it was closed, so its Actions start again (idempotently). */
+function reopenedPull(c: Context<App>, row: RepoRow, number: number) {
+	c.executionCtx.waitUntil(
+		(async () => {
+			const pull = await getPull(db(c.env), row.id, number);
+			if (!pull || pull.headRepoId === null || pull.mergedAt) return;
+			const head = (await project(c).pullCompare(pull.baseBranch, pull.headRepoId === row.id ? null : pull.headRepoId, pull.headBranch)).head;
+			startPullChecks(c, row, pull, head, "reopened");
+		})().catch((err) => console.error("starting pull request Actions failed", err)),
 	);
 }
 
@@ -1653,7 +1727,8 @@ repo.post("/pulls", async (c) => {
 	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", [], { headRepoId: fork?.id ?? row.id, headBranch: head, baseBranch: base });
 	const pull = (await getPull(db(c.env), row.id, issue.number)) as PullRow;
 	announcePull(c, row, pull, "pull.opened", user);
-	return c.json({ pull: toPull(pull, { edit: true, label: canWrite(user, row), merge: canWrite(user, row) }, await reviewRequired(c, base)) }, 201);
+	startPullChecks(c, row, pull, comparison.head, "opened");
+	return c.json({ pull: toPull(pull, { edit: true, label: canWrite(user, row), merge: canWrite(user, row) }, await mergeRequirements(c, base)) }, 201);
 });
 
 repo.get("/pulls/:number", async (c) => {
@@ -1665,7 +1740,7 @@ repo.get("/pulls/:number", async (c) => {
 	const [{ comments, earlier }, review, required] = await Promise.all([
 		listComments(db(c.env), pull.id, { id: me, owner }),
 		listReviews(db(c.env), pull.id),
-		reviewRequired(c, pull.baseBranch),
+		mergeRequirements(c, pull.baseBranch),
 	]);
 	return c.json({
 		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required),
@@ -1686,6 +1761,29 @@ repo.get("/pulls/:number/files", async (c) => {
 		return c.json({ comparison });
 	}
 	return c.json({ comparison: await project(c).pullCompare(pull.baseBranch, await liveHead(c, pull), pull.headBranch) });
+});
+
+// The checks on an open pull request's head, judged as its merge would be.
+async function pullChecks(c: Context<App>, pull: PullRow): Promise<PullChecks> {
+	if (pull.state !== "open" || pull.mergedAt) throw new HttpError(409, "PULL_CLOSED", "Only an open pull request's checks are shown");
+	const row = userRepo(c);
+	const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo: await liveHead(c, pull), branch: pull.headBranch });
+	return { ...checks, canStart: canWrite(c.var.principal, row) && !row.archivedAt };
+}
+
+repo.get("/pulls/:number/checks", async (c) => c.json(await pullChecks(c, await loadPull(c))));
+
+// Creates the runs the checks list as missing, and nothing else (write access). Where the pull request's
+// runs wait for approval (a fork's, or one a reader opened), these wait too, for Approve.
+repo.post("/pulls/:number/checks", async (c) => {
+	const row = userRepo(c);
+	requireVerified(c.env, c.var.principal);
+	const pull = await loadPull(c);
+	const before = await pullChecks(c, pull);
+	const trigger = pullTrigger(c, row, pull, before.head);
+	if (!trigger) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
+	await project(c).ciStartPull(trigger, before.missing);
+	return c.json(await pullChecks(c, pull));
 });
 
 repo.post("/pulls/:number/reviews", async (c) => {
@@ -1750,6 +1848,12 @@ repo.post("/pulls/:number/merge", async (c) => {
 		}
 		expectedHead = head;
 	}
+	// Actions have to have passed on the very commit that merges.
+	const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo, branch: pull.headBranch, sha: expectedHead });
+	if (checks.required) {
+		if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${pull.baseBranch} requires Actions to pass. ${checks.reason}`);
+		expectedHead = checks.head;
+	}
 	const from = pull.headOwner && headRepo ? `${pull.headOwner}:${pull.headBranch}` : pull.headBranch;
 	const message = method === "squash" ? `${pull.title} (#${pull.number})\n\n${pull.body}`.trim() : `Merge pull request #${pull.number} from ${from}\n\n${pull.title}`;
 	const result = await project(c).mergePull({
@@ -1762,6 +1866,7 @@ repo.post("/pulls/:number/merge", async (c) => {
 		expectedHead,
 	});
 	await markPullMerged(db(c.env), pull, user.id, result.commit);
+	closedPull(c, row, pull.number, true);
 	// "Fixes #n" in the description closes those issues too, as GitHub does.
 	const fixes = [...new Set([...`${pull.title}\n${pull.body}`.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)].map((m) => Number(m[1])))];
 	if (fixes.length > 0 && pull.baseBranch === (await project(c).getProject()).defaultBranch) {
@@ -1769,7 +1874,7 @@ repo.post("/pulls/:number/merge", async (c) => {
 	}
 	announcePull(c, row, pull, "pull.merged", user, { method, commit: result.commit });
 	const merged = (await getPull(db(c.env), row.id, pull.number)) as PullRow;
-	return c.json({ pull: toPull(merged, { edit: true, label: true, merge: true }, false), commit: result.commit });
+	return c.json({ pull: toPull(merged, { edit: true, label: true, merge: true }, { review: false, checks: false }), commit: result.commit });
 });
 
 // ── Webhooks (owner only, reads included: they show URLs and payloads) ─────────
@@ -1859,6 +1964,8 @@ repo.post("/tasks/:task/submit", async (c) => c.json({ task: await project(c).su
 
 repo.post("/tasks/:task/abandon", async (c) => c.json({ task: await project(c).abandon(c.req.param("task")) }));
 
+
+repo.route("/actions", actions);
 
 app.route("/api/repos/:owner/:repo", repo);
 app.route("/api/projects/:project", repo);

@@ -1,7 +1,8 @@
 // Git smart HTTP at `<origin>/<owner>/<repo>.git`: plain `git clone`, `fetch` and `push` against megit
 // URLs. The Worker checks who may do what, then streams the exchange to the repository in Artifacts
 // with a short-lived internal token, so users only ever hold megit credentials.
-import { canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
+import { apiKey, canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
+import { CHECKOUT_TOKEN_PREFIX, verifyCheckoutToken } from "./ci/token.ts";
 import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts";
 import { toHttpError } from "./errors.ts";
 import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
@@ -75,6 +76,35 @@ export async function authorizeGit(env: Env, principal: Principal, owner: string
 		const blocked = await pushBlocked(env, db(env), row);
 		if (blocked) return { ok: false, status: 403, inProtocol: true, message: blocked };
 	}
+	return { ok: true, row };
+}
+
+/** The Actions checkout token (`mgci_…`) a request carries as its Basic password, if it carries one. */
+function checkoutToken(request: Request): string | null {
+	const header = request.headers.get("authorization") ?? "";
+	if (!header.startsWith("Basic ")) return null;
+	let decoded: string;
+	try {
+		decoded = atob(header.slice(6).trim());
+	} catch {
+		return null;
+	}
+	const secret = decoded.slice(decoded.indexOf(":") + 1);
+	return secret.startsWith(CHECKOUT_TOKEN_PREFIX) ? secret : null;
+}
+
+/**
+ * An Actions job checking out its commit: the token is read-only, for the repositories it names (by
+ * id, so a rename doesn't matter), and expires soon after the job's time limit. It works whatever the
+ * repository's visibility, since the job's run was already allowed to read it.
+ */
+async function authorizeCheckout(env: Env, token: string, route: GitRoute, pushing: boolean): Promise<{ ok: true; row: RepoRow } | { ok: false; status: 401 | 403 | 404; message: string }> {
+	const grant = await verifyCheckoutToken(apiKey(env), token);
+	if (!grant) return { ok: false, status: 401, message: "That Actions checkout token is invalid or has expired." };
+	if (pushing) return { ok: false, status: 403, message: "Actions checkout tokens are read-only." };
+	await ensureSchema(db(env));
+	const row = await findRepo(db(env), route.owner, route.repo, null);
+	if (!row || !grant.repos.includes(row.id)) return { ok: false, status: 404, message: `Repository ${route.owner}/${route.repo} not found.` };
 	return { ok: true, row };
 }
 
@@ -226,6 +256,23 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 	if (!service || !SERVICES.has(service)) return deny(403, "Only smart HTTP is supported; upgrade git.");
 	if (route.endpoint !== "info/refs" && request.method !== "POST") return deny(405, "Method not allowed");
 
+	const pushing = service === "git-receive-pack";
+	const checkout = checkoutToken(request);
+	if (checkout !== null) {
+		const ci = await authorizeCheckout(env, checkout, route, pushing);
+		if (!ci.ok) return ci.status === 401 ? challenge(ci.message) : deny(ci.status, ci.message);
+		const remote = await (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(ci.row.id).gitRemote("read");
+		const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
+		const res = await upstreamFetch(remote, `${route.endpoint}${url.search}`, { method: request.method, headers, body: request.method === "POST" ? request.body : undefined });
+		if (res.status === 401 || res.status === 403) return deny(502, "The storage backend refused the request.");
+		const out = new Headers({ "cache-control": "no-cache" });
+		for (const name of ["content-type", "expires", "pragma"]) {
+			const value = res.headers.get(name);
+			if (value) out.set(name, value);
+		}
+		return new Response(res.body, { status: res.status, headers: out });
+	}
+
 	let principal: Principal;
 	try {
 		principal = await guardCredentials(env, request, () => resolvePrincipal(env, request));
@@ -237,7 +284,6 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		if (err instanceof RateLimited) return new Response(`${err.detail}\n`, { status: 429, headers: { "content-type": "text/plain", "retry-after": String(err.retryAfter) } });
 		return toHttpError(err).status === 401 ? challenge("Invalid username or token.") : deny(500, "Authentication failed");
 	}
-	const pushing = service === "git-receive-pack";
 	const access = await authorizeGit(env, principal, route.owner, route.repo, pushing, url.origin);
 	if (!access.ok) {
 		if (access.status === 401) return challenge(access.message);

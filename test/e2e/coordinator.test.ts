@@ -91,7 +91,8 @@ before(async () => {
 	// output goes to a log that is kept when a test fails.
 	workerLog = await open(join(tmpdir(), `megit-e2e-${run}.log`), "w");
 	worker = spawn("node_modules/.bin/vite", ["dev", "--mode", "offline"], {
-		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1", MEGIT_POLICY: JSON.stringify(POLICY) },
+		// Its own local D1 and Durable Object state: a dev server already running in this checkout keeps its own.
+		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1", MEGIT_POLICY: JSON.stringify(POLICY), MEGIT_STATE_DIR: join(root, "state") },
 		stdio: ["ignore", workerLog.fd, workerLog.fd],
 		detached: true,
 	});
@@ -1224,4 +1225,167 @@ test("organizations, teams and collaborators: invitations, read for members, wri
 	// Membership is for members to see.
 	const outside = (await (await as(null)(`/orgs/${orgName}`)).json()) as { org: { members: unknown[] } };
 	assert.deepEqual(outside.org.members, []);
+});
+
+test("Actions: runs from pushes, pull requests and by hand; fork approval; admin-only settings; required checks on merges and writes", async () => {
+	const ada = await newUser("cia");
+	const bob = await newUser("cib");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	const json = async <T>(res: Response | Promise<Response>, status = 200): Promise<T> => {
+		const r = await res;
+		assert.equal(r.status, status, await r.clone().text());
+		return (await r.json()) as T;
+	};
+	type Run = { number: number; event: string; status: string; conclusion: string | null; fromFork: boolean; pull: number | null; sha: string; jobs: { id: string; error: string | null }[] };
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "ci", visibility: "public", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/ci`;
+	const actions = `${repo}/actions`;
+	const exec = promisify(execFile);
+	const url = (who: { username: string; token: string } | null, path: string) => {
+		const u = new URL(`${api}/${path}.git`);
+		if (who) {
+			u.username = who.username;
+			u.password = who.token;
+		}
+		return u.toString();
+	};
+	const git = (cwd: string, ...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	const dir = join(root, "ci");
+	await exec("git", ["clone", "-q", url(ada, `${ada.username}/ci`), dir]);
+	await exec("mkdir", ["-p", join(dir, ".megit/workflows")]);
+	await writeFile(
+		join(dir, ".megit/workflows/build.yml"),
+		"name: Build\non:\n  push:\n    branches: [master]\n  pull_request:\n  workflow_dispatch:\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo hi\n",
+	);
+	await git(dir, "add", "-A");
+	await git(dir, "commit", "-q", "-m", "Add a workflow");
+	await git(dir, "push", "-q", "origin", "master");
+	const head = (await git(dir, "rev-parse", "HEAD")).stdout.trim();
+
+	// The push starts the workflow from the pushed commit. With no Cloudflare container on this server
+	// jobs go to Depot, and without a Depot token the job fails saying so (nothing is spent).
+	const pushed = await until(async () => {
+		const list = await json<{ runs: Run[]; next: number | null }>(as(null)(`${actions}/runs?sha=${head}`));
+		return list.runs.find((r) => r.status === "completed");
+	});
+	assert.deepEqual([pushed.event, pushed.conclusion, pushed.sha], ["push", "failure", head]);
+	const detail = await json<Run>(as(null)(`${actions}/runs/${pushed.number}`));
+	assert.match(detail.jobs[0].error ?? "", /Depot token/);
+	const logs = await json<{ logs: unknown[]; next: number | null }>(as(null)(`${actions}/runs/${pushed.number}/jobs/${detail.jobs[0].id}/logs`));
+	assert.deepEqual(logs, { logs: [], next: null });
+	assert.equal((await as(null)(`${actions}/runs/999999`)).status, 404);
+	const workflows = await json<{ workflows: { path: string; dispatch: boolean; error: string | null }[] }>(as(null)(`${actions}/workflows?ref=master`));
+	assert.deepEqual(workflows.workflows.map((w) => [w.path, w.dispatch, w.error]), [[".megit/workflows/build.yml", true, null]]);
+	const events = await json<{ events: { type: string; data: { run?: { number: number } } }[] }>(as(ada)(`${repo}/events`));
+	assert.ok(events.events.some((e) => e.type === "ci.completed" && e.data.run?.number === pushed.number));
+
+	// Settings, the Depot token and secrets are admins' only, reads included.
+	assert.equal((await as(null)(`${actions}/settings`)).status, 404);
+	assert.equal((await as(bob)(`${actions}/settings`)).status, 404);
+	assert.equal((await as(bob)(`${actions}/secrets/TOKEN`, { method: "PUT", body: JSON.stringify({ value: "x" }) })).status, 403);
+	const settings = await json<{ defaultRunner: string; cloudflareAvailable: boolean; depot: { configured: boolean }; secrets: string[] }>(as(ada)(`${actions}/settings`));
+	assert.deepEqual([settings.defaultRunner, settings.cloudflareAvailable, settings.depot.configured], ["depot", false, false]);
+	assert.equal((await as(ada)(`${actions}/settings`, { method: "PUT", body: JSON.stringify({ defaultRunner: "cloudflare" }) })).status, 400);
+	assert.deepEqual((await json<{ secrets: string[] }>(as(ada)(`${actions}/secrets/TOKEN`, { method: "PUT", body: JSON.stringify({ value: "s3cret" }) }))).secrets, ["TOKEN"]);
+	assert.ok(!JSON.stringify(await json(as(ada)(`${actions}/settings`))).includes("s3cret"));
+	assert.deepEqual((await json<{ secrets: string[] }>(as(ada)(`${actions}/secrets/TOKEN`, { method: "DELETE" }))).secrets, []);
+
+	// Running by hand and re-running need write access.
+	assert.equal((await as(bob)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) })).status, 403);
+	const dispatched = await json<{ runs: Run[] }>(as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) }), 201);
+	assert.equal(dispatched.runs[0].event, "workflow_dispatch");
+	assert.equal((await as(bob)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" })).status, 403);
+	const rerun = await json<Run>(as(ada)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" }), 201);
+	assert.notEqual(rerun.number, pushed.number);
+
+	// A fork's pull request waits for approval from someone who can merge.
+	await json(as(bob)(`${repo}/forks`, { method: "POST", body: "{}" }), 201);
+	const forkDir = join(root, "ci-fork");
+	await exec("git", ["clone", "-q", url(bob, `${bob.username}/ci`), forkDir]);
+	await writeFile(join(forkDir, "change.txt"), "one\n");
+	await git(forkDir, "add", "-A");
+	await git(forkDir, "commit", "-q", "-m", "A change");
+	await git(forkDir, "push", "-q", "origin", "HEAD:change");
+	const forkHead = (await git(forkDir, "rev-parse", "HEAD")).stdout.trim();
+	const pull = (await json<{ pull: { number: number; checksRequired: boolean } }>(as(bob)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Change", base: "master", head: "change", headRepo: `${bob.username}/ci` }) }), 201)).pull;
+	const waiting = await until(async () => (await json<{ runs: Run[] }>(as(null)(`${actions}/runs?pull=${pull.number}`))).runs.find((r) => r.sha === forkHead));
+	assert.deepEqual([waiting.status, waiting.fromFork, waiting.event], ["waiting", true, "pull_request"]);
+
+	// Requiring Actions: no direct pushes or web commits to master, and a pull request merges only once they pass.
+	await json(as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireChecks: true }) }));
+	assert.equal((await json<{ pull: { checksRequired: boolean; reviewRequired: boolean } }>(as(null)(`${repo}/pulls/${pull.number}`))).pull.checksRequired, true);
+	await writeFile(join(dir, "direct.txt"), "x\n");
+	await git(dir, "add", "-A");
+	await git(dir, "commit", "-q", "-m", "Direct");
+	await assert.rejects(git(dir, "push", "-q", "origin", "master"), /Actions pass/);
+	const web = await as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", message: "web", files: [{ path: "web.txt", content: "x" }] }) });
+	assert.equal(web.status, 403, await web.clone().text());
+	const waitingMerge = await as(ada)(`${repo}/pulls/${pull.number}/merge`, { method: "POST", body: "{}" });
+	assert.equal(waitingMerge.status, 403);
+	assert.match(((await waitingMerge.json()) as { error: { code: string; message: string } }).error.message, /waiting for approval/);
+
+	assert.equal((await as(bob)(`${actions}/runs/${waiting.number}/approve`, { method: "POST" })).status, 403);
+	const approved = await json<Run>(as(ada)(`${actions}/runs/${waiting.number}/approve`, { method: "POST" }));
+	assert.notEqual(approved.status, "waiting");
+	await until(async () => ((await json<Run>(as(null)(`${actions}/runs/${waiting.number}`))).status === "completed" ? true : undefined));
+	const failedMerge = await as(ada)(`${repo}/pulls/${pull.number}/merge`, { method: "POST", body: "{}" });
+	assert.equal(failedMerge.status, 403);
+	assert.equal(((await failedMerge.json()) as { error: { code: string } }).error.code, "CHECKS_REQUIRED");
+	// The pull request's checks say the same as the merge: the server's own answer, for the merge box.
+	type Checks = { head: string; required: boolean; state: string; runs: Run[]; missing: string[]; reason: string | null; canStart: boolean };
+	const seen = await json<Checks>(as(null)(`${repo}/pulls/${pull.number}/checks`));
+	assert.deepEqual([seen.head, seen.required, seen.state, seen.missing, seen.canStart], [forkHead, true, "failure", [], false]);
+	assert.match(seen.reason ?? "", /Actions failed/);
+	assert.equal((await json<Checks>(as(ada)(`${repo}/pulls/${pull.number}/checks`))).canStart, true);
+	assert.equal((await as(bob)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" })).status, 403, "only people who can merge start checks");
+	assert.equal((await json<Checks>(as(ada)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" }))).state, "failure", "nothing was missing, so nothing new started");
+
+	// A newer commit on the fork's branch starts its runs again (waiting); cancelling one settles it.
+	await writeFile(join(forkDir, "change.txt"), "two\n");
+	await git(forkDir, "commit", "-q", "-am", "Another change");
+	await git(forkDir, "push", "-q", "origin", "HEAD:change");
+	const newer = (await git(forkDir, "rev-parse", "HEAD")).stdout.trim();
+	const next = await until(async () => (await json<{ runs: Run[] }>(as(null)(`${actions}/runs?pull=${pull.number}`))).runs.find((r) => r.sha === newer));
+	assert.equal(next.status, "waiting");
+	assert.equal((await as(bob)(`${actions}/runs/${next.number}/cancel`, { method: "POST" })).status, 403);
+	const cancelled = await json<Run>(as(ada)(`${actions}/runs/${next.number}/cancel`, { method: "POST" }));
+	assert.deepEqual([cancelled.status, cancelled.conclusion], ["completed", "cancelled"]);
+
+	// Archived: nothing runs and settings can't change, but credentials can still be removed and runs cancelled.
+	await json(as(ada)(`${actions}/secrets/LEAKED`, { method: "PUT", body: JSON.stringify({ value: "oops-123" }) }));
+	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: true }) }));
+	assert.equal((await as(ada)(`${actions}/secrets/MORE`, { method: "PUT", body: JSON.stringify({ value: "nope-123" }) })).status, 403);
+	assert.equal((await as(ada)(`${actions}/settings`, { method: "PUT", body: JSON.stringify({ defaultRunner: "depot" }) })).status, 403);
+	assert.equal((await as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) })).status, 403);
+	assert.equal((await as(ada)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" })).status, 403);
+	assert.deepEqual((await json<{ secrets: string[] }>(as(ada)(`${actions}/secrets/LEAKED`, { method: "DELETE" }))).secrets, []);
+	assert.equal((await json<{ depot: { configured: boolean } }>(as(ada)(`${actions}/depot`, { method: "DELETE" }))).depot.configured, false);
+	assert.equal((await as(ada)(`${actions}/runs/${next.number}/cancel`, { method: "POST" })).status, 409, "cancel gets past the archive (the run is already over)");
+	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: false }) }));
+
+	// Actions checkout tokens: a forged one is refused, and none of them push.
+	const forged = await fetch(`${api}/${ada.username}/ci.git/info/refs?service=git-upload-pack`, { headers: { authorization: `Basic ${btoa("x:mgci_eyJyIjpbXSwiZSI6MX0.AAAA")}` } });
+	assert.equal(forged.status, 401);
+	assert.match(await forged.text(), /Actions checkout token is invalid or has expired/);
+
+	// A real one (minted as the run engine does, with the dev key) fetches the repository it names, and nothing else.
+	const { readdir } = await import("node:fs/promises");
+	const { mintCheckoutToken } = await import("../../src/ci/token.ts");
+	const stores = (await readdir(join(root, "artifacts", "repos"))).map((d) => join(root, "artifacts", "repos", d));
+	const has = (store: string, sha: string) => exec("git", ["--git-dir", store, "cat-file", "-e", `${sha}^{commit}`]).then(() => true, () => false);
+	let repoId = "";
+	for (const store of stores) if ((await has(store, head)) && !(await has(store, forkHead))) repoId = store.split("/").pop()!.replace(/\.git$/, "");
+	assert.ok(repoId, "found the repository's storage");
+	const token = await mintCheckoutToken("dev", { repos: [repoId], expires: Date.now() + 60_000 });
+	const header = `http.extraHeader=Authorization: Basic ${btoa(`x:${token}`)}`;
+	const refs = (await git(dir, "-c", header, "ls-remote", `${api}/${ada.username}/ci.git`)).stdout;
+	assert.ok(refs.includes(head), "the checkout token reads the repository");
+	await assert.rejects(git(dir, "-c", header, "push", "-q", `${api}/${ada.username}/ci.git`, "HEAD:refs/heads/sneaky"), /read-only|403/);
+	await assert.rejects(git(dir, "-c", header, "ls-remote", `${api}/${bob.username}/ci.git`), /not found|404/);
+	const expired = await mintCheckoutToken("dev", { repos: [repoId], expires: Date.now() - 1 });
+	assert.equal((await fetch(`${api}/${ada.username}/ci.git/info/refs?service=git-upload-pack`, { headers: { authorization: `Basic ${btoa(`x:${expired}`)}` } })).status, 401);
 });
