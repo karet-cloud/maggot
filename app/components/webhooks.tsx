@@ -10,6 +10,7 @@ const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
 	{ id: "task", label: "Agent tasks", hint: "Created, ready, submitted, conflicts, failures" },
 	{ id: "release", label: "Releases", hint: "A release was published" },
 	{ id: "issues", label: "Issues", hint: "Opened, closed, reopened, commented on" },
+	{ id: "pull_request", label: "Pull requests", hint: "Opened, reviewed, merged" },
 ];
 
 /** A repository's webhooks: add, pause, test and inspect them. */

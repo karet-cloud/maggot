@@ -5,6 +5,19 @@ import type {
 	Commit,
 	CommitDetail,
 	FileList,
+	MergeMethod,
+	Collaborator,
+	Invitation,
+	Org,
+	OrgRole,
+	Permission,
+	Pull,
+	PullList,
+	Review,
+	ReviewComment,
+	ReviewState,
+	Blame,
+	FileHistory,
 	BranchRule,
 	Graph,
 	Issue,
@@ -93,6 +106,8 @@ export interface CreateRepoInput {
 	defaultBranch?: string;
 	importUrl?: string;
 	readme?: boolean;
+	/** An organization to create it in. */
+	owner?: string;
 }
 
 export const api = {
@@ -125,6 +140,9 @@ export const api = {
 	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
+	fileHistory: (project: string, path: string, ref?: string, from?: string) =>
+		call<FileHistory>("GET", `${p(project)}/history?${new URLSearchParams({ path, ...(ref ? { ref } : {}), ...(from ? { from } : {}) })}`),
+	blame: (project: string, path: string, ref?: string) => call<Blame>("GET", `${p(project)}/blame?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`),
 	/** Every file path at a ref, for "Go to file". */
 	paths: (project: string, ref?: string) => call<FileList>("GET", `${p(project)}/paths${ref ? `?${new URLSearchParams({ ref })}` : ""}`),
 	transfer: (project: string) => call<{ transfer: RepoTransfer | null }>("GET", `${p(project)}/transfer`).then((r) => r.transfer),
@@ -165,6 +183,40 @@ export const api = {
 		call<{ comment: IssueComment }>("PATCH", `${p(project)}/issues/${number}/comments/${encodeURIComponent(id)}`, { body }).then((r) => r.comment),
 	deleteComment: (project: string, number: number, id: string) =>
 		call<{ deleted: true }>("DELETE", `${p(project)}/issues/${number}/comments/${encodeURIComponent(id)}`),
+	pulls: (project: string, filter: { state?: "open" | "closed" | "all"; q?: string } = {}) =>
+		call<PullList>("GET", `${p(project)}/pulls?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`),
+	pull: (project: string, number: number) =>
+		call<{ pull: Pull; comments: IssueComment[]; earlier: boolean; reviews: Review[]; reviewComments: ReviewComment[] }>("GET", `${p(project)}/pulls/${number}`),
+	pullFiles: (project: string, number: number) => call<{ comparison: Comparison }>("GET", `${p(project)}/pulls/${number}/files`).then((r) => r.comparison),
+	pullPreview: (project: string, base: string, head: string, headRepo?: string) =>
+		call<{ comparison: Comparison }>("GET", `${p(project)}/pulls/compare?${new URLSearchParams({ base, head, ...(headRepo ? { headRepo } : {}) })}`).then((r) => r.comparison),
+	createPull: (project: string, input: { title: string; body: string; base: string; head: string; headRepo?: string }) =>
+		call<{ pull: Pull }>("POST", `${p(project)}/pulls`, input).then((r) => r.pull),
+	review: (project: string, number: number, input: { state: ReviewState; body: string; commit?: string; comments: { path: string; line: number; side: "new" | "old"; body: string }[] }) =>
+		call<{ review: string }>("POST", `${p(project)}/pulls/${number}/reviews`, input),
+	mergePull: (project: string, number: number, method: MergeMethod) => call<{ pull: Pull; commit: string }>("POST", `${p(project)}/pulls/${number}/merge`, { method }),
+	myOrgs: () => call<{ orgs: { name: string; displayName: string; role: OrgRole }[] }>("GET", "/orgs").then((r) => r.orgs),
+	createOrg: (name: string, displayName: string) => call<{ org: Org }>("POST", "/orgs", { name, displayName }).then((r) => r.org),
+	org: (name: string) => call<{ org: Org }>("GET", `/orgs/${encodeURIComponent(name)}`).then((r) => r.org),
+	deleteOrg: (name: string) => call<{ deleted: true }>("DELETE", `/orgs/${encodeURIComponent(name)}`),
+	inviteMember: (org: string, username: string, role: OrgRole) => call<{ org: Org }>("POST", `/orgs/${encodeURIComponent(org)}/members`, { username, role }).then((r) => r.org),
+	setMemberRole: (org: string, username: string, role: OrgRole) =>
+		call<{ org: Org }>("PATCH", `/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(username)}`, { role }).then((r) => r.org),
+	removeMember: (org: string, username: string) => call<{ org: Org }>("DELETE", `/orgs/${encodeURIComponent(org)}/members/${encodeURIComponent(username)}`).then((r) => r.org),
+	createTeam: (org: string, name: string) => call<{ org: Org }>("POST", `/orgs/${encodeURIComponent(org)}/teams`, { name }).then((r) => r.org),
+	deleteTeam: (org: string, team: string) => call<{ org: Org }>("DELETE", `/orgs/${encodeURIComponent(org)}/teams/${team}`).then((r) => r.org),
+	setTeamMember: (org: string, team: string, username: string, member: boolean) =>
+		call<{ org: Org }>(member ? "PUT" : "DELETE", `/orgs/${encodeURIComponent(org)}/teams/${team}/members/${encodeURIComponent(username)}`).then((r) => r.org),
+	setTeamRepo: (org: string, team: string, repo: string, permission: Permission | null) =>
+		call<{ org: Org }>(permission ? "PUT" : "DELETE", `/orgs/${encodeURIComponent(org)}/teams/${team}/repos/${encodeURIComponent(repo)}`, permission ? { permission } : undefined).then((r) => r.org),
+	collaborators: (project: string) => call<{ collaborators: Collaborator[] }>("GET", `${p(project)}/collaborators`).then((r) => r.collaborators),
+	setCollaborator: (project: string, username: string, permission: Permission) =>
+		call<{ collaborators: Collaborator[] }>("PUT", `${p(project)}/collaborators/${encodeURIComponent(username)}`, { permission }).then((r) => r.collaborators),
+	removeCollaborator: (project: string, username: string) =>
+		call<{ collaborators: Collaborator[] }>("DELETE", `${p(project)}/collaborators/${encodeURIComponent(username)}`).then((r) => r.collaborators),
+	invitations: () => call<{ invitations: Invitation[] }>("GET", "/invitations").then((r) => r.invitations),
+	answerInvitation: (invitation: Invitation, accept: boolean) =>
+		call<{ ok: true }>("POST", `/invitations/${invitation.kind}/${encodeURIComponent(invitation.id)}/${accept ? "accept" : "decline"}`),
 	ssh: () => call<SshInfo>("GET", "/ssh"),
 	sshKeys: () => call<{ keys: SshKey[] }>("GET", "/ssh/keys").then((r) => r.keys),
 	addSshKey: (key: string, name?: string) => call<{ key: SshKey }>("POST", "/ssh/keys", { key, name }).then((r) => r.key),
@@ -192,7 +244,7 @@ export const api = {
 			newBranch?: string;
 			message: string;
 			/** `previousPath`: the file this one was renamed from, whose mode it keeps. */
-			files: { path: string; content: string | null; previousPath?: string }[];
+			files: { path: string; content: string | null; previousPath?: string; encoding?: "base64" }[];
 		},
 	) => call<{ commit: string; branch: string }>("POST", `${p(project)}/contents`, input),
 	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
@@ -263,14 +315,23 @@ export const keys = {
 	ssh: ["ssh"] as const,
 	sshKeys: ["ssh", "keys"] as const,
 	transfers: ["transfers"] as const,
+	invitations: ["invitations"] as const,
+	myOrgs: ["orgs", "mine"] as const,
+	org: (name: string) => ["orgs", name] as const,
+	collaborators: (project: string) => ["project", project, "collaborators"] as const,
 	transfer: (project: string) => ["project", project, "transfer"] as const,
 	paths: (project: string, ref?: string) => ["project", project, "paths", ref ?? ""] as const,
+	fileHistory: (project: string, path: string, ref?: string) => ["project", project, "file-history", path, ref ?? ""] as const,
+	blame: (project: string, path: string, ref?: string) => ["project", project, "blame", path, ref ?? ""] as const,
 	tags: (project: string) => ["project", project, "tags"] as const,
 	tagNames: (project: string) => ["project", project, "tags", "names"] as const,
 	releases: (project: string) => ["project", project, "releases"] as const,
 	graph: (project: string) => ["project", project, "graph"] as const,
 	branchRules: (project: string) => ["project", project, "protection"] as const,
 	issues: (project: string) => ["project", project, "issues"] as const,
+	pulls: (project: string) => ["project", project, "pulls"] as const,
+	pull: (project: string, number: number) => ["project", project, "pulls", number] as const,
+	pullFiles: (project: string, number: number) => ["project", project, "pulls", number, "files"] as const,
 	issue: (project: string, number: number) => ["project", project, "issues", number] as const,
 	projects: ["projects"] as const,
 	project: (project: string) => ["project", project] as const,

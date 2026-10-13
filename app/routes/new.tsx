@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { BookLock, BookMarked } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -20,6 +20,8 @@ function NewRepo() {
 	const [defaultBranch, setDefaultBranch] = useState("master");
 	const [importUrl, setImportUrl] = useState("");
 	const [readme, setReadme] = useState(false);
+	const [owner, setOwner] = useState("");
+	const orgs = useQuery({ queryKey: keys.myOrgs, queryFn: api.myOrgs, enabled: Boolean(viewer.data) });
 	const create = useMutation({
 		mutationFn: () =>
 			api.createRepo({
@@ -29,6 +31,7 @@ function NewRepo() {
 				defaultBranch: defaultBranch.trim() || undefined,
 				importUrl: importUrl.trim() || undefined,
 				readme,
+				owner: owner || undefined,
 			}),
 		onSuccess: (repo) => {
 			void queryClient.invalidateQueries({ queryKey: ["repos"] });
@@ -76,7 +79,26 @@ function NewRepo() {
 				className="mt-6 space-y-5"
 			>
 				<div className="flex items-end gap-2">
-					<div className="pb-2 font-mono text-sm text-dim">{viewer.data.username} /</div>
+					{orgs.data?.length ? (
+						<div className="pb-0.5">
+							<Field label="Owner">
+								<select
+									value={owner}
+									onChange={(e) => setOwner(e.target.value)}
+									className="rounded-md border border-line-strong bg-bg px-2.5 py-2 font-mono text-sm text-fg focus:border-accent focus:outline-none"
+								>
+									<option value="">{viewer.data.username}</option>
+									{orgs.data.map((o) => (
+										<option key={o.name} value={o.name}>
+											{o.name}
+										</option>
+									))}
+								</select>
+							</Field>
+						</div>
+					) : (
+						<div className="pb-2 font-mono text-sm text-dim">{viewer.data.username} /</div>
+					)}
 					<div className="flex-1">
 						<Field label="Repository name">
 							<Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-project" pattern="[A-Za-z0-9._\-]{1,100}" autoFocus required />

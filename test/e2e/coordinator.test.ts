@@ -988,3 +988,197 @@ test("tags, releases, the commit graph, branch protection over HTTPS, and issues
 		assert.ok(events.events.some((e) => e.type === type), `${type} is in the feed`);
 	}
 });
+
+test("pull requests: from a branch and from a fork, reviewed line by line, squashed or merged, conflicts refused", async () => {
+	const ada = await newUser("pra");
+	const bob = await newUser("prb");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "prs", visibility: "public", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/prs`;
+	const exec = promisify(execFile);
+	const url = (who: { username: string; token: string }, path: string) => {
+		const u = new URL(`${api}/${path}.git`);
+		u.username = who.username;
+		u.password = who.token;
+		return u.toString();
+	};
+	const dir = join(root, "prs");
+	const git = (cwd: string, ...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", url(ada, `${ada.username}/prs`), dir]);
+
+	// Two branches that edit the same line, and an issue the first one fixes.
+	const issue = ((await (await as(ada)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "Greeting is missing" }) })).json()) as { issue: { number: number } }).issue;
+	for (const [branch, text] of [["hello", "hello\n"], ["howdy", "howdy\n"]]) {
+		await git(dir, "checkout", "-q", "-B", branch, "origin/master");
+		await writeFile(join(dir, "greeting.txt"), text);
+		await git(dir, "add", "-A");
+		await git(dir, "commit", "-q", "-m", `Say ${text.trim()}`);
+		await git(dir, "push", "-q", "origin", branch);
+	}
+	const open = (head: string, body = "", headRepo?: string) => as(headRepo ? bob : ada)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `Use ${head}`, body, base: "master", head, headRepo }) });
+	const first = await open("hello", `Fixes #${issue.number}`);
+	assert.equal(first.status, 201, await first.clone().text());
+	const pr = ((await first.json()) as { pull: { number: number; pullState: string } }).pull;
+	assert.deepEqual([pr.number, pr.pullState], [issue.number + 1, "open"], "numbers are shared with issues");
+	assert.equal((await open("hello")).status, 409, "one open pull request per branch");
+	assert.equal((await open("master")).status, 400);
+	assert.equal(((await (await as(null)(repo)).json()) as { repo: { openPulls: number; openIssues: number } }).repo.openPulls, 1);
+	const issues = (await (await as(null)(`${repo}/issues`)).json()) as { issues: { number: number }[] };
+	assert.deepEqual(issues.issues.map((i) => i.number), [issue.number], "pull requests aren't listed as issues");
+	const second = ((await (await open("howdy")).json()) as { pull: { number: number } }).pull;
+
+	const files = (await (await as(null)(`${repo}/pulls/${pr.number}/files`)).json()) as { comparison: { commits: unknown[]; diff: { files: { path: string }[] } } };
+	assert.deepEqual([files.comparison.commits.length, files.comparison.diff.files.map((f) => f.path)], [1, ["greeting.txt"]]);
+
+	// Anyone signed in comments on lines; only people who can merge approve, and not their own.
+	const review = (who: { token: string }, input: unknown) => as(who)(`${repo}/pulls/${pr.number}/reviews`, { method: "POST", body: JSON.stringify(input) });
+	assert.equal((await review(bob, { state: "commented", body: "Nice", comments: [{ path: "greeting.txt", line: 1, side: "new", body: "Capitalise?" }] })).status, 201);
+	assert.equal((await review(bob, { state: "approved" })).status, 403);
+	assert.equal((await review(ada, { state: "approved" })).status, 403, "not your own pull request");
+	const detail = (await (await as(null)(`${repo}/pulls/${pr.number}`)).json()) as { reviews: { state: string }[]; reviewComments: { path: string; line: number; body: string }[] };
+	assert.deepEqual(detail.reviewComments.map((k) => [k.path, k.line, k.body]), [["greeting.txt", 1, "Capitalise?"]]);
+
+	// A branch that needs a review can't take it unapproved.
+	assert.equal((await as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireReview: true }) })).status, 200);
+	const refused = await as(ada)(`${repo}/pulls/${pr.number}/merge`, { method: "POST", body: JSON.stringify({ method: "squash" }) });
+	assert.equal(refused.status, 403);
+	assert.equal((await as(ada)(`${repo}/protection?pattern=master`, { method: "DELETE" })).status, 200);
+	assert.equal((await as(bob)(`${repo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" })).status, 403, "only people who can push merge");
+
+	// Squash: one ordinary commit on master, the pull request merged, and the issue it fixes closed.
+	const merged = await as(ada)(`${repo}/pulls/${pr.number}/merge`, { method: "POST", body: JSON.stringify({ method: "squash" }) });
+	assert.equal(merged.status, 200, await merged.clone().text());
+	const { commit } = (await merged.json()) as { commit: string };
+	const head = ((await (await as(null)(repo)).json()) as { project: { head: string } }).project.head;
+	assert.equal(head, commit);
+	const squashed = (await (await as(null)(`${repo}/commits/${commit}`)).json()) as { commit: { parents: string[]; message: string } };
+	assert.equal(squashed.commit.parents.length, 1);
+	assert.match(squashed.commit.message, new RegExp(`Use hello \\(#${pr.number}\\)`));
+	const after = (await (await as(null)(`${repo}/pulls/${pr.number}`)).json()) as { pull: { pullState: string; mergedBy: string } };
+	assert.deepEqual([after.pull.pullState, after.pull.mergedBy], ["merged", ada.username]);
+	await until(async () => (((await (await as(null)(`${repo}/issues/${issue.number}`)).json()) as { issue: { state: string } }).issue.state === "closed" ? true : undefined));
+
+	// The other branch edits the same line: merging it now conflicts, and nothing changes.
+	const conflict = await as(ada)(`${repo}/pulls/${second.number}/merge`, { method: "POST", body: "{}" });
+	assert.equal(conflict.status, 409);
+	assert.match(((await conflict.json()) as { error: { message: string } }).error.message, /greeting\.txt/);
+
+	// From a fork: bob's change arrives with a merge commit.
+	const fork = await as(bob)(`${repo}/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(fork.status, 201, await fork.clone().text());
+	const forkDir = join(root, "prs-fork");
+	await exec("git", ["clone", "-q", url(bob, `${bob.username}/prs`), forkDir]);
+	await writeFile(join(forkDir, "CONTRIBUTING.md"), "Be kind.\n");
+	await git(forkDir, "add", "-A");
+	await git(forkDir, "commit", "-q", "-m", "Add contributing notes");
+	await git(forkDir, "push", "-q", "origin", "HEAD:contrib");
+	const fromFork = await open("contrib", "", `${bob.username}/prs`);
+	assert.equal(fromFork.status, 201, await fromFork.clone().text());
+	const forkPull = ((await fromFork.json()) as { pull: { number: number; headRepo: string } }).pull;
+	assert.equal(forkPull.headRepo, `${bob.username}/prs`);
+	const viaFork = await as(ada)(`${repo}/pulls/${forkPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(viaFork.status, 200, await viaFork.clone().text());
+	const mergeCommit = ((await viaFork.json()) as { commit: string }).commit;
+	const mergeDetail = (await (await as(null)(`${repo}/commits/${mergeCommit}`)).json()) as { commit: { parents: string[] }; diff: { files: { path: string }[] } };
+	assert.equal(mergeDetail.commit.parents.length, 2);
+	assert.deepEqual(mergeDetail.diff.files.map((f) => f.path), ["CONTRIBUTING.md"]);
+	const list = (await (await as(null)(`${repo}/pulls?state=all`)).json()) as { pulls: { number: number; pullState: string }[]; open: number };
+	assert.deepEqual(list.pulls.map((p) => p.pullState).sort(), ["merged", "merged", "open"]);
+});
+
+test("organizations, teams and collaborators: invitations, read for members, write and admin by grant, reviews that count", async () => {
+	const ada = await newUser("orga");
+	const bob = await newUser("orgb");
+	const cy = await newUser("orgc");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	const orgName = `acme-${run}`.toLowerCase();
+	const created = await as(ada)("/orgs", { method: "POST", body: JSON.stringify({ name: orgName, displayName: "Acme" }) });
+	assert.equal(created.status, 201, await created.clone().text());
+	assert.equal((await as(bob)("/orgs", { method: "POST", body: JSON.stringify({ name: orgName }) })).status, 409, "names are unique");
+	assert.equal((await as(ada)("/orgs", { method: "POST", body: JSON.stringify({ name: "settings" }) })).status, 400, "reserved names stay reserved");
+
+	// Members join by accepting an invitation; until then they're nobody.
+	assert.equal((await as(bob)(`/orgs/${orgName}/members`, { method: "POST", body: JSON.stringify({ username: cy.username }) })).status, 403);
+	assert.equal((await as(ada)(`/orgs/${orgName}/members`, { method: "POST", body: JSON.stringify({ username: bob.username }) })).status, 201);
+	const org = await (await as(ada)(`/orgs/${orgName}`)).json() as { org: { members: { username: string; state: string }[] } };
+	assert.deepEqual(org.org.members.map((m) => [m.username, m.state]).sort(), [[ada.username, "active"], [bob.username, "invited"]].sort());
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "secret", visibility: "private", readme: true, owner: orgName }) })).status, 201);
+	assert.equal((await as(bob)("/repos", { method: "POST", body: JSON.stringify({ name: "nope", owner: orgName }) })).status, 403, "not a member yet");
+	const repo = `/repos/${orgName}/secret`;
+	assert.equal((await as(bob)(repo)).status, 404);
+	const invites = (await (await as(bob)("/invitations")).json()) as { invitations: { kind: string; id: string; name: string }[] };
+	assert.deepEqual(invites.invitations.map((i) => [i.kind, i.name]), [["org", orgName]]);
+	assert.equal((await as(bob)(`/invitations/org/${invites.invitations[0].id}/accept`, { method: "POST" })).status, 200);
+
+	// Members read every repository; a team grant lets them push; settings stay with owners.
+	assert.equal((await as(bob)(repo)).status, 200);
+	assert.equal((await as(cy)(repo)).status, 404);
+	const exec = promisify(execFile);
+	const gitUrl = (who: { username: string; token: string }, path: string) => {
+		const u = new URL(`${api}/${path}.git`);
+		u.username = who.username;
+		u.password = who.token;
+		return u.toString();
+	};
+	const dir = join(root, "org-clone");
+	await exec("git", ["clone", "-q", gitUrl(bob, `${orgName}/secret`), dir]);
+	const commit = (msg: string) => exec("git", ["-c", "user.name=b", "-c", "user.email=b@b", "commit", "-q", "--allow-empty", "-m", msg], { cwd: dir });
+	await commit("from bob");
+	await assert.rejects(exec("git", ["push", "-q", "origin", "master"], { cwd: dir }), /403|can't push/);
+	const team = await as(ada)(`/orgs/${orgName}/teams`, { method: "POST", body: JSON.stringify({ name: "devs" }) });
+	const teamId = ((await team.json()) as { org: { teams: { id: string }[] } }).org.teams[0].id;
+	assert.equal((await as(ada)(`/orgs/${orgName}/teams/${teamId}/members/${cy.username}`, { method: "PUT" })).status, 400, "teams are for members");
+	assert.equal((await as(ada)(`/orgs/${orgName}/teams/${teamId}/members/${bob.username}`, { method: "PUT" })).status, 200);
+	assert.equal((await as(ada)(`/orgs/${orgName}/teams/${teamId}/repos/secret`, { method: "PUT", body: JSON.stringify({ permission: "write" }) })).status, 200);
+	await exec("git", ["push", "-q", "origin", "master"], { cwd: dir });
+	const info = (await (await as(bob)(repo)).json()) as { repo: { canWrite: boolean; canAdmin: boolean } };
+	assert.deepEqual([info.repo.canWrite, info.repo.canAdmin], [true, false]);
+	assert.equal((await as(bob)(repo, { method: "PATCH", body: JSON.stringify({ description: "mine" }) })).status, 403);
+	assert.equal((await as(bob)(`${repo}/hooks`)).status, 404, "webhooks are for admins");
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ description: "ours" }) })).status, 200);
+	assert.equal((await as(ada)(`/orgs/${orgName}/members/${ada.username}`, { method: "DELETE" })).status, 409, "the last owner can't leave");
+	const listed = (await (await as(bob)(`/repos?owner=${orgName}`)).json()) as { repos: { name: string }[] };
+	assert.deepEqual(listed.repos.map((r) => r.name), ["secret"], "members see private organization repositories in lists");
+
+	// A collaborator with write access on a personal repository: invited, then their approval counts.
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "solo", visibility: "private", readme: true }) })).status, 201);
+	const solo = `/repos/${ada.username}/solo`;
+	assert.equal((await as(ada)(`${solo}/collaborators/${cy.username}`, { method: "PUT", body: JSON.stringify({ permission: "write" }) })).status, 200);
+	assert.equal((await as(cy)(solo)).status, 404, "not until they accept");
+	const cyInvite = ((await (await as(cy)("/invitations")).json()) as { invitations: { kind: string; id: string }[] }).invitations[0];
+	assert.equal((await as(cy)(`/invitations/${cyInvite.kind}/${cyInvite.id}/accept`, { method: "POST" })).status, 200);
+	assert.equal((await as(cy)(solo)).status, 200);
+	const soloDir = join(root, "solo-clone");
+	await exec("git", ["clone", "-q", gitUrl(ada, `${ada.username}/solo`), soloDir]);
+	await exec("git", ["checkout", "-q", "-b", "change"], { cwd: soloDir });
+	await writeFile(join(soloDir, "x.txt"), "x\n");
+	await exec("git", ["add", "-A"], { cwd: soloDir });
+	await exec("git", ["-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "-m", "change"], { cwd: soloDir });
+	await exec("git", ["push", "-q", "origin", "change"], { cwd: soloDir });
+	assert.equal((await as(ada)(`${solo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireReview: true }) })).status, 200);
+	const pr = ((await (await as(ada)(`${solo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Change", base: "master", head: "change" }) })).json()) as { pull: { number: number } }).pull;
+	assert.equal((await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" })).status, 403);
+	assert.equal((await as(cy)(`${solo}/pulls/${pr.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "approved" }) })).status, 201);
+	assert.equal(((await (await as(ada)(`${solo}/pulls/${pr.number}`)).json()) as { pull: { decision: string } }).pull.decision, "approved");
+	assert.equal((await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" })).status, 200);
+	assert.equal((await as(cy)(`${solo}/collaborators`)).status, 404, "collaborators are listed to admins only");
+
+	// Transfers into an organization are accepted by its owners.
+	const offered = await as(ada)(`${solo}/transfer`, { method: "POST", body: JSON.stringify({ to: orgName }) });
+	assert.equal(offered.status, 201, await offered.clone().text());
+	const offer = ((await (await as(ada)("/transfers")).json()) as { transfers: { id: string; to: string }[] }).transfers.find((t) => t.to === orgName);
+	assert.ok(offer, "an owner sees offers to their organization");
+	assert.equal((await as(bob)(`/transfers/${offer.id}/accept`, { method: "POST", body: "{}" })).status, 404, "members can't accept for it");
+	const moved = await as(ada)(`/transfers/${offer.id}/accept`, { method: "POST", body: "{}" });
+	assert.equal(moved.status, 200, await moved.clone().text());
+	assert.equal(((await moved.json()) as { repo: { fullName: string } }).repo.fullName, `${orgName}/solo`);
+	assert.equal((await as(bob)(`/repos/${orgName}/solo`)).status, 200, "now members read it");
+});

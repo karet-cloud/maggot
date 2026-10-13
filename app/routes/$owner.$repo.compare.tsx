@@ -67,6 +67,18 @@ function ComparePage() {
 							<CommitList commits={comparison.data.commits} project={project} refName={head?.startsWith("task:") ? head : undefined} />
 						)}
 					</Panel>
+					{comparison.data.commits.length > 0 && head && !head.startsWith("task:") && (
+						<div className="flex justify-end">
+							<Link
+								to="/$owner/$repo/pulls/new"
+								params={repoParams(project)}
+								search={{ base, head }}
+								className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90"
+							>
+								Open a pull request
+							</Link>
+						</div>
+					)}
 					<DiffView diff={comparison.data.diff} project={project} viewRef={head} />
 				</>
 			)}

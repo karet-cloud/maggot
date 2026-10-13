@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight, Columns2, FileCode2, Rows2 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { Diff, DiffHunk, FileDiff } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
 import { cx, Panel } from "./ui.tsx";
@@ -26,10 +26,21 @@ function useLayout(): [Layout, (l: Layout) => void] {
 }
 
 /**
+ * Line comments in a diff (code review): what to show under a line, keyed by `lineKey`, and how to
+ * start a new one. Comments show in both layouts; new ones start from the unified one.
+ */
+export interface DiffNotes {
+	under: Map<string, ReactNode>;
+	onAdd?: (path: string, side: "new" | "old", line: number) => void;
+}
+
+export const lineKey = (path: string, side: "new" | "old", line: number) => `${side}:${line}:${path}`;
+
+/**
  * A full diff: a summary with a file index, then each file's hunks. `viewRef` is where "View file"
  * links point (the new side of the diff).
  */
-export function DiffView({ diff, project, viewRef, title }: { diff: Diff; project: string; viewRef?: string; title?: ReactNode }) {
+export function DiffView({ diff, project, viewRef, title, notes }: { diff: Diff; project: string; viewRef?: string; title?: ReactNode; notes?: DiffNotes }) {
 	const [layout, setLayout] = useLayout();
 	const [indexOpen, setIndexOpen] = useState(diff.files.length <= 12);
 	if (diff.files.length === 0) {
@@ -90,7 +101,7 @@ export function DiffView({ diff, project, viewRef, title }: { diff: Diff; projec
 				)}
 			</Panel>
 			{diff.files.map((f) => (
-				<FileSection key={f.path} file={f} layout={layout} project={project} viewRef={viewRef} />
+				<FileSection key={f.path} file={f} layout={layout} project={project} viewRef={viewRef} notes={notes} />
 			))}
 		</div>
 	);
@@ -126,7 +137,7 @@ function Counts({ file }: { file: FileDiff }) {
 	);
 }
 
-function FileSection({ file, layout, project, viewRef }: { file: FileDiff; layout: Layout; project: string; viewRef?: string }) {
+function FileSection({ file, layout, project, viewRef, notes }: { file: FileDiff; layout: Layout; project: string; viewRef?: string; notes?: DiffNotes }) {
 	const [open, setOpen] = useState(file.additions + file.deletions <= COLLAPSE_ABOVE);
 	const modeChange = file.oldMode && file.newMode && file.oldMode !== file.newMode ? `${file.oldMode} → ${file.newMode}` : null;
 	const parent = file.path.split("/").slice(0, -1).join("/") || undefined;
@@ -160,9 +171,9 @@ function FileSection({ file, layout, project, viewRef }: { file: FileDiff; layou
 				) : file.hunks.length === 0 ? (
 					<p className="px-4 py-3 text-xs text-faint">{modeChange ? "File mode changed." : file.status === "added" ? "Empty file added." : "Empty file."}</p>
 				) : layout === "unified" ? (
-					<Unified file={file} />
+					<Unified file={file} notes={notes} />
 				) : (
-					<Split file={file} />
+					<Split file={file} notes={notes} />
 				))}
 			{!open && !file.binary && !file.tooLarge && (
 				<button type="button" onClick={() => setOpen(true)} className="w-full px-4 py-3 text-xs text-accent hover:underline">
@@ -232,7 +243,41 @@ function HunkHeader({ hunk, colSpan }: { hunk: DiffHunk; colSpan: number }) {
 	);
 }
 
-function Unified({ file }: { file: FileDiff }) {
+/** Where a line can be commented on: its new-side number, or its old-side one for a deleted line. */
+function anchor(r: Row): { side: "new" | "old"; line: number } | null {
+	if (r.kind === "\\") return null;
+	return r.new !== null ? { side: "new", line: r.new } : r.old !== null ? { side: "old", line: r.old } : null;
+}
+
+function AddNote({ notes, path, row }: { notes?: DiffNotes; path: string; row: Row }) {
+	const at = anchor(row);
+	if (!notes?.onAdd || !at) return null;
+	return (
+		<button
+			type="button"
+			onClick={() => notes.onAdd?.(path, at.side, at.line)}
+			className="absolute top-0 left-0 hidden size-5 items-center justify-center rounded bg-accent text-[13px] leading-none text-white group-hover:flex"
+			aria-label="Comment on this line"
+		>
+			+
+		</button>
+	);
+}
+
+function NoteRow({ notes, path, row, colSpan }: { notes?: DiffNotes; path: string; row: Row | null; colSpan: number }) {
+	const at = row ? anchor(row) : null;
+	const node = at && notes?.under.get(lineKey(path, at.side, at.line));
+	if (!node) return null;
+	return (
+		<tr>
+			<td colSpan={colSpan} className="border-y border-line bg-bg px-3 py-2 font-sans">
+				{node}
+			</td>
+		</tr>
+	);
+}
+
+function Unified({ file, notes }: { file: FileDiff; notes?: DiffNotes }) {
 	const hunks = useRows(file);
 	return (
 		<div className="overflow-x-auto">
@@ -242,8 +287,12 @@ function Unified({ file }: { file: FileDiff }) {
 						<HunkRows key={h}>
 							<HunkHeader hunk={file.hunks[h]} colSpan={4} />
 							{rows.map((r, i) => (
-								<tr key={i} className={ROW_TONE[r.kind]}>
-									<td className={cx("w-px select-none px-2 text-right align-top", NUM_TONE[r.kind])}>{r.old ?? ""}</td>
+								<Fragment key={i}>
+								<tr className={cx(ROW_TONE[r.kind], "group")}>
+									<td className={cx("relative w-px select-none px-2 text-right align-top", NUM_TONE[r.kind])}>
+										<AddNote notes={notes} path={file.path} row={r} />
+										{r.old ?? ""}
+									</td>
 									<td className={cx("w-px select-none px-2 text-right align-top", NUM_TONE[r.kind])}>{r.new ?? ""}</td>
 									<td className={cx("w-px select-none pl-2 align-top", r.kind === "+" ? "text-emerald-300" : r.kind === "-" ? "text-rose-300" : "text-faint")}>
 										{r.kind === "\\" ? "" : r.kind}
@@ -252,6 +301,8 @@ function Unified({ file }: { file: FileDiff }) {
 										<Code row={r} />
 									</td>
 								</tr>
+								<NoteRow notes={notes} path={file.path} row={r} colSpan={4} />
+								</Fragment>
 							))}
 						</HunkRows>
 					))}
@@ -262,7 +313,7 @@ function Unified({ file }: { file: FileDiff }) {
 }
 
 /** Pairs each run of deletions with the additions that follow it, side by side. */
-function Split({ file }: { file: FileDiff }) {
+function Split({ file, notes }: { file: FileDiff; notes?: DiffNotes }) {
 	const hunks = useRows(file);
 	return (
 		<div className="overflow-x-auto">
@@ -278,10 +329,15 @@ function Split({ file }: { file: FileDiff }) {
 						<HunkRows key={h}>
 							<HunkHeader hunk={file.hunks[h]} colSpan={4} />
 							{pair(rows).map(([left, right], i) => (
-								<tr key={i}>
-									<Side row={left} number={left?.old} />
-									<Side row={right} number={right?.new} />
-								</tr>
+								<Fragment key={i}>
+									<tr className="group">
+										{/* A deleted line is commented on from the left; everything else from the right. */}
+										<Side row={left} number={left?.old} add={left?.kind === "-" ? { notes, path: file.path } : undefined} />
+										<Side row={right} number={right?.new} add={right ? { notes, path: file.path } : undefined} />
+									</tr>
+									<NoteRow notes={notes} path={file.path} row={right ?? left} colSpan={4} />
+									{left && left.kind === "-" && <NoteRow notes={notes} path={file.path} row={left} colSpan={4} />}
+								</Fragment>
 							))}
 						</HunkRows>
 					))}
@@ -291,11 +347,14 @@ function Split({ file }: { file: FileDiff }) {
 	);
 }
 
-function Side({ row, number }: { row: Row | null; number: number | null | undefined }) {
+function Side({ row, number, add }: { row: Row | null; number: number | null | undefined; add?: { notes?: DiffNotes; path: string } }) {
 	if (!row) return <td colSpan={2} className="bg-raised/40" />;
 	return (
 		<>
-			<td className={cx("select-none px-2 text-right align-top", NUM_TONE[row.kind])}>{number ?? ""}</td>
+			<td className={cx("relative select-none px-2 text-right align-top", NUM_TONE[row.kind])}>
+				{add && <AddNote notes={add.notes} path={add.path} row={row} />}
+				{number ?? ""}
+			</td>
 			<td className={cx("overflow-hidden pr-3 pl-2 align-top whitespace-pre-wrap break-all text-fg/90", ROW_TONE[row.kind])}>
 				<Code row={row} />
 			</td>

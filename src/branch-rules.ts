@@ -52,5 +52,6 @@ export function protectionFor(rules: BranchRule[], branch: string): Omit<BranchR
 		blockDeletions: matching.some((r) => r.blockDeletions),
 		blockForcePushes: matching.some((r) => r.blockForcePushes),
 		requireMergeQueue: matching.some((r) => r.requireMergeQueue),
+		requireReview: matching.some((r) => r.requireReview),
 	};
 }

@@ -1,20 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRightLeft, Check, X } from "lucide-react";
+import { ArrowRightLeft, BookMarked, Check, Users, X } from "lucide-react";
 import { useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, type RepoTransfer } from "../lib/api.ts";
+import { api, ApiError, keys, type Invitation, type RepoTransfer } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/transfers")({
-	head: () => ({ meta: [{ title: "Repository transfers · megit" }] }),
+	head: () => ({ meta: [{ title: "Invitations and transfers · megit" }] }),
 	component: Transfers,
 });
 
 function Transfers() {
 	const viewer = useViewer();
 	const list = useQuery({ queryKey: keys.transfers, queryFn: api.transfers, enabled: Boolean(viewer.data) });
+	const invitations = useQuery({ queryKey: keys.invitations, queryFn: api.invitations, enabled: Boolean(viewer.data) });
 	if (viewer.isPending) return <Spinner className="m-8" />;
 	if (!viewer.data) {
 		return (
@@ -29,7 +30,20 @@ function Transfers() {
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
 			<div>
-				<h1 className="text-lg font-semibold">Repository transfers</h1>
+				<h1 className="text-lg font-semibold">Invitations</h1>
+				<p className="mt-1 text-sm text-dim">Organizations and repositories you've been invited to join.</p>
+			</div>
+			<ErrorNote error={invitations.error} />
+			{invitations.data?.length === 0 && <p className="text-sm text-faint">No invitations.</p>}
+			<ul className="space-y-3">
+				{invitations.data?.map((i) => (
+					<li key={`${i.kind}:${i.id}`}>
+						<InvitationCard invitation={i} />
+					</li>
+				))}
+			</ul>
+			<div className="border-t border-line pt-5">
+				<h2 className="text-base font-semibold">Repository transfers</h2>
 				<p className="mt-1 text-sm text-dim">
 					Repositories other people want to hand to you. Accepting moves the repository, its history, issues and stars into your account,
 					and counts it against your quota; the old address keeps working. Its webhooks come along paused, since they point at the
@@ -51,6 +65,52 @@ function Transfers() {
 				))}
 			</ul>
 		</main>
+	);
+}
+
+function InvitationCard({ invitation: i }: { invitation: Invitation }) {
+	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const needsVerification = useNeedsVerification();
+	const answer = useMutation({
+		mutationFn: (accept: boolean) => api.answerInvitation(i, accept),
+		onSuccess: (_, accept) => {
+			void queryClient.invalidateQueries({ queryKey: keys.invitations });
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+			void queryClient.invalidateQueries({ queryKey: keys.myOrgs });
+			if (!accept) return;
+			if (i.kind === "org") void navigate({ to: "/$owner", params: { owner: i.name } });
+			else {
+				const [owner, repo] = i.name.split("/");
+				void navigate({ to: "/$owner/$repo", params: { owner, repo } });
+			}
+		},
+	});
+	return (
+		<div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel p-4">
+			{i.kind === "org" ? <Users className="size-4 text-sky-300" /> : <BookMarked className="size-4 text-sky-300" />}
+			<div className="min-w-0 flex-1 text-sm">
+				<p>
+					<span className="font-mono font-medium">{i.name}</span>{" "}
+					<span className="text-dim">
+						{i.kind === "org" ? `as ${i.access === "owner" ? "an owner" : "a member"}` : `with ${i.access} access`}
+					</span>
+				</p>
+				<p className="text-xs text-faint">
+					{i.from ? `From ${i.from}, ` : ""}
+					<TimeAgo at={i.createdAt} />
+				</p>
+			</div>
+			<ErrorNote error={answer.error} />
+			<Button variant="primary" busy={answer.isPending && answer.variables === true} disabled={needsVerification} onClick={() => answer.mutate(true)}>
+				<Check className="size-4" />
+				Accept
+			</Button>
+			<Button busy={answer.isPending && answer.variables === false} onClick={() => answer.mutate(false)}>
+				<X className="size-4" />
+				Decline
+			</Button>
+		</div>
 	);
 }
 

@@ -202,11 +202,9 @@ export class Limiter extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		this.sql.exec("DELETE FROM hits WHERE window_end <= ?", Date.now());
 		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(window_end) AS end FROM hits").one().end;
-		if (left === null) {
-			// Frees the instance's storage; this instance may still be asked again, so the table comes back.
-			await this.ctx.storage.deleteAll();
-			this.createTable();
-		} else await this.ctx.storage.setAlarm(left);
+		// Expired rows are gone; an empty table costs nothing. (Dropping all storage and recreating the
+		// table raced requests arriving meanwhile.)
+		if (left !== null) await this.ctx.storage.setAlarm(left);
 	}
 }
 

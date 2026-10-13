@@ -117,7 +117,10 @@ export type EventType =
 	| "issue.opened"
 	| "issue.closed"
 	| "issue.reopened"
-	| "issue.commented";
+	| "issue.commented"
+	| "pull.opened"
+	| "pull.reviewed"
+	| "pull.merged";
 
 export interface ProjectEvent {
 	seq: number;
@@ -235,6 +238,8 @@ export interface RepoInfo {
 	cloneUrl: string;
 	/** Whether the caller may push, change settings, and run tasks. */
 	canWrite: boolean;
+	/** Whether the caller may change settings, collaborators and webhooks, transfer, archive or delete it. */
+	canAdmin: boolean;
 	stars: number;
 	/** Public forks. */
 	forks: number;
@@ -249,6 +254,7 @@ export interface RepoInfo {
 	/** When it was archived (made read-only); null if it's live. */
 	archivedAt: string | null;
 	openIssues: number;
+	openPulls: number;
 }
 
 /** A pending offer to hand a repository to another user, who has to accept it. */
@@ -320,7 +326,7 @@ export interface CodeSearch {
 	results: { path: string; matches: number; lines: { line: number; text: string }[] }[];
 }
 
-export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues";
+export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues" | "pull_request";
 
 export interface Webhook {
 	id: string;
@@ -349,7 +355,7 @@ export interface WebhookDelivery {
 	nextAt: string | null;
 }
 
-export type NotificationKind = "star" | "fork" | "transfer" | "issue" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
+export type NotificationKind = "star" | "fork" | "transfer" | "issue" | "invitation" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
 
 export interface Notification {
 	id: string;
@@ -414,6 +420,8 @@ export interface BranchRule {
 	blockForcePushes: boolean;
 	/** No pushes or web commits at all: changes land through the merge queue (agent tasks). */
 	requireMergeQueue: boolean;
+	/** Pull requests into it need an approving review from someone who can merge, and no changes requested. */
+	requireReview: boolean;
 	createdAt: string;
 }
 
@@ -457,4 +465,133 @@ export interface IssueList {
 	issues: IssueSummary[];
 	open: number;
 	closed: number;
+}
+
+// ── File history and blame ───────────────────────────────────────────────────
+
+export interface FileHistory {
+	path: string;
+	/** Commits that changed the file, newest first. */
+	commits: (Commit & { change: "modified" | "deleted" })[];
+	/** Where to carry on from (`?from=`) for older history; null when it's all here. */
+	next: string | null;
+}
+
+export interface Blame {
+	path: string;
+	/** Each line of the file with the commit that last changed it. */
+	lines: { text: string; commit: string; boundary: boolean }[];
+	commits: Record<string, Commit>;
+	/** Binary, or too big to blame. */
+	tooLarge: boolean;
+}
+
+// ── Pull requests and code review ────────────────────────────────────────────
+
+export type PullState = "open" | "closed" | "merged";
+export type ReviewState = "approved" | "changes_requested" | "commented";
+export type MergeMethod = "merge" | "squash";
+
+export interface PullSummary extends IssueSummary {
+	pullState: PullState;
+	base: string;
+	head: string;
+	/** `owner/name` of the fork the changes come from; null for a branch of this repository. */
+	headRepo: string | null;
+	/** Approved or changes requested, by the latest review of each reviewer with write access. */
+	decision: "approved" | "changes_requested" | null;
+}
+
+export interface Pull extends PullSummary {
+	body: string;
+	closedBy: string | null;
+	mergedAt: string | null;
+	mergedBy: string | null;
+	mergeCommit: string | null;
+	canEdit: boolean;
+	canLabel: boolean;
+	/** Whether the caller may merge it (write access to the base). */
+	canMerge: boolean;
+	/** A branch rule on the base wants an approving review before merging. */
+	reviewRequired: boolean;
+}
+
+export interface Review {
+	id: string;
+	author: string | null;
+	state: ReviewState;
+	body: string;
+	commit: string | null;
+	createdAt: string;
+}
+
+export interface ReviewComment {
+	id: string;
+	reviewId: string;
+	author: string | null;
+	path: string;
+	line: number;
+	side: "new" | "old";
+	body: string;
+	commit: string | null;
+	createdAt: string;
+}
+
+export interface PullList {
+	pulls: PullSummary[];
+	open: number;
+	closed: number;
+}
+
+// ── Organizations, teams and collaborators ───────────────────────────────────
+
+export type OrgRole = "owner" | "member";
+export type Permission = "read" | "write" | "admin";
+
+export interface OrgMember {
+	username: string;
+	role: OrgRole;
+	/** Invited people show only to members. */
+	state: "active" | "invited";
+	createdAt: string;
+}
+
+export interface Team {
+	id: string;
+	name: string;
+	members: string[];
+	repos: { repo: string; permission: Permission }[];
+}
+
+export interface Org {
+	name: string;
+	displayName: string;
+	createdAt: string;
+	/** The caller's role, if they're a member. */
+	role: OrgRole | null;
+	/** The caller has an invitation waiting. */
+	invited: boolean;
+	members: OrgMember[];
+	/** Teams, for members only. */
+	teams: Team[];
+}
+
+export interface Collaborator {
+	username: string;
+	permission: Permission;
+	state: "active" | "invited";
+	createdAt: string;
+}
+
+/** An invitation waiting for the caller: to join an organization, or to collaborate on a repository. */
+export interface Invitation {
+	kind: "org" | "repo";
+	/** What to accept or decline with. */
+	id: string;
+	/** The organization, or the repository's owner/name. */
+	name: string;
+	/** The role or permission on offer. */
+	access: string;
+	from: string | null;
+	createdAt: string;
 }

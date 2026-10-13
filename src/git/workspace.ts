@@ -81,7 +81,12 @@ export class Workspace {
 	}
 
 	/** Merges `theirs` into the local default branch without touching the remote. */
-	async merge(theirs: string, message: string, author: Identity): Promise<MergeOutcome> {
+	/**
+	 * `method`: "merge" (the default) fast-forwards when it can, as the merge queue does; "merge-commit"
+	 * always records a merge commit, as pull requests do; "squash" makes one ordinary commit on the
+	 * branch with everything `theirs` changed.
+	 */
+	async merge(theirs: string, message: string, author: Identity, method: "merge" | "merge-commit" | "squash" = "merge"): Promise<MergeOutcome> {
 		const ours = await git.resolveRef({ ...this.base, ref: this.branch });
 		const changedFiles = await this.changedFiles(ours, theirs);
 		try {
@@ -89,13 +94,29 @@ export class Workspace {
 				...this.base,
 				ours: this.branch,
 				theirs,
-				fastForward: true,
+				fastForward: method !== "merge-commit",
 				abortOnConflict: true,
 				message,
 				author: { ...author, timestamp: now() },
 				committer: { ...this.committer, timestamp: now() },
 			});
 			if (result.alreadyMerged || !result.oid || result.oid === ours) return { kind: "up-to-date", oid: ours };
+			if (method === "squash") {
+				// The merged tree, as one commit on top of ours.
+				const { commit } = await git.readCommit({ ...this.base, oid: result.oid });
+				const squashed = await git.writeCommit({
+					...this.base,
+					commit: {
+						tree: commit.tree,
+						parent: [ours],
+						author: { ...author, timestamp: now(), timezoneOffset: 0 },
+						committer: { ...this.committer, timestamp: now(), timezoneOffset: 0 },
+						message: message.endsWith("\n") ? message : `${message}\n`,
+					},
+				});
+				await git.writeRef({ ...this.base, ref: `refs/heads/${this.branch}`, value: squashed, force: true });
+				return { kind: "merged", oid: squashed, fastForward: false, changedFiles };
+			}
 			return { kind: "merged", oid: result.oid, fastForward: Boolean(result.fastForward), changedFiles };
 		} catch (err) {
 			if ((err as { code?: string }).code === "MergeConflictError") {
