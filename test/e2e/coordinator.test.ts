@@ -528,3 +528,52 @@ test("only accepted pushes count toward a repository's size", async () => {
 	await new Promise((r) => setTimeout(r, 1000));
 	assert.equal(await used(), after);
 });
+
+test("people star and fork repositories, and commit files from the browser", async () => {
+	const ada = await newUser("forker-a");
+	const bob = await newUser("forker-b");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "lib", readme: true }) })).status, 201);
+	const source = `/repos/${ada.username}/lib`;
+
+	// The README of a new repository is titled with its name, not its internal id.
+	assert.match(await (await as(ada)(`${source}/files/README.md`)).text(), /^# lib\n/);
+
+	// Anyone who can read a repository can star it; stars are counted and listed per user.
+	assert.equal((await as(bob)(`${source}/star`, { method: "PUT" })).status, 200);
+	assert.equal((await as(bob)(`${source}/star`, { method: "PUT" })).status, 200, "starring twice is harmless");
+	const starred = (await (await as(bob)(source)).json()) as { repo: { stars: number; starred: boolean } };
+	assert.deepEqual([starred.repo.stars, starred.repo.starred], [1, true]);
+	const stars = (await (await fetch(`${api}/api/repos?starredBy=${bob.username}`)).json()) as { repos: { fullName: string }[] };
+	assert.deepEqual(stars.repos.map((r) => r.fullName), [`${ada.username}/lib`]);
+	assert.equal((await fetch(`${api}/api${source}/star`, { method: "PUT" })).status, 401, "signed out, no star");
+
+	// A web commit lands on the branch, and one based on a stale head is refused.
+	const head = ((await (await as(ada)(source)).json()) as { project: { head: string } }).project.head;
+	const commit = (body: unknown) => as(ada)(`${source}/contents`, { method: "POST", body: JSON.stringify(body) });
+	const edit = await commit({ branch: "master", baseCommit: head, message: "Edit on the web", files: [{ path: "src/a.txt", content: "a\n" }] });
+	assert.equal(edit.status, 201, await edit.clone().text());
+	assert.equal((await commit({ branch: "master", baseCommit: head, message: "stale", files: [{ path: "b.txt", content: "b" }] })).status, 409);
+	assert.equal((await commit({ branch: "master", message: "escape", files: [{ path: "../x", content: "x" }] })).status, 400);
+	assert.equal((await as(bob)(`${source}/contents`, { method: "POST", body: JSON.stringify({ message: "no", files: [{ path: "x", content: "x" }] }) })).status, 403);
+
+	// Forking copies every branch; the fork says where it came from, and the source counts it.
+	const { commit: edited } = (await edit.json()) as { commit: string };
+	const branched = await commit({ branch: "master", baseCommit: edited, newBranch: "topic", message: "Delete a", files: [{ path: "src/a.txt", content: null }] });
+	assert.equal(branched.status, 201, await branched.clone().text());
+	const forked = await as(bob)(`${source}/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(forked.status, 201, await forked.clone().text());
+	const fork = ((await forked.json()) as { repo: { fullName: string; forkOf: { owner: string; name: string } } }).repo;
+	assert.deepEqual(fork.forkOf, { owner: ada.username, name: "lib" });
+	const exec = promisify(execFile);
+	const dir = join(root, "fork-clone");
+	await exec("git", ["clone", "-q", `${api}/${fork.fullName}.git`, dir]);
+	await exec("git", ["fsck", "--strict"], { cwd: dir });
+	const { stdout } = await exec("git", ["branch", "-r"], { cwd: dir });
+	assert.match(stdout, /origin\/topic/);
+	assert.equal((await exec("git", ["rev-parse", "origin/master"], { cwd: dir })).stdout.trim(), edited);
+	const counted = (await (await as(ada)(source)).json()) as { repo: { forks: number } };
+	assert.equal(counted.repo.forks, 1);
+	assert.equal((await as(bob)(`${source}/forks`, { method: "POST", body: JSON.stringify({}) })).status, 409, "the name is taken");
+});

@@ -10,13 +10,17 @@ import {
 	deleteRepo,
 	ensureSchema,
 	findRepo,
+	getListing,
 	insertRepo,
 	listRepos,
 	listTokens,
+	addRepoBytes,
 	revokeToken,
 	setRepoBytes,
+	setStar,
 	toRepoInfo,
 	updateRepo,
+	type RepoListing,
 	type RepoRow,
 } from "./db.ts";
 import { HttpError, toHttpError } from "./errors.ts";
@@ -246,45 +250,73 @@ app.delete("/api/tokens/:id", async (c) => {
 
 // ── Repositories ─────────────────────────────────────────────────────────────
 
-/** Public repositories (and the caller's own private ones), optionally for one owner. */
+const viewerId = (p: Principal) => (p.kind === "user" ? p.id : null);
+
+/**
+ * Public repositories (and the caller's own private ones): optionally one owner's, the ones a user
+ * starred (`starredBy=<username>`), or those matching `q`; `sort=stars` puts the most starred first.
+ */
 app.get("/api/repos", async (c) => {
 	await ensureSchema(db(c.env));
 	const p = c.var.principal;
-	const owner = c.req.query("owner");
-	const rows = await listRepos(db(c.env), { owner, viewerId: p.kind === "user" ? p.id : null, limit: intParam(c.req.query("limit"), 100, 500) });
-	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r))) });
+	const starredBy = c.req.query("starredBy");
+	const starrer = starredBy
+		? await db(c.env).prepare(`select "id" from "user" where "username" = ?`).bind(starredBy.toLowerCase()).first<{ id: string }>()
+		: null;
+	if (starredBy && !starrer) return c.json({ repos: [] });
+	const rows = await listRepos(db(c.env), {
+		owner: c.req.query("owner"),
+		viewerId: viewerId(p),
+		starredBy: starrer?.id,
+		query: c.req.query("q")?.trim().slice(0, 100) || undefined,
+		sort: c.req.query("sort") === "stars" ? "stars" : "created",
+		limit: intParam(c.req.query("limit"), 100, 500),
+	});
+	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p))) });
 });
 
-app.post("/api/repos", async (c) => {
+interface NewRepo {
+	name?: string;
+	description?: string;
+	visibility?: Visibility;
+	defaultBranch?: string;
+	importUrl?: string;
+	importBranch?: string;
+	readme?: boolean;
+}
+
+/**
+ * Creates a repository for the signed-in user: empty, seeded with a README, imported from a URL, or
+ * forked from `source` (all of its branches and tags).
+ */
+async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	const user = requireUser(c);
 	requireVerified(c.env, user);
-	const input = await body<{
-		name?: string;
-		description?: string;
-		visibility?: Visibility;
-		defaultBranch?: string;
-		importUrl?: string;
-		importBranch?: string;
-		readme?: boolean;
-	}>(c);
 	const name = assertRepoName(input.name?.trim() ?? "");
-	const visibility = input.visibility ?? "public";
+	// A fork of a private repository stays private.
+	const visibility = source?.visibility === "private" ? "private" : (input.visibility ?? source?.visibility ?? "public");
 	if (visibility !== "public" && visibility !== "private") throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
-	const defaultBranch = input.defaultBranch?.trim() || "master";
+	const defaultBranch = source?.defaultBranch ?? (input.defaultBranch?.trim() || "master");
 	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(defaultBranch) || defaultBranch.includes("..")) throw new HttpError(400, "INVALID_INPUT", "Invalid branch name");
 	const row: RepoRow = {
 		id: `r${crypto.randomUUID().replaceAll("-", "").slice(0, 15)}`,
 		ownerId: user.id,
 		owner: user.username,
 		name,
-		description: input.description?.trim() || null,
+		description: input.description?.trim() || source?.description || null,
 		visibility,
 		defaultBranch,
 		createdAt: new Date().toISOString(),
-		bytes: 0,
+		// A fork starts out as big as its source, so forking can't get around the storage quota.
+		bytes: source?.bytes ?? 0,
+		forkOf: source?.id ?? null,
 	};
 	await ensureSchema(db(c.env));
 	await assertCanCreateRepo(c.env, db(c.env), user.id);
+	if (source) {
+		const room = policy(c.env).userBytes - (await usage(db(c.env), user.id)).bytes;
+		if (source.bytes > room) throw new HttpError(403, "QUOTA_EXCEEDED", `${source.owner}/${source.name} is bigger than the ${formatBytes(Math.max(room, 0))} you have room for.`);
+	}
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
 	await insertRepo(db(c.env), row, policy(c.env).reposPerUser);
@@ -292,11 +324,13 @@ app.post("/api/repos", async (c) => {
 	try {
 		created = await projects(c.env).getByName(row.id).create({
 			name: row.id,
+			title: row.name,
 			description: row.description ?? undefined,
-			defaultBranch: input.importUrl ? undefined : defaultBranch,
-			importUrl: input.importUrl?.trim() || undefined,
-			importBranch: input.importBranch?.trim() || undefined,
-			readme: input.readme ?? false,
+			defaultBranch: input.importUrl || source ? undefined : defaultBranch,
+			importUrl: source ? undefined : input.importUrl?.trim() || undefined,
+			importBranch: source ? undefined : input.importBranch?.trim() || undefined,
+			forkFrom: source?.id,
+			readme: source ? false : (input.readme ?? false),
 		});
 	} catch (err) {
 		await deleteRepo(db(c.env), row.id);
@@ -327,8 +361,11 @@ app.post("/api/repos", async (c) => {
 		await db(c.env).prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(created.defaultBranch, row.id).run();
 		row.defaultBranch = created.defaultBranch;
 	}
-	return c.json({ repo: toRepoInfo(row, origin(c), true), project: created }, 201);
-});
+	const listing = await getListing(db(c.env), row.id, user.id);
+	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id), project: created }, 201);
+}
+
+app.post("/api/repos", async (c) => createRepo(c, await body<NewRepo>(c)));
 
 // ── Admin: projects by internal name (agents, scripts and tests use the API key) ─
 
@@ -362,10 +399,13 @@ app.post("/api/projects", async (c) => {
 
 const repo = new Hono<App>();
 
+/** Things anyone who can read a repository may do to it: star it, and fork it. */
+const READER_ACTIONS = /\/(star|forks)$/;
+
 /**
- * Resolves the repository and checks access: reads need read access, anything else (and the live
- * socket's credentials, task changes, settings) needs write access. Private repositories the caller
- * can't read answer 404, so their names don't leak.
+ * Resolves the repository and checks access: reads (and starring or forking) need read access,
+ * anything else (and the live socket's credentials, task changes, settings) needs write access.
+ * Private repositories the caller can't read answer 404, so their names don't leak.
  */
 repo.use("*", async (c, next) => {
 	const owner = c.req.param("owner");
@@ -379,7 +419,7 @@ repo.use("*", async (c, next) => {
 	const row = await findRepo(db(c.env), owner, c.req.param("repo") ?? "");
 	const p = c.var.principal;
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
-	const write = !["GET", "HEAD"].includes(c.req.method);
+	const write = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS.test(c.req.path);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
 	c.set("projectId", row.id);
 	c.set("repo", row);
@@ -388,7 +428,9 @@ repo.use("*", async (c, next) => {
 
 repo.get("/", async (c) => {
 	const row = c.var.repo;
-	const info: RepoInfo | null = row ? toRepoInfo(row, origin(c), canWrite(c.var.principal, row)) : null;
+	const p = c.var.principal;
+	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
+	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p)) : null;
 	const state = await project(c).getProject();
 	// People reach user repositories through megit's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
@@ -404,8 +446,37 @@ repo.patch("/", async (c) => {
 	await updateRepo(db(c.env), row.id, { visibility: input.visibility, description: input.description === undefined ? undefined : input.description?.trim() || null });
 	// Live sockets were authorized when they connected; after a visibility change they reconnect and are checked again.
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
-	const updated = (await findRepo(db(c.env), row.owner, row.name)) as RepoRow;
-	return c.json({ repo: toRepoInfo(updated, origin(c), true) });
+	const updated = (await getListing(db(c.env), row.id, viewerId(c.var.principal))) as RepoListing;
+	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal)) });
+});
+
+/** The repository behind a user-facing route; admin project routes have none. */
+function userRepo(c: Context<App>): RepoRow {
+	if (!c.var.repo) throw new HttpError(400, "INVALID_INPUT", "Only user repositories have this");
+	return c.var.repo;
+}
+
+for (const [method, starred] of [["put", true], ["delete", false]] as const) {
+	repo[method]("/star", async (c) => {
+		const user = requireUser(c);
+		const row = userRepo(c);
+		await setStar(db(c.env), user.id, row.id, starred);
+		const listing = (await getListing(db(c.env), row.id, user.id)) as RepoListing;
+		return c.json({ starred, stars: listing.stars });
+	});
+}
+
+repo.get("/forks", async (c) => {
+	const p = c.var.principal;
+	const rows = await listRepos(db(c.env), { forksOf: userRepo(c).id, viewerId: viewerId(p), limit: intParam(c.req.query("limit"), 100, 500) });
+	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p))) });
+});
+
+// Forks into the caller's account; the name defaults to the source's.
+repo.post("/forks", async (c) => {
+	const source = userRepo(c);
+	const input = (await c.req.json().catch(() => ({}))) as { name?: string; description?: string };
+	return createRepo(c, { name: input.name?.trim() || source.name, description: input.description }, source);
 });
 
 repo.delete("/", async (c) => {
@@ -524,6 +595,64 @@ repo.delete("/branches/*", async (c) => {
 	await project(c).deleteBranch(name);
 	return c.json({ deleted: true });
 });
+
+// Commits from the web editor: write, create or delete files on a branch (or a new one). Text only.
+const MAX_EDIT_BYTES = 1024 * 1024;
+
+repo.post("/contents", async (c) => {
+	const row = c.var.repo;
+	const p = c.var.principal;
+	requireVerified(c.env, p);
+	if (row) {
+		const blocked = await pushBlocked(c.env, db(c.env), row);
+		if (blocked) throw new HttpError(403, "QUOTA_EXCEEDED", blocked);
+	}
+	const input = await body<{
+		branch?: string;
+		baseCommit?: string | null;
+		newBranch?: string;
+		message?: string;
+		files?: { path?: string; content?: string | null }[];
+	}>(c);
+	const message = input.message?.trim();
+	if (!message) throw new HttpError(400, "INVALID_INPUT", "A commit message is required");
+	if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 20) throw new HttpError(400, "INVALID_INPUT", "Give 1 to 20 files");
+	const encoder = new TextEncoder();
+	const seen = new Set<string>();
+	const changes = input.files.map((f) => {
+		const path = normalizeRepoPath(f.path ?? "");
+		if (seen.has(path)) throw new HttpError(400, "INVALID_INPUT", `${path} is listed twice`);
+		seen.add(path);
+		if (f.content !== null && typeof f.content !== "string") throw new HttpError(400, "INVALID_INPUT", `Content for ${path} must be a string, or null to delete it`);
+		const content = f.content === null ? null : encoder.encode(f.content);
+		if (content && content.length > MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", `${path} is over 1 MB; push it with git instead`);
+		return { path, content };
+	});
+	const who =
+		p.kind === "user"
+			? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` }
+			: { name: "megit", email: "admin@megit.dev" };
+	const branch = input.branch?.trim() || (await project(c).getProject()).defaultBranch;
+	const result = await project(c).commitFiles({
+		branch,
+		baseCommit: input.baseCommit,
+		newBranch: input.newBranch?.trim() || undefined,
+		changes,
+		message: message.slice(0, 10_000),
+		author: who,
+	});
+	if (row) c.executionCtx.waitUntil(addRepoBytes(db(c.env), row.id, result.packBytes));
+	return c.json(result, 201);
+});
+
+/** A repository path from a form: no leading or trailing slash, no empty, "." or ".." segments, nothing in .git. */
+function normalizeRepoPath(raw: string): string {
+	const parts = raw.trim().replace(/^\/+|\/+$/g, "").split("/");
+	if (parts.length === 0 || parts.some((part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git" || part.includes("\0"))) {
+		throw new HttpError(400, "INVALID_PATH", `${raw || "An empty path"} isn't a valid file path`);
+	}
+	return parts.join("/");
+}
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 

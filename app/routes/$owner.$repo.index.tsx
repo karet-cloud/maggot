@@ -1,11 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Check, ChevronRight, Download, File, FileCode2, FileText, Folder, FolderGit2, Link2 } from "lucide-react";
+import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, Link2, Pencil, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
 import { BranchSelect } from "../components/refs.tsx";
-import { cx, Empty, ErrorNote, Panel, Spinner, useCopy } from "../components/ui.tsx";
+import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
 
@@ -74,6 +74,17 @@ function Code() {
 								{tree.data.commit.slice(0, 7)}
 							</Link>
 						</span>
+						{info.data?.repo.canWrite && isBranch(ref) && (
+							<Link
+								to="/$owner/$repo/edit"
+								params={repoParams(project)}
+								search={{ ref, dir: path || undefined }}
+								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+							>
+								<FilePlus2 className="size-3.5" />
+								Add file
+							</Link>
+						)}
 						<ArchiveMenu project={project} refName={ref} />
 					</div>
 				)}
@@ -110,7 +121,15 @@ function Code() {
 				</Panel>
 
 				{shown ? (
-					<FileView key={shown} project={project} refName={ref} path={shown} commit={tree.data?.commit ?? null} />
+					<FileView
+						key={shown}
+						project={project}
+						refName={ref}
+						path={shown}
+						commit={tree.data?.commit ?? null}
+						editable={Boolean(info.data?.repo.canWrite && isBranch(ref))}
+						branch={ref ?? info.data?.defaultBranch}
+					/>
 				) : (
 					tree.data && (
 						<Empty icon={<FolderGit2 className="size-6" />} title="Pick a file">
@@ -154,7 +173,25 @@ function parseLines(hash: string): [number, number] | null {
 	return [Math.min(a, b), Math.max(a, b)];
 }
 
-function FileView({ project, refName, path, commit }: { project: string; refName?: string; path: string; commit: string | null }) {
+/** Whether a ref is a branch name (the default branch when absent), so the file can be edited there. */
+const isBranch = (ref: string | undefined) => !ref || (!ref.startsWith("task:") && !/^[0-9a-f]{40}$/.test(ref));
+
+function FileView({
+	project,
+	refName,
+	path,
+	commit,
+	editable,
+	branch,
+}: {
+	project: string;
+	refName?: string;
+	path: string;
+	commit: string | null;
+	editable: boolean;
+	branch?: string;
+}) {
+	const [deleting, setDeleting] = useState(false);
 	const image = IMAGE.test(path);
 	const markdown = MARKDOWN.test(path);
 	const file = useQuery({
@@ -219,6 +256,27 @@ function FileView({ project, refName, path, commit }: { project: string; refName
 							))}
 						</div>
 					)}
+					{editable && !binary && !image && (
+						<Link
+							to="/$owner/$repo/edit"
+							params={repoParams(project)}
+							search={{ ref: refName, path }}
+							className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-raised hover:text-fg"
+						>
+							<Pencil className="size-3.5" />
+							Edit
+						</Link>
+					)}
+					{editable && (
+						<button
+							type="button"
+							onClick={() => setDeleting(true)}
+							className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-rose-500/10 hover:text-rose-300"
+						>
+							<Trash2 className="size-3.5" />
+							Delete
+						</button>
+					)}
 					<IconLink href={api.rawUrl(project, path, refName)} label="Raw" icon={<FileText className="size-3.5" />} newTab />
 					<IconLink href={api.rawUrl(project, path, refName, true)} label="Download" icon={<Download className="size-3.5" />} />
 					<button
@@ -234,6 +292,9 @@ function FileView({ project, refName, path, commit }: { project: string; refName
 			}
 			className="min-w-0 overflow-hidden"
 		>
+			<Modal open={deleting} onClose={() => setDeleting(false)} title={`Delete ${path}`}>
+				{branch && <DeleteFile project={project} path={path} branch={branch} refName={refName} commit={commit} onClose={() => setDeleting(false)} />}
+			</Modal>
 			{file.isPending && !image && <Spinner className="m-4" />}
 			{file.error && (
 				<div className="p-3">
@@ -286,6 +347,58 @@ function FileView({ project, refName, path, commit }: { project: string; refName
 				</div>
 			)}
 		</Panel>
+	);
+}
+
+function DeleteFile({
+	project,
+	path,
+	branch,
+	refName,
+	commit,
+	onClose,
+}: {
+	project: string;
+	path: string;
+	branch: string;
+	refName?: string;
+	commit: string | null;
+	onClose: () => void;
+}) {
+	const queryClient = useQueryClient();
+	const navigate = useNavigate({ from: Route.fullPath });
+	const [message, setMessage] = useState("");
+	const remove = useMutation({
+		mutationFn: () => api.commitFiles(project, { branch, baseCommit: commit, message: message.trim() || `Delete ${path}`, files: [{ path, content: null }] }),
+		onSuccess: async () => {
+			await queryClient.invalidateQueries({ queryKey: ["project", project] });
+			onClose();
+			void navigate({ search: { ref: refName, path: path.split("/").slice(0, -1).join("/") || undefined } });
+		},
+	});
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				remove.mutate();
+			}}
+			className="space-y-4"
+		>
+			<p className="text-sm text-dim">
+				This commits the deletion to <span className="font-mono text-fg">{branch}</span>. The file stays in the history.
+			</p>
+			<Field label="Commit message">
+				<Input value={message} onChange={(e) => setMessage(e.target.value)} placeholder={`Delete ${path}`} autoFocus />
+			</Field>
+			<ErrorNote error={remove.error} />
+			<div className="flex justify-end gap-2">
+				<Button onClick={onClose}>Cancel</Button>
+				<Button type="submit" variant="danger" busy={remove.isPending}>
+					<Trash2 className="size-4" />
+					Delete file
+				</Button>
+			</div>
+		</form>
 	);
 }
 

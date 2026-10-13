@@ -44,8 +44,8 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 15 | **File history** | Commits that touched a path. | S–M |
 | 16 | **Code search** | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
 | 17 | **Commit graph** | A branch and merge visualization in history. Useful to show agent merges. | M |
-| 18 | **Edit in browser** | Edit a file, commit it to a branch, and optionally open a PR. | M |
-| 19 | **Forks** | Artifacts fork into another project, then PR back across forks. | M |
+| 18 | **Edit in browser** (done) | Edit a file, commit it to a branch, and optionally open a PR. | M |
+| 19 | **Forks** (done; stars too; PRs across forks next) | Artifacts fork into another project, then PR back across forks. | M |
 | 20 | **Signed commit badges** | Verify GPG/SSH signatures and show "Verified". | M |
 | 21 | **Git LFS** | Store large files in R2 behind the LFS batch API. | L |
 | 22 | **SSH push/clone** | Depends on what Artifacts exposes; HTTPS-only may be fine. | ? |

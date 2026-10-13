@@ -186,7 +186,8 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 			} finally {
 				forksInFlight.set(name, (forksInFlight.get(name) ?? 1) - 1);
 			}
-			await git(["clone", "--bare", "--quiet", "--single-branch", "--branch", source.defaultBranch, repoPath(name), repoPath(body.name)]);
+			const branches = body.defaultBranchOnly === false ? [] : ["--single-branch", "--branch", source.defaultBranch];
+			await git(["clone", "--bare", "--quiet", ...branches, repoPath(name), repoPath(body.name)]);
 			return createMeta(body.name, {
 				description: body.description ?? null,
 				defaultBranch: source.defaultBranch,
