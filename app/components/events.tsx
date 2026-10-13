@@ -28,10 +28,15 @@ export function describe(e: ProjectEvent): string {
 	switch (e.type) {
 		case "project.created":
 			return d.imported ? "Repository imported" : "Repository created";
-		case "repo.pushed":
-			if (d.moved === false) return "Pushed other branches or tags";
+		case "repo.pushed": {
+			// Newer events list every branch the push moved; the default branch gets the detail.
+			const others = ((d.refs as { branch: string; to: string | null }[] | undefined) ?? []).filter((r) => r.branch !== d.branch);
+			const names = others.map((r) => (r.to ? r.branch : `${r.branch} (deleted)`)).join(", ");
+			if (d.moved === false) return names ? `Pushed ${names}` : "Pushed (no branch changed)";
+			if (names) return `Pushed ${String(d.branch)} and ${names}`;
 			if (!d.from) return d.to ? `Pushed ${String(d.branch)} at ${shortOid(d.to as string)}` : "Pushed";
 			return `Pushed ${String(d.branch)} ${shortOid(d.from as string)} → ${shortOid(d.to as string)}`;
+		}
 		case "task.created":
 			return `${(d.agent as string | null) ?? "Someone"} started a task`;
 		case "task.ready": {

@@ -252,3 +252,60 @@ export interface Viewer {
 export interface ApiError {
 	error: { code: string; message: string };
 }
+
+/** Code search in one repository's default branch. */
+export interface CodeSearch {
+	/** The commit the index reflects; null until the first index is built. */
+	commit: string | null;
+	/** Some files weren't indexed (too many, or the index is full). */
+	partial: boolean;
+	/** Files in the index. */
+	files: number;
+	/** The index is being brought up to date; results may be from an older commit. */
+	indexing: boolean;
+	results: { path: string; matches: number; lines: { line: number; text: string }[] }[];
+}
+
+export type WebhookEvent = "push" | "task" | "merge";
+
+export interface Webhook {
+	id: string;
+	url: string;
+	events: WebhookEvent[];
+	active: boolean;
+	createdAt: string;
+	/** The last delivery's outcome, if any. */
+	lastStatus: "pending" | "delivered" | "failed" | null;
+}
+
+export interface WebhookDelivery {
+	id: string;
+	hookId: string;
+	event: WebhookEvent | "ping";
+	status: "pending" | "delivered" | "failed";
+	attempts: number;
+	responseStatus: number | null;
+	/** The start of the response body, or the error that stopped the request. */
+	response: string | null;
+	durationMs: number | null;
+	payload: unknown;
+	createdAt: string;
+	deliveredAt: string | null;
+	/** When the next attempt is due, while pending. */
+	nextAt: string | null;
+}
+
+export type NotificationKind = "star" | "fork" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
+
+export interface Notification {
+	id: string;
+	kind: NotificationKind;
+	/** `owner/name` of the repository it's about. */
+	repo: string | null;
+	title: string;
+	/** Site path to open. */
+	url: string;
+	actor: string | null;
+	createdAt: string;
+	readAt: string | null;
+}

@@ -98,6 +98,18 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   the blob, the trees on the changed path and the commit itself, packs them and pushes them with one
   receive-pack request, so nothing is cloned. Commit to the branch or to a new one; if the branch moved
   since the editor opened, the commit is refused rather than overwriting. Text files up to 1 MB.
+- **Search**: the top bar searches repositories by owner, name or description (`/search`, newest or
+  most starred). Each repository's "Search code" tab searches its default branch: text files up to
+  256 KB are kept in an FTS5 trigram index inside the repository's coordinator, updated from tree diffs
+  whenever the branch moves, so any substring of three or more characters matches (shorter ones match
+  file names), case-insensitively, with the matching lines.
+- **Webhooks**: in a repository's settings. Pushes (one delivery per branch moved, from git, the web
+  editor or a merge), merges and agent task events are POSTed as JSON with `X-Megit-Event`,
+  `X-Megit-Delivery` and `X-Megit-Signature-256: sha256=<HMAC-SHA256 of the body>`. Each hook gets a
+  ping when it's added; deliveries are retried five times over about nine hours, kept (last 50) with
+  their responses, and can be redelivered. https only, no private addresses, no redirects followed.
+- **Notifications**: the bell in the top bar. Stars and forks of your repositories, agent tasks that
+  merged, failed or hit conflicts, and webhooks that keep failing. Kept in D1, newest 200 per user.
 - **README**: the root README renders on the repository's front page (the Code tab), like GitHub.
 - **History**: first-parent history of the default branch; every commit opens a commit page with its
   message, author, parents and diff (unified or split).
@@ -209,6 +221,13 @@ the owner); anything else needs the owner. A private repository someone can't re
 | DELETE | `/repos/:owner/:repo` | | deletes it, its agent forks and state (owner) |
 | PUT / DELETE | `/repos/:owner/:repo/star` | | star or unstar (signed in, read access) → `{ starred, stars }` |
 | GET / POST | `/repos/:owner/:repo/forks` | `{ name? }` | list public forks; fork into your account (read access) |
+| GET | `/repos/:owner/:repo/search` | `?q=` | `CodeSearch`: matching files and lines on the default branch (`indexing` while it catches up) |
+| GET / POST | `/repos/:owner/:repo/hooks` | `{ url, secret?, events: ["push" \| "merge" \| "task"] }` | list or add webhooks (owner) |
+| PATCH / DELETE | `/repos/:owner/:repo/hooks/:id` | `{ url?, secret?, events?, active? }` | change or remove one (owner) |
+| GET | `/repos/:owner/:repo/hooks/:id/deliveries` | | `{ deliveries }`, newest first, with payloads and responses |
+| POST | `/repos/:owner/:repo/hooks/:id/ping`, `…/deliveries/:d/redeliver` | | queue a test or a repeat delivery |
+| GET | `/notifications` | `?unread` | `{ notifications, unread }` (signed in) |
+| POST | `/notifications/read` | `{ ids? }` | marks those, or all, read |
 | POST | `/repos/:owner/:repo/contents` | `{ branch?, baseCommit?, newBranch?, message, files: [{ path, content \| null }] }` | commits up to 20 text files (null deletes); 409 if `branch` moved past `baseCommit` |
 
 Admin and per-repository routes: Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
@@ -241,7 +260,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | GET | `/projects/:p/branches` | `?counts=0` skips ahead/behind | `Branches`: project branches and active task forks |
 | DELETE | `/projects/:p/branches/<name>` | | deletes a branch (not the default one) |
 
-Event types: `project.created`, `task.created`, `task.ready` (repo, remote, baseOid, forkAttempts),
+Event types: `project.created`, `repo.pushed` (branch, from, to, moved, refs: every branch it moved), `task.created`, `task.ready` (repo, remote, baseOid, forkAttempts),
 `task.submitted`, `task.merging`, `task.merged`,
 `task.conflict` (files, withTasks), `task.failed` (code, message), `task.abandoned`,
 `main.advanced` (from, to, fastForward, changedFiles).
@@ -278,6 +297,8 @@ src/git/workspace.ts  In-memory git workspace: fetch, 3-way merge, changed files
 src/git/diff.ts       Tree diffs and merge-base walks over the Artifacts object reads
 src/git/protocol.ts   Branch listing, deletion, pushes and repo measuring over Git smart HTTP
 src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
+src/search.ts         Code search index (FTS5 trigram) kept in each repository's coordinator
+src/hooks.ts          Webhook subscriptions, signed deliveries and retries, in the coordinator
 src/archive.ts        Streaming .tar.gz / .zip of a tree
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)

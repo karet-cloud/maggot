@@ -42,7 +42,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 |---|---------|-------|--------|
 | 14 | **Blame** | Per-line last commit. Expensive; compute lazily and cache in the DO or KV. | M |
 | 15 | **File history** | Commits that touched a path. | S–M |
-| 16 | **Code search** | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
+| 16 | **Code search** (done: repository search, and per-repository code search on the default branch) | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
 | 17 | **Commit graph** | A branch and merge visualization in history. Useful to show agent merges. | M |
 | 18 | **Edit in browser** (done) | Edit a file, commit it to a branch, and optionally open a PR. | M |
 | 19 | **Forks** (done; stars too; PRs across forks next) | Artifacts fork into another project, then PR back across forks. | M |
@@ -54,10 +54,10 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 
 | # | Feature | Notes | Effort |
 |---|---------|-------|--------|
-| 23 | **Webhooks** | Push, task, merge, and PR events posted to a URL, HMAC-signed. The event log already exists. | S–M |
+| 23 | **Webhooks** (done) | Push, task, merge, and PR events posted to a URL, HMAC-signed. The event log already exists. | S–M |
 | 24 | **Checks / CI status** | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
 | 25 | **Built-in CI runner** | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
-| 26 | **Notifications** | An in-app inbox plus email for review requests, mentions, and failed merges. | M |
+| 26 | **Notifications** (in-app done; email next) | An in-app inbox plus email for review requests, mentions, and failed merges. | M |
 | 27 | **Organizations and teams** | Group projects and share permissions. | L |
 | 28 | **Mirror from or to GitHub** | Keep a GitHub repo in sync both ways. Useful for adoption. | M |
 | 29 | **Audit log** | Who pushed, merged, or changed settings. Mostly the existing event log plus users. | S (after 12) |

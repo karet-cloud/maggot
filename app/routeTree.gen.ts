@@ -13,7 +13,9 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as NewRouteImport } from './routes/new'
+import { Route as NotificationsRouteImport } from './routes/notifications'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as SearchRouteImport } from './routes/search'
 import { Route as SignupRouteImport } from './routes/signup'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as OwnerIndexRouteImport } from './routes/$owner.index'
@@ -27,6 +29,7 @@ import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.comp
 import { Route as OwnerRepoEditRouteImport } from './routes/$owner.$repo.edit'
 import { Route as OwnerRepoForksRouteImport } from './routes/$owner.$repo.forks'
 import { Route as OwnerRepoHistoryRouteImport } from './routes/$owner.$repo.history'
+import { Route as OwnerRepoSearchRouteImport } from './routes/$owner.$repo.search'
 import { Route as OwnerRepoSettingsRouteImport } from './routes/$owner.$repo.settings'
 import { Route as OwnerRepoCommitHashRouteImport } from './routes/$owner.$repo.commit.$hash'
 import { Route as OwnerRepoTTaskRouteImport } from './routes/$owner.$repo.t.$task'
@@ -51,9 +54,19 @@ const NewRoute = NewRouteImport.update({
   path: '/new',
   getParentRoute: () => rootRouteImport,
 } as any)
+const NotificationsRoute = NotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ResetPasswordRoute = ResetPasswordRouteImport.update({
   id: '/reset-password',
   path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SearchRoute = SearchRouteImport.update({
+  id: '/search',
+  path: '/search',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SignupRoute = SignupRouteImport.update({
@@ -121,6 +134,11 @@ const OwnerRepoHistoryRoute = OwnerRepoHistoryRouteImport.update({
   path: '/history',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
+const OwnerRepoSearchRoute = OwnerRepoSearchRouteImport.update({
+  id: '/search',
+  path: '/search',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
 const OwnerRepoSettingsRoute = OwnerRepoSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -142,7 +160,9 @@ export interface FileRoutesByFullPath {
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
+  '/notifications': typeof NotificationsRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
@@ -155,6 +175,7 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
@@ -165,7 +186,9 @@ export interface FileRoutesByTo {
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
+  '/notifications': typeof NotificationsRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
   '/verify-email': typeof VerifyEmailRoute
   '/settings/password': typeof SettingsPasswordRoute
@@ -177,6 +200,7 @@ export interface FileRoutesByTo {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
@@ -188,7 +212,9 @@ export interface FileRoutesById {
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
+  '/notifications': typeof NotificationsRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
@@ -201,6 +227,7 @@ export interface FileRoutesById {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
@@ -213,7 +240,9 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/login'
     | '/new'
+    | '/notifications'
     | '/reset-password'
+    | '/search'
     | '/signup'
     | '/verify-email'
     | '/$owner/$repo'
@@ -226,6 +255,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
@@ -236,7 +266,9 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/login'
     | '/new'
+    | '/notifications'
     | '/reset-password'
+    | '/search'
     | '/signup'
     | '/verify-email'
     | '/settings/password'
@@ -248,6 +280,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo'
     | '/$owner/$repo/commit/$hash'
@@ -258,7 +291,9 @@ export interface FileRouteTypes {
     | '/forgot-password'
     | '/login'
     | '/new'
+    | '/notifications'
     | '/reset-password'
+    | '/search'
     | '/signup'
     | '/verify-email'
     | '/$owner/$repo'
@@ -271,6 +306,7 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
@@ -282,7 +318,9 @@ export interface RootRouteChildren {
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   LoginRoute: typeof LoginRoute
   NewRoute: typeof NewRoute
+  NotificationsRoute: typeof NotificationsRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
+  SearchRoute: typeof SearchRoute
   SignupRoute: typeof SignupRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
   OwnerRepoRoute: typeof OwnerRepoRouteWithChildren
@@ -321,11 +359,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NewRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/notifications': {
+      id: '/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof NotificationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/reset-password': {
       id: '/reset-password'
       path: '/reset-password'
       fullPath: '/reset-password'
       preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/search': {
+      id: '/search'
+      path: '/search'
+      fullPath: '/search'
+      preLoaderRoute: typeof SearchRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/signup': {
@@ -419,6 +471,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoHistoryRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/search': {
+      id: '/$owner/$repo/search'
+      path: '/search'
+      fullPath: '/$owner/$repo/search'
+      preLoaderRoute: typeof OwnerRepoSearchRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/settings': {
       id: '/$owner/$repo/settings'
       path: '/settings'
@@ -450,6 +509,7 @@ interface OwnerRepoRouteChildren {
   OwnerRepoEditRoute: typeof OwnerRepoEditRoute
   OwnerRepoForksRoute: typeof OwnerRepoForksRoute
   OwnerRepoHistoryRoute: typeof OwnerRepoHistoryRoute
+  OwnerRepoSearchRoute: typeof OwnerRepoSearchRoute
   OwnerRepoSettingsRoute: typeof OwnerRepoSettingsRoute
   OwnerRepoIndexRoute: typeof OwnerRepoIndexRoute
   OwnerRepoCommitHashRoute: typeof OwnerRepoCommitHashRoute
@@ -463,6 +523,7 @@ const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
   OwnerRepoEditRoute: OwnerRepoEditRoute,
   OwnerRepoForksRoute: OwnerRepoForksRoute,
   OwnerRepoHistoryRoute: OwnerRepoHistoryRoute,
+  OwnerRepoSearchRoute: OwnerRepoSearchRoute,
   OwnerRepoSettingsRoute: OwnerRepoSettingsRoute,
   OwnerRepoIndexRoute: OwnerRepoIndexRoute,
   OwnerRepoCommitHashRoute: OwnerRepoCommitHashRoute,
@@ -478,7 +539,9 @@ const rootRouteChildren: RootRouteChildren = {
   ForgotPasswordRoute: ForgotPasswordRoute,
   LoginRoute: LoginRoute,
   NewRoute: NewRoute,
+  NotificationsRoute: NotificationsRoute,
   ResetPasswordRoute: ResetPasswordRoute,
+  SearchRoute: SearchRoute,
   SignupRoute: SignupRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   OwnerRepoRoute: OwnerRepoRouteWithChildren,

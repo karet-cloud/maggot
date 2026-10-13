@@ -1,6 +1,6 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
 // The schema is created idempotently on first use in each isolate, so deploys need no migration step.
-import type { RepoInfo, Visibility } from "./api.ts";
+import type { Notification, NotificationKind, RepoInfo, Visibility } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
 // Generated from Better Auth 1.7 (email/password + username plugin) with getMigrations().compileMigrations().
@@ -24,6 +24,8 @@ const APP_SCHEMA = [
 	`create index if not exists "token_userId_idx" on "token" ("userId")`,
 	`create table if not exists "star" ("userId" text not null references "user" ("id") on delete cascade, "repoId" text not null references "repo" ("id") on delete cascade, "createdAt" text not null, primary key ("userId", "repoId"))`,
 	`create index if not exists "star_repoId_idx" on "star" ("repoId")`,
+	`create table if not exists "notification" ("id" text not null primary key, "userId" text not null references "user" ("id") on delete cascade, "kind" text not null, "repoId" text references "repo" ("id") on delete cascade, "title" text not null, "url" text not null, "actor" text, "createdAt" text not null, "readAt" text)`,
+	`create index if not exists "notification_user_idx" on "notification" ("userId", "createdAt")`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -214,12 +216,12 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 	return results;
 }
 
-export async function setStar(database: D1Database, userId: string, repoId: string, starred: boolean): Promise<void> {
-	if (starred) {
-		await database.prepare(`insert or ignore into "star" ("userId", "repoId", "createdAt") values (?, ?, ?)`).bind(userId, repoId, new Date().toISOString()).run();
-	} else {
-		await database.prepare(`delete from "star" where "userId" = ? and "repoId" = ?`).bind(userId, repoId).run();
-	}
+/** Stars or unstars; returns whether anything changed. */
+export async function setStar(database: D1Database, userId: string, repoId: string, starred: boolean): Promise<boolean> {
+	const result = starred
+		? await database.prepare(`insert or ignore into "star" ("userId", "repoId", "createdAt") values (?, ?, ?)`).bind(userId, repoId, new Date().toISOString()).run()
+		: await database.prepare(`delete from "star" where "userId" = ? and "repoId" = ?`).bind(userId, repoId).run();
+	return result.meta.changes > 0;
 }
 
 export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, canWrite: boolean, viewerId: string | null = null): RepoInfo {
@@ -241,6 +243,65 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		forkOf: parentVisible ? { owner: row.parentOwner as string, name: row.parentName as string } : null,
 		sizeBytes: row.bytes,
 	};
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
+
+/** How many notifications a user keeps; older ones are dropped as new ones arrive. */
+const KEEP_NOTIFICATIONS = 200;
+
+/** Adds a notification for a user, about one of their repositories. */
+export async function notifyUser(
+	database: D1Database,
+	n: { userId: string; kind: NotificationKind; repoId: string | null; title: string; url: string; actor: string | null },
+): Promise<void> {
+	await database.batch([
+		database
+			.prepare(`insert into "notification" ("id", "userId", "kind", "repoId", "title", "url", "actor", "createdAt") values (?, ?, ?, ?, ?, ?, ?, ?)`)
+			.bind(crypto.randomUUID(), n.userId, n.kind, n.repoId, n.title.slice(0, 300), n.url, n.actor, new Date().toISOString()),
+		database
+			.prepare(
+				`delete from "notification" where "userId" = ? and "id" not in (select "id" from "notification" where "userId" = ? order by "createdAt" desc limit ?)`,
+			)
+			.bind(n.userId, n.userId, KEEP_NOTIFICATIONS),
+	]);
+}
+
+/** From a repository's coordinator (which knows only the internal id): tells its owner. Admin projects have no owner. */
+export async function notify(env: Env, repoId: string, n: { kind: NotificationKind; title: string; path: string }): Promise<void> {
+	const database = db(env);
+	await ensureSchema(database);
+	const repo = await database.prepare(`select "ownerId", "owner", "name" from "repo" where "id" = ?`).bind(repoId).first<{ ownerId: string; owner: string; name: string }>();
+	if (!repo) return;
+	await notifyUser(database, { userId: repo.ownerId, kind: n.kind, repoId, title: n.title, url: `/${repo.owner}/${repo.name}/${n.path}`, actor: null });
+}
+
+export async function listNotifications(database: D1Database, userId: string, unreadOnly: boolean): Promise<{ notifications: Notification[]; unread: number }> {
+	const [list, count] = await database.batch<Record<string, unknown>>([
+		database
+			.prepare(
+				`select n."id", n."kind", n."title", n."url", n."actor", n."createdAt", n."readAt", r."owner" || '/' || r."name" as "repo"
+				 from "notification" n left join "repo" r on r."id" = n."repoId"
+				 where n."userId" = ? ${unreadOnly ? `and n."readAt" is null` : ""} order by n."createdAt" desc limit 100`,
+			)
+			.bind(userId),
+		database.prepare(`select count(*) as "n" from "notification" where "userId" = ? and "readAt" is null`).bind(userId),
+	]);
+	return { notifications: list.results as unknown as Notification[], unread: Number((count.results[0] as { n: number } | undefined)?.n ?? 0) };
+}
+
+/** Marks some (or, with no ids, all) of a user's notifications read. */
+export async function markRead(database: D1Database, userId: string, ids?: string[]): Promise<void> {
+	const now = new Date().toISOString();
+	if (!ids) {
+		await database.prepare(`update "notification" set "readAt" = ? where "userId" = ? and "readAt" is null`).bind(now, userId).run();
+		return;
+	}
+	if (ids.length === 0) return;
+	await database
+		.prepare(`update "notification" set "readAt" = ? where "userId" = ? and "readAt" is null and "id" in (${ids.map(() => "?").join(", ")})`)
+		.bind(now, userId, ...ids)
+		.run();
 }
 
 // ── Personal access tokens ───────────────────────────────────────────────────
