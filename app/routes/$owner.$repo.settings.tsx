@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { Webhooks } from "../components/webhooks.tsx";
 import { BranchProtection } from "../components/branch-protection.tsx";
+import { Collaborators } from "../components/collaborators.tsx";
 import { Button, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type RepoInfo, type Visibility } from "../lib/api.ts";
 
@@ -35,7 +36,7 @@ function RepoSettings() {
 	});
 
 	if (info.isPending) return <Spinner />;
-	if (!info.data?.repo.canWrite) return <p className="text-sm text-dim">Only the owner can change settings.</p>;
+	if (!info.data?.repo.canAdmin) return <p className="text-sm text-dim">Only the repository's admins can change settings.</p>;
 	const current = info.data.repo;
 	const archived = Boolean(current.archivedAt);
 	const other: Visibility = current.visibility === "public" ? "private" : "public";
@@ -81,6 +82,7 @@ function RepoSettings() {
 				</div>
 			</Panel>
 			<ErrorNote error={update.error} />
+			{!archived && <Collaborators project={project} />}
 			{!archived && <BranchProtection project={project} defaultBranch={current.defaultBranch} />}
 			<Webhooks project={project} archived={archived} />
 			<Panel title="Danger zone" className="border-red-500/30">

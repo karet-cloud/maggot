@@ -78,8 +78,13 @@ export function useProjectLive(project: string): Live {
 					invalidate(keys.releases(project));
 					invalidate(keys.graph(project));
 				}
+				if (event.type.startsWith("pull.") || event.type === "repo.pushed") {
+					invalidate(keys.pulls(project));
+				}
 				if (event.type.startsWith("issue.")) {
 					invalidate(keys.issues(project));
+					// Pull requests are issues too: their comments arrive as issue events.
+					invalidate(keys.pulls(project));
 					const number = (event.data.issue as { number?: number } | undefined)?.number;
 					if (number) invalidate(keys.issue(project, number));
 				}

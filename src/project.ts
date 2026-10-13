@@ -11,6 +11,8 @@ import {
 	type ConflictInfo,
 	type Diff,
 	type EventType,
+	type Blame,
+	type FileHistory,
 	type GitCredentials,
 	type Graph,
 	type GraphCommit,
@@ -37,6 +39,7 @@ import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts"
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
+import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 
 const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
@@ -148,6 +151,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Once the default branch has a commit it always will; skips re-checking on every task. */
 	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
+	/** Merges (the queue's and pull requests') change branches through the workspace one at a time. */
+	private readonly mergeSlot = new Semaphore(1);
 	/** In-flight provisioning per task, so a request and the recovery alarm never fork twice. */
 	private readonly provisioning = new Map<string, Promise<ArtifactsCreateRepoResult | null>>();
 
@@ -199,6 +204,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			);
 			CREATE TABLE IF NOT EXISTS commit_summaries (hash TEXT PRIMARY KEY, summary TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS graph_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS history_cache (key TEXT PRIMARY KEY, value TEXT NOT NULL, at INTEGER NOT NULL);
 			CREATE TABLE IF NOT EXISTS branch_rules (
 				pattern TEXT PRIMARY KEY,
 				block_deletions INTEGER NOT NULL,
@@ -208,10 +214,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			);
 		`);
 		// Columns added after the first schema; ALTER fails harmlessly when they already exist.
-		try {
-			this.sql.exec("ALTER TABLE tasks ADD COLUMN fork_attempts INTEGER NOT NULL DEFAULT 0");
-		} catch {
-			// Already migrated.
+		for (const column of ["ALTER TABLE tasks ADD COLUMN fork_attempts INTEGER NOT NULL DEFAULT 0", "ALTER TABLE branch_rules ADD COLUMN require_review INTEGER NOT NULL DEFAULT 0"]) {
+			try {
+				this.sql.exec(column);
+			} catch {
+				// Already migrated.
+			}
 		}
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 		this.code = new CodeIndex(this.sql);
@@ -586,6 +594,125 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				.map((e) => ({ name: e.name, path: dir ? `${dir}/${e.name}` : e.name, type: e.type, hash: e.hash }))
 				.sort((a, b) => Number(b.type === "tree") - Number(a.type === "tree") || a.name.localeCompare(b.name)),
 		};
+	}
+
+	/** The commits that changed `path`, from `ref` (or from commit `from`, to page further back). */
+	async fileHistory(ref: string | undefined, path: string, from?: string): Promise<FileHistory> {
+		const meta = this.meta();
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
+		using repo = await this.store.get(repoName);
+		const start = from && /^[0-9a-f]{40}$/.test(from) ? from : (await resolveCommit(repo, resolved)).hash;
+		return this.cached(`history:${repoName}:${start}:${path}`, () => fileHistory(repo as unknown as HistoryReader, start, path));
+	}
+
+	/** Who last changed each line of `path` at `ref`. */
+	async blame(ref: string | undefined, path: string): Promise<Blame> {
+		const meta = this.meta();
+		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
+		using repo = await this.store.get(repoName);
+		const start = (await resolveCommit(repo, resolved)).hash;
+		return this.cached(`blame:${repoName}:${start}:${path}`, async () => {
+			try {
+				return await blame(repo as unknown as HistoryReader, start, path);
+			} catch (err) {
+				if (err instanceof Error && /isn't a file/.test(err.message)) throw new HttpError(404, "NOT_FOUND", `${path} not found`);
+				throw err;
+			}
+		});
+	}
+
+	/** History and blame for a commit never change, so the last 100 are kept. */
+	private async cached<T>(key: string, compute: () => Promise<T>): Promise<T> {
+		const hit = this.sql.exec<{ value: string }>("SELECT value FROM history_cache WHERE key = ?", key).toArray()[0];
+		if (hit) {
+			this.sql.exec("UPDATE history_cache SET at = ? WHERE key = ?", Date.now(), key);
+			return JSON.parse(hit.value) as T;
+		}
+		const value = await compute();
+		const json = JSON.stringify(value);
+		// Big results (a long file's blame) aren't worth the storage.
+		if (json.length < 1_000_000) {
+			this.sql.exec("INSERT OR REPLACE INTO history_cache (key, value, at) VALUES (?, ?, ?)", key, json, Date.now());
+			this.sql.exec("DELETE FROM history_cache WHERE key NOT IN (SELECT key FROM history_cache ORDER BY at DESC LIMIT 100)");
+		}
+		return value;
+	}
+
+	// ── Pull requests ────────────────────────────────────────────────────────
+
+	/**
+	 * What a pull request would bring into `base`: the commits on `headBranch` (of this repository, or
+	 * of the fork `headRepo`) since their merge base, and the diff. Not reachable from URLs, which only
+	 * name this repository's refs; the API checks who may read the fork.
+	 */
+	async pullCompare(base: string, headRepo: string | null, headBranch: string): Promise<Comparison> {
+		const meta = this.meta();
+		using project = await this.store.get(meta.name);
+		using fork = headRepo && headRepo !== meta.name ? await this.store.get(headRepo) : null;
+		const repo = fork ?? project;
+		const mainline = await project.log({ ref: base, limit: MAINLINE_DEPTH });
+		if (mainline.length === 0) throw new HttpError(404, "NOT_FOUND", `${base} does not exist or has no commits`);
+		const tip = await resolveCommit(repo, headBranch);
+		const walk = await walkToMainline(repo, tip.hash, mainline.map((c) => c.hash));
+		const from = mainline.find((c) => c.hash === walk.mergeBase) ?? mainline[0];
+		return {
+			base: mainline[0].hash,
+			head: tip.hash,
+			mergeBase: walk.mergeBase,
+			commits: walk.commits,
+			capped: walk.capped,
+			diff: await diffTrees(repo, from.treeHash, tip.treeHash),
+		};
+	}
+
+	/**
+	 * Merges a pull request's head into `base`, with a merge commit or squashed into one commit, and
+	 * pushes it. Conflicts come back as 409 with the files; nothing is pushed then. The merge goes
+	 * through the same single slot as the merge queue's, so they never race.
+	 */
+	async mergePull(input: {
+		base: string;
+		headRepo: string | null;
+		headBranch: string;
+		method: "merge" | "squash";
+		message: string;
+		author: Identity;
+	}): Promise<{ commit: string; changedFiles: string[] }> {
+		const meta = this.meta();
+		this.assertWritable();
+		return this.mergeSlot.run(async () => {
+			const base = await this.baseAccess(meta);
+			const head = input.headRepo && input.headRepo !== meta.name ? await this.credentials(input.headRepo, input.headBranch, "read", INTERNAL_TOKEN_TTL) : null;
+			const headAccess = head ? { url: head.remote, token: head.token } : base;
+			// The default branch's workspace is kept between merges; other bases get a fresh one.
+			const ws = input.base === meta.defaultBranch ? (this.workspace ??= new Workspace(meta.defaultBranch, MERGE_IDENTITY)) : new Workspace(input.base, MERGE_IDENTITY);
+			try {
+				for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
+					await ws.syncBase(base);
+					const theirs = await ws.fetchTask(headAccess, input.headBranch);
+					const outcome = await ws.merge(theirs, input.message, input.author, input.method === "squash" ? "squash" : "merge-commit");
+					if (outcome.kind === "conflict") {
+						throw new HttpError(409, "MERGE_CONFLICT", `These files conflict with ${input.base}: ${outcome.files.join(", ") || "unknown"}. Merge ${input.base} into the branch and push again.`);
+					}
+					if (outcome.kind === "up-to-date") throw new HttpError(409, "NOTHING_TO_MERGE", `${input.base} already has everything in this pull request`);
+					if (await ws.push(base)) {
+						// Like a push: events, webhooks, the code index and "fixes #n" all follow.
+						await this.pushed();
+						return { commit: outcome.oid, changedFiles: outcome.changedFiles };
+					}
+				}
+				throw new HttpError(409, "PUSH_REJECTED", `${input.base} kept moving; try again`);
+			} catch (err) {
+				if (ws === this.workspace && !(err instanceof HttpError)) this.workspace = undefined;
+				throw err;
+			}
+		});
+	}
+
+	/** Records a pull request event for the feed and webhooks. */
+	async recordPullEvent(type: "pull.opened" | "pull.reviewed" | "pull.merged", data: Record<string, unknown>): Promise<void> {
+		this.meta();
+		this.emit(type, null, data);
 	}
 
 	/** A commit and its diff against its first parent. `ref` picks the repo, as in readFile. */
@@ -1124,7 +1251,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (current === null || current > at) await this.ctx.storage.setAlarm(at);
 	}
 
-	private async mergeTask(id: string): Promise<void> {
+	private mergeTask(id: string): Promise<void> {
+		return this.mergeSlot.run(() => this.mergeTaskNow(id));
+	}
+
+	private async mergeTaskNow(id: string): Promise<void> {
 		const meta = this.meta();
 		const row = this.row(id);
 		// "merging" here means a previous alarm died mid-merge; the merge is idempotent, so redo it.
@@ -1412,7 +1543,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	branchRules(): BranchRule[] {
 		return this.sql
-			.exec<{ pattern: string; block_deletions: number; block_force_pushes: number; require_merge_queue: number; created_at: string }>(
+			.exec<{ pattern: string; block_deletions: number; block_force_pushes: number; require_merge_queue: number; require_review: number; created_at: string }>(
 				"SELECT * FROM branch_rules ORDER BY created_at",
 			)
 			.toArray()
@@ -1421,6 +1552,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				blockDeletions: Boolean(r.block_deletions),
 				blockForcePushes: Boolean(r.block_force_pushes),
 				requireMergeQueue: Boolean(r.require_merge_queue),
+				requireReview: Boolean(r.require_review),
 				createdAt: r.created_at,
 			}));
 	}
@@ -1434,7 +1566,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async setBranchRule(rule: Omit<BranchRule, "createdAt">): Promise<BranchRule[]> {
 		this.meta();
 		if (!validPattern(rule.pattern)) throw new HttpError(400, "INVALID_INPUT", "A pattern is a branch name, optionally with * (within a segment) or ** (across them)");
-		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue) {
+		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue && !rule.requireReview) {
 			throw new HttpError(400, "INVALID_INPUT", "Choose at least one protection");
 		}
 		const existing = this.sql.exec<{ created_at: string }>("SELECT created_at FROM branch_rules WHERE pattern = ?", rule.pattern).toArray()[0];
@@ -1442,11 +1574,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			throw new HttpError(403, "QUOTA_EXCEEDED", "A repository can have at most 50 branch rules");
 		}
 		this.sql.exec(
-			"INSERT OR REPLACE INTO branch_rules (pattern, block_deletions, block_force_pushes, require_merge_queue, created_at) VALUES (?, ?, ?, ?, ?)",
+			"INSERT OR REPLACE INTO branch_rules (pattern, block_deletions, block_force_pushes, require_merge_queue, require_review, created_at) VALUES (?, ?, ?, ?, ?, ?)",
 			rule.pattern,
 			rule.blockDeletions ? 1 : 0,
 			rule.blockForcePushes ? 1 : 0,
 			rule.requireMergeQueue ? 1 : 0,
+			rule.requireReview ? 1 : 0,
 			existing?.created_at ?? new Date().toISOString(),
 		);
 		return this.branchRules();

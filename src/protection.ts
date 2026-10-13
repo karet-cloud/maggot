@@ -52,7 +52,7 @@ export function checkPush(rules: BranchRule[], commands: RefCommand[]): { refuse
 		const branch = c.ref.slice("refs/heads/".length);
 		const p = protectionFor(rules, branch);
 		if (p.patterns.length === 0) continue;
-		if (p.requireMergeQueue) refused.set(c.ref, `protected branch: changes to ${branch} go through the merge queue`);
+		if (p.requireMergeQueue) refused.set(c.ref, `protected branch: changes to ${branch} go through pull requests or the merge queue`);
 		else if (c.new === ZERO && p.blockDeletions) refused.set(c.ref, `protected branch: ${branch} can't be deleted`);
 		else if (c.new !== ZERO && c.old !== ZERO && p.blockForcePushes) fastForwardOnly.push(c);
 	}

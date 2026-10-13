@@ -1,19 +1,20 @@
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitBranch, GitCommitHorizontal, Tag } from "lucide-react";
 import { useMemo } from "react";
 import { CommitList } from "../components/commits.tsx";
 import { BranchSelect } from "../components/refs.tsx";
-import { cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
+import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type GraphCommit } from "../lib/api.ts";
 import { layoutGraph, type GraphRow } from "../lib/graph-layout.ts";
 
-type Search = { ref?: string; view?: "graph" };
+type Search = { ref?: string; view?: "graph"; path?: string };
 
 export const Route = createFileRoute("/$owner/$repo/history")({
 	validateSearch: (s: Record<string, unknown>): Search => ({
 		ref: typeof s.ref === "string" && s.ref ? s.ref : undefined,
 		view: s.view === "graph" ? "graph" : undefined,
+		path: typeof s.path === "string" && s.path ? s.path : undefined,
 	}),
 	component: HistoryPage,
 });
@@ -21,7 +22,7 @@ export const Route = createFileRoute("/$owner/$repo/history")({
 function HistoryPage() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
-	const { ref, view } = Route.useSearch();
+	const { ref, view, path } = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
 	const sub = (active: boolean) =>
 		cx("-mb-px flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm", active ? "border-accent text-fg" : "border-transparent text-dim hover:text-fg");
@@ -29,7 +30,7 @@ function HistoryPage() {
 		<div className="space-y-3">
 			<div className="flex flex-wrap items-center justify-between gap-3 border-b border-line">
 				<nav className="flex gap-1">
-					<Link from={Route.fullPath} search={{ ref }} className={sub(view !== "graph")}>
+					<Link from={Route.fullPath} search={{ ref, path }} className={sub(view !== "graph")}>
 						<GitCommitHorizontal className="size-3.5" />
 						Commits
 					</Link>
@@ -40,11 +41,11 @@ function HistoryPage() {
 				</nav>
 				{view !== "graph" && (
 					<div className="mb-1.5">
-						<BranchSelect project={project} value={ref} onChange={(next) => void navigate({ search: { ref: next } })} />
+						<BranchSelect project={project} value={ref} onChange={(next) => void navigate({ search: { ref: next, path } })} />
 					</div>
 				)}
 			</div>
-			{view === "graph" ? <GraphView project={project} /> : <Commits project={project} refName={ref} />}
+			{view === "graph" ? <GraphView project={project} /> : path ? <FileCommits project={project} refName={ref} path={path} /> : <Commits project={project} refName={ref} />}
 		</div>
 	);
 }
@@ -57,6 +58,46 @@ function Commits({ project, refName }: { project: string; refName?: string }) {
 	return (
 		<Panel title={`${refName ?? "Default branch"} · ${log.data.length === 1 ? "1 commit" : `${log.data.length} most recent commits`} (first parents)`}>
 			<CommitList commits={log.data} project={project} refName={refName} />
+		</Panel>
+	);
+}
+
+/** The commits that changed one file, a page at a time. */
+function FileCommits({ project, refName, path }: { project: string; refName?: string; path: string }) {
+	const pages = useInfiniteQuery({
+		queryKey: keys.fileHistory(project, path, refName),
+		queryFn: ({ pageParam }) => api.fileHistory(project, path, refName, pageParam),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last) => last.next ?? undefined,
+	});
+	if (pages.isPending) return <Spinner />;
+	if (pages.error) return <ErrorNote error={pages.error} />;
+	const commits = pages.data.pages.flatMap((p) => p.commits);
+	return (
+		<Panel
+			title={
+				<span className="normal-case tracking-normal">
+					History of <span className="font-mono text-fg">{path}</span>
+				</span>
+			}
+			actions={
+				<Link from={Route.fullPath} search={{ ref: refName }} className="text-[11px] text-faint hover:text-fg" aria-label="Show all commits">
+					All files
+				</Link>
+			}
+		>
+			{commits.length === 0 ? (
+				<p className="p-4 text-sm text-faint">{pages.hasNextPage ? "No changes in the commits looked at so far." : "No commits changed this file."}</p>
+			) : (
+				<CommitList commits={commits} project={project} refName={refName} />
+			)}
+			{pages.hasNextPage && (
+				<div className="border-t border-line p-3 text-center">
+					<Button className="text-xs" busy={pages.isFetchingNextPage} onClick={() => void pages.fetchNextPage()}>
+						Look further back
+					</Button>
+				</div>
+			)}
 		</Panel>
 	);
 }

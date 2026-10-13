@@ -154,6 +154,29 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   back (a compare-and-swap ref update) and rewrites git's report so the client sees
   `! [remote rejected] … (protected branch: force pushes aren't allowed)`. The same rules apply to
   SSH pushes, web commits and branch deletes; the merge queue is never blocked.
+- **Pull requests and code review**: open one from a branch here or from a fork (`/pulls/new`, "Open a
+  pull request" on the compare page, or "Contribute back" on a fork). They share numbers, comments,
+  labels and notifications with issues. Files changed shows the diff with line comments: hover a line,
+  press +, and the comments gather into a review that comments, approves or requests changes (approving
+  and requesting changes is for people who can merge, not the author). Merging (write access) makes a
+  merge commit or squashes, through the same single merge slot as the agent merge queue, so they never
+  race; conflicts are refused with the files named. A branch rule can require an approving review from
+  someone with write access and no changes requested. "Fixes #n" in the description or the commits
+  closes those issues.
+- **Organizations, teams and collaborators**: an organization is an account repositories belong to
+  (`/orgs/new`; its page lists People and Teams). People join by invitation, accepted on `/transfers`.
+  Owners administer every repository; members read them all; teams give members read, write or admin
+  access to particular repositories. Any repository can also invite collaborators with read, write or
+  admin access. Access is one number per viewer and repository, computed in SQL (`accessLevel` in
+  [`src/db.ts`](src/db.ts)) and used everywhere: the web, the API, git over HTTPS and SSH, lists and
+  review decisions. Write means pushing and merging; admin means settings, webhooks, collaborators,
+  transfers, archiving and deletion. Repositories can be created in, or transferred to, an
+  organization (its owners accept), and its notifications go to its owners.
+- **Blame and file history**: Blame on any file shows each run of lines with the commit that last
+  changed it, shaded by age; History lists the commits that changed the file, paging further back.
+  Both walk the first-parent log once, diffing versions with Myers, and are cached per commit.
+- **Upload files**: drag files or folders onto Upload (any kind, 10 MB each, 25 MB per commit); they're
+  committed like web edits, to the branch or a new one.
 - **Issues**: numbered per repository. Anyone signed in (verified) who can read the repository opens
   and comments; authors and the owner edit and close; the owner labels. Markdown with a preview,
   search, label filters, notifications for the owner and everyone in the conversation, `issues`
@@ -270,6 +293,17 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/transfers` | | `{ transfers: RepoTransfer[] }`: offers made to you |
 | POST | `/transfers/:id/accept`, `/transfers/:id/decline` | `{ name? }` | take the repository (under `name` if given) → `{ repo }`, or turn it down |
 | GET | `/repos/:owner/:repo/paths` | `?ref=` | `FileList`: every file path at `ref` (up to 20,000), for the file finder |
+| GET | `/repos/:owner/:repo/history`, `/blame` | `?path=&ref=` (`&from=` to page history) | `FileHistory`, `Blame` |
+| GET / POST | `/repos/:owner/:repo/pulls` | `?state=`; `{ title, body?, base, head, headRepo? }` | `PullList`; open one (signed in, read access; `headRepo` is a fork, `owner/name`) |
+| GET | `/repos/:owner/:repo/pulls/compare` | `?base=&head=&headRepo=` | what a pull request would bring |
+| GET | `/repos/:owner/:repo/pulls/:n`, `…/files` | | the pull request, comments, reviews and line comments; its commits and diff |
+| POST | `/repos/:owner/:repo/pulls/:n/reviews` | `{ state: "commented" \| "approved" \| "changes_requested", body?, commit?, comments: [{ path, line, side, body }] }` | a review |
+| POST | `/repos/:owner/:repo/pulls/:n/merge` | `{ method: "merge" \| "squash" }` | merges it (write access) → `{ pull, commit }`; 409 on conflicts |
+| GET / PUT / DELETE | `/repos/:owner/:repo/collaborators`, `…/:username` | `{ permission }` | collaborators (admins) |
+| GET / POST | `/orgs`, `/orgs/:org` | `{ name, displayName? }` | your organizations; create one; one organization (members and teams for members) |
+| POST / PATCH / DELETE | `/orgs/:org/members`, `…/:username` | `{ username, role }`, `{ role }` | invite, change role, remove or leave (owners; members can leave) |
+| POST / DELETE | `/orgs/:org/teams`, `…/:team`, `…/members/:username` (PUT), `…/repos/:repo` (PUT `{ permission }`) | | teams (owners) |
+| GET / POST | `/invitations`, `/invitations/:kind/:id/accept`, `…/decline` | | invitations to organizations (`org`) and repositories (`repo`) |
 | GET | `/ssh` | | `SshInfo`: the host key, its fingerprint and the WebSocket URL |
 | GET / POST / DELETE | `/repos/:owner/:repo/tags`, `…/tags/<name>` | `{ name, target? }` | list tags (with their commits); create one at a branch, tag or commit; delete one (owner) |
 | GET / POST | `/repos/:owner/:repo/releases` | `{ tag, target?, name?, notes?, prerelease? }` | list releases; publish one, creating the tag at `target` if needed (owner) |
@@ -363,7 +397,10 @@ src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
 src/search.ts         Code search index (FTS5 trigram) kept in each repository's coordinator
 src/hooks.ts          Webhook subscriptions, signed deliveries and retries, in the coordinator
 src/archive.ts        Streaming .tar.gz / .zip of a tree
-src/protection.ts     Branch rules: matching, push command checks, ancestry, git report rewriting
+src/protection.ts     Branch rules: push command checks, holding refs, ancestry, git report rewriting
+src/branch-rules.ts   Which rules apply to a branch (shared with the UI)
+src/orgs.ts           Organizations, teams, collaborators and invitations
+src/git/history.ts    File history and blame
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
@@ -393,7 +430,6 @@ npm run typecheck
 
 ## Not done yet
 
-- Collaborators and organizations: a repository has one owner, who is the only one who can push.
 - Password reset and verification emails need a sending domain (see Passwords above).
 - Repository sizes are the bytes of accepted pushes (packs as sent, so force pushes add up), not what
   Artifacts stores after packing, and
@@ -404,7 +440,7 @@ npm run typecheck
   a token doesn't close a socket it opened.
 - Git LFS. SSH needs the ProxyCommand: Workers can't take raw TCP on port 22 (Spectrum could, on
   Enterprise plans), and SSH fetches need Git protocol v2 (git 2.26 and newer use it by default).
-- Pull requests and reviews for people (agents already land work through the merge queue).
+- Pull request niceties: suggested changes, threaded replies to line comments, draft pull requests, and required status checks.
 - Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).
 - Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's
   Git URL already emit `repo.pushed`.

@@ -1,8 +1,9 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, FileList, IssueState, Project, RepoInfo, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, Comparison, FileList, IssueState, MergeMethod, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
-import { auth, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
+import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
 import {
 	assertRepoName,
 	createToken,
@@ -41,7 +42,16 @@ import {
 	toIssue,
 	toIssueSummary,
 	updateIssue,
+	addReview,
+	getPull,
+	listPulls,
+	listReviews,
+	markPullMerged,
+	MAX_REVIEW_COMMENTS,
+	toPull,
+	closeIssuesByCommits,
 	type IssueRow,
+	type PullRow,
 	listNotifications,
 	notifiedRecently,
 	markRead,
@@ -64,6 +74,27 @@ import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pu
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
 import { hostKey, parsePublicKey, SSH_PATH } from "./ssh/keys.ts";
+import {
+	answerInvitation,
+	assertPermission,
+	createOrg,
+	createTeam,
+	deleteOrg,
+	deleteTeam,
+	describeOrg,
+	findOrg,
+	invitationsFor,
+	inviteMember,
+	listCollaborators,
+	orgsOf,
+	removeCollaborator,
+	removeMember,
+	roleIn,
+	setCollaborator,
+	setMemberRole,
+	setTeamMember,
+	setTeamRepo,
+} from "./orgs.ts";
 
 export { Limiter } from "./policy.ts";
 export { ProjectCoordinator, Registry } from "./project.ts";
@@ -303,6 +334,14 @@ app.post("/api/notifications/read", async (c) => {
 
 // ── Transfers offered to the signed-in user ──────────────────────────────────
 
+/** Who receives a transfer the user may answer: themselves, or an organization they own. */
+async function transferRecipient(c: Context<App>, toUserId: string, userId: string): Promise<{ id: string; username: string } | null> {
+	const to = await db(c.env).prepare(`select "id", "username", "kind" from "user" where "id" = ?`).bind(toUserId).first<{ id: string; username: string; kind: string }>();
+	if (!to) return null;
+	if (to.id === userId) return to;
+	return to.kind === "org" && (await roleIn(db(c.env), to.id, userId)) === "owner" ? to : null;
+}
+
 app.get("/api/transfers", async (c) => {
 	const user = requireUser(c);
 	await ensureSchema(db(c.env));
@@ -315,12 +354,13 @@ app.post("/api/transfers/:id/accept", async (c) => {
 	requireVerified(c.env, user);
 	const input = (await c.req.json().catch(() => ({}))) as { name?: string };
 	const transfer = await getTransfer(db(c.env), c.req.param("id"));
-	if (!transfer || transfer.toUserId !== user.id) throw new HttpError(404, "NOT_FOUND", `No transfer offer for you with that id (they expire after ${TRANSFER_DAYS} days)`);
+	const recipient = transfer && (await transferRecipient(c, transfer.toUserId, user.id));
+	if (!transfer || !recipient) throw new HttpError(404, "NOT_FOUND", `No transfer offer for you with that id (they expire after ${TRANSFER_DAYS} days)`);
 	const before = (await db(c.env).prepare(`select * from "repo" where "id" = ?`).bind(transfer.id).first<RepoRow>()) as RepoRow;
 	const name = assertRepoName((typeof input.name === "string" && input.name.trim()) || before.name);
 	const p = policy(c.env);
-	await completeTransfer(db(c.env), transfer, { id: user.id, username: user.username }, name, { maxRepos: p.reposPerUser, maxBytes: p.userBytes });
-	const after: RepoRow = { ...before, ownerId: user.id, owner: user.username, name };
+	await completeTransfer(db(c.env), transfer, recipient, name, { maxRepos: p.reposPerUser, maxBytes: p.userBytes });
+	const after: RepoRow = { ...before, ownerId: recipient.id, owner: recipient.username, name };
 	const coordinator = projects(c.env).getByName(after.id);
 	await coordinator.setRepository(repositoryRef(c, after));
 	// Live views were authorized for the old owner, and webhooks point at the old owner's endpoints.
@@ -337,16 +377,141 @@ app.post("/api/transfers/:id/accept", async (c) => {
 		}),
 	);
 	const listing = await getListing(db(c.env), after.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? after, origin(c), true, user.id) });
+	return c.json({ repo: toRepoInfo(listing ?? after, origin(c), true, user.id, true) });
 });
 
 app.post("/api/transfers/:id/decline", async (c) => {
 	const user = requireUser(c);
 	const transfer = await getTransfer(db(c.env), c.req.param("id"));
-	if (!transfer || transfer.toUserId !== user.id) throw new HttpError(404, "NOT_FOUND", "No transfer offer for you with that id");
-	await cancelTransfer(db(c.env), transfer.id, user.id);
+	if (!transfer || !(await transferRecipient(c, transfer.toUserId, user.id))) throw new HttpError(404, "NOT_FOUND", "No transfer offer for you with that id");
+	await cancelTransfer(db(c.env), transfer.id, transfer.toUserId);
 	return c.json({ deleted: true });
 });
+
+// ── Organizations and teams ──────────────────────────────────────────────────
+
+app.get("/api/orgs", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	return c.json({ orgs: await orgsOf(db(c.env), user.id) });
+});
+
+app.post("/api/orgs", async (c) => {
+	const user = requireUser(c);
+	requireVerified(c.env, user);
+	const input = await body<{ name?: string; displayName?: string }>(c);
+	if (typeof input.name !== "string") throw new HttpError(400, "INVALID_INPUT", "name is required");
+	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many created; try again later");
+	await ensureSchema(db(c.env));
+	const org = await createOrg(db(c.env), user.id, input.name, typeof input.displayName === "string" ? input.displayName : "");
+	return c.json({ org: await describeOrg(db(c.env), org, user.id) }, 201);
+});
+
+/** The organization named in the route, and the caller's role in it; `need` checks the role. */
+async function orgRoute(c: Context<App>, need?: "member" | "owner") {
+	await ensureSchema(db(c.env));
+	const org = await findOrg(db(c.env), c.req.param("org") ?? "");
+	if (!org) throw new HttpError(404, "NOT_FOUND", "No such organization");
+	const p = c.var.principal;
+	const role = p.kind === "admin" ? "owner" : await roleIn(db(c.env), org.id, viewerId(p));
+	if (need && !role) throw new HttpError(403, "FORBIDDEN", "Only the organization's members can do that");
+	if (need === "owner" && role !== "owner") throw new HttpError(403, "FORBIDDEN", "Only the organization's owners can do that");
+	return { org, role };
+}
+
+app.get("/api/orgs/:org", async (c) => {
+	const { org } = await orgRoute(c);
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+});
+
+app.delete("/api/orgs/:org", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	await deleteOrg(db(c.env), org.id);
+	return c.json({ deleted: true });
+});
+
+app.post("/api/orgs/:org/members", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	const user = requireUser(c);
+	const input = await body<{ username?: string; role?: string }>(c);
+	if (typeof input.username !== "string") throw new HttpError(400, "INVALID_INPUT", "username is required");
+	const role = input.role === "owner" ? "owner" : "member";
+	const invitee = await inviteMember(db(c.env), org.id, input.username, role, user.id);
+	c.executionCtx.waitUntil(
+		notifyUser(db(c.env), { userId: invitee, kind: "invitation", repoId: null, title: `${user.username} invited you to join ${org.username}`, url: "/transfers", actor: user.username }),
+	);
+	return c.json({ org: await describeOrg(db(c.env), org, user.id) }, 201);
+});
+
+app.patch("/api/orgs/:org/members/:username", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	const input = await body<{ role?: string }>(c);
+	if (input.role !== "owner" && input.role !== "member") throw new HttpError(400, "INVALID_INPUT", "role is owner or member");
+	await setMemberRole(db(c.env), org.id, c.req.param("username"), input.role);
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+});
+
+// Owners remove anyone; members can remove themselves (leave).
+app.delete("/api/orgs/:org/members/:username", async (c) => {
+	const user = requireUser(c);
+	const leaving = c.req.param("username").toLowerCase() === user.username;
+	const { org } = await orgRoute(c, leaving ? "member" : "owner");
+	await removeMember(db(c.env), org.id, c.req.param("username"));
+	return c.json({ org: await describeOrg(db(c.env), org, user.id) });
+});
+
+app.post("/api/orgs/:org/teams", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	const input = await body<{ name?: string }>(c);
+	await createTeam(db(c.env), org.id, typeof input.name === "string" ? input.name : "");
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) }, 201);
+});
+
+app.delete("/api/orgs/:org/teams/:team", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	await deleteTeam(db(c.env), org.id, c.req.param("team"));
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+});
+
+for (const [method, member] of [["put", true], ["delete", false]] as const) {
+	app[method]("/api/orgs/:org/teams/:team/members/:username", async (c) => {
+		const { org } = await orgRoute(c, "owner");
+		await setTeamMember(db(c.env), org.id, c.req.param("team"), c.req.param("username"), member);
+		return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+	});
+}
+
+app.put("/api/orgs/:org/teams/:team/repos/:repo", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	const input = await body<{ permission?: string }>(c);
+	await setTeamRepo(db(c.env), org.id, c.req.param("team"), c.req.param("repo"), assertPermission(input.permission));
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+});
+
+app.delete("/api/orgs/:org/teams/:team/repos/:repo", async (c) => {
+	const { org } = await orgRoute(c, "owner");
+	await setTeamRepo(db(c.env), org.id, c.req.param("team"), c.req.param("repo"), null);
+	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
+});
+
+// ── Invitations to organizations and repositories ────────────────────────────
+
+app.get("/api/invitations", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	return c.json({ invitations: await invitationsFor(db(c.env), user.id) });
+});
+
+for (const answer of ["accept", "decline"] as const) {
+	app.post(`/api/invitations/:kind/:id/${answer}`, async (c) => {
+		const user = requireUser(c);
+		const kind = c.req.param("kind");
+		if (kind !== "org" && kind !== "repo") throw new HttpError(404, "NOT_FOUND", "No such invitation");
+		if (answer === "accept") requireVerified(c.env, user);
+		await answerInvitation(db(c.env), user.id, kind, c.req.param("id"), answer === "accept");
+		return c.json({ ok: true });
+	});
+}
 
 // ── SSH keys ─────────────────────────────────────────────────────────────────
 
@@ -403,7 +568,7 @@ app.get("/api/repos", async (c) => {
 		sort: c.req.query("sort") === "stars" ? "stars" : "created",
 		limit: intParam(c.req.query("limit"), 100, 500),
 	});
-	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p))) });
+	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
 interface NewRepo {
@@ -414,10 +579,21 @@ interface NewRepo {
 	importUrl?: string;
 	importBranch?: string;
 	readme?: boolean;
+	/** An organization to create it in (the caller has to be a member); the caller's own account by default. */
+	owner?: string;
+}
+
+/** Whose account a new repository (or fork) goes in: the caller's, or an organization they're a member of. */
+async function newOwner(c: Context<App>, user: { id: string; username: string }, owner: unknown): Promise<{ id: string; username: string }> {
+	if (owner === undefined || owner === null || owner === "" || owner === user.username) return user;
+	if (typeof owner !== "string") throw new HttpError(400, "INVALID_INPUT", "owner is an organization's name");
+	const org = await findOrg(db(c.env), owner);
+	if (!org || !(await roleIn(db(c.env), org.id, user.id))) throw new HttpError(403, "FORBIDDEN", `You can't create repositories in ${owner}`);
+	return { id: org.id, username: org.username };
 }
 
 /**
- * Creates a repository for the signed-in user: empty, seeded with a README, imported from a URL, or
+ * Creates a repository for the signed-in user (or in one of their organizations): empty, seeded with a README, imported from a URL, or
  * forked from `source` (all of its branches and tags).
  */
 async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
@@ -429,10 +605,12 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	if (visibility !== "public" && visibility !== "private") throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
 	const defaultBranch = source?.defaultBranch ?? (input.defaultBranch?.trim() || "master");
 	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(defaultBranch) || defaultBranch.includes("..")) throw new HttpError(400, "INVALID_INPUT", "Invalid branch name");
+	await ensureSchema(db(c.env));
+	const owner = await newOwner(c, user, input.owner);
 	const row: RepoRow = {
 		id: `r${crypto.randomUUID().replaceAll("-", "").slice(0, 15)}`,
-		ownerId: user.id,
-		owner: user.username,
+		ownerId: owner.id,
+		owner: owner.username,
 		name,
 		description: input.description?.trim() || source?.description || null,
 		visibility,
@@ -443,10 +621,9 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		forkOf: source?.id ?? null,
 		archivedAt: null,
 	};
-	await ensureSchema(db(c.env));
-	await assertCanCreateRepo(c.env, db(c.env), user.id);
+	await assertCanCreateRepo(c.env, db(c.env), owner.id);
 	if (source) {
-		const room = policy(c.env).userBytes - (await usage(db(c.env), user.id)).bytes;
+		const room = policy(c.env).userBytes - (await usage(db(c.env), owner.id)).bytes;
 		if (source.bytes > room) throw new HttpError(403, "QUOTA_EXCEEDED", `${source.owner}/${source.name} is bigger than the ${formatBytes(Math.max(room, 0))} you have room for.`);
 	}
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
@@ -472,7 +649,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	// An import's size isn't known until it's there: measure it, and undo the import if it doesn't fit.
 	if (input.importUrl) {
 		const p = policy(c.env);
-		const used = await usage(db(c.env), user.id);
+		const used = await usage(db(c.env), owner.id);
 		const room = Math.min(p.repoBytes, p.userBytes - used.bytes);
 		const undo = async () => {
 			await projects(c.env).getByName(row.id).destroy();
@@ -497,7 +674,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	await projects(c.env)
 		.getByName(row.id)
 		.setRepository(repositoryRef(c, row));
-	if (source && source.ownerId !== user.id) {
+	if (source && source.ownerId !== owner.id) {
 		c.executionCtx.waitUntil(
 			notifyUser(db(c.env), {
 				userId: source.ownerId,
@@ -511,7 +688,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		);
 	}
 	const listing = await getListing(db(c.env), row.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id), project: created }, 201);
+	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true), project: created }, 201);
 }
 
 /** How webhook payloads name a repository. */
@@ -556,13 +733,22 @@ const repo = new Hono<App>();
 /** Things anyone who can read a repository may do to it: star or unstar it, and fork it. Exact routes only. */
 const READER_ACTIONS: Record<string, string[]> = { "/star": ["PUT", "DELETE"], "/forks": ["POST"] };
 
+/** Repository settings, collaborators, webhooks, transfers, archiving and deletion: admins only. */
+function adminAction(rest: string, method: string): boolean {
+	if (rest === "/") return method === "PATCH" || method === "DELETE";
+	if (rest === "/transfer" || rest === "/hooks" || rest.startsWith("/hooks/") || rest === "/collaborators" || rest.startsWith("/collaborators/")) return true;
+	if (rest === "/protection") return method !== "GET";
+	return false;
+}
+
 /**
  * Whether a write is one a reader may make: starring and forking, and opening and discussing issues
  * (whose routes check authorship themselves).
  */
 function readerAction(rest: string, method: string): boolean {
 	if (READER_ACTIONS[rest]?.includes(method)) return true;
-	if (rest === "/issues") return method === "POST";
+	if (rest === "/issues" || rest === "/pulls") return method === "POST";
+	if (/^\/pulls\/\d+\/reviews$/.test(rest)) return method === "POST";
 	if (/^\/issues\/\d+$/.test(rest)) return method === "PATCH";
 	if (/^\/issues\/\d+\/comments$/.test(rest)) return method === "POST";
 	if (/^\/issues\/\d+\/comments\/[^/]+$/.test(rest)) return method === "PATCH" || method === "DELETE";
@@ -592,10 +778,16 @@ repo.use("*", async (c, next) => {
 		return next();
 	}
 	await ensureSchema(db(c.env));
-	const row = await findRepo(db(c.env), owner, c.req.param("repo") ?? "");
 	const p = c.var.principal;
+	const row = await findRepo(db(c.env), owner, c.req.param("repo") ?? "", viewerId(p));
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
-	const write = !["GET", "HEAD"].includes(c.req.method) && !readerAction(routeRest(c, ""), c.req.method);
+	const rest = routeRest(c, "");
+	// Settings and the like belong to admins; their pages don't exist for anyone else.
+	if (adminAction(rest, c.req.method) && !canAdmin(p, row)) {
+		if (c.req.method === "GET") throw new HttpError(404, "NOT_FOUND", "Not found");
+		throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "Only the repository's admins can do that");
+	}
+	const write = !["GET", "HEAD"].includes(c.req.method) && !readerAction(rest, c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
 	// Archived means read-only for everyone: issues and comments too, but starring and forking still work.
 	const mutating = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS[routeRest(c, "")]?.includes(c.req.method);
@@ -611,7 +803,7 @@ repo.get("/", async (c) => {
 	const row = c.var.repo;
 	const p = c.var.principal;
 	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
-	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p)) : null;
+	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row)) : null;
 	const state = await project(c).getProject();
 	// People reach user repositories through megit's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
@@ -647,7 +839,7 @@ repo.patch("/", async (c) => {
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
 	if (input.name !== undefined) await project(c).setRepository(repositoryRef(c, row));
 	const updated = (await getListing(db(c.env), row.id, viewerId(c.var.principal))) as RepoListing;
-	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal)) });
+	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal), true) });
 });
 
 /** The repository behind a user-facing route; admin project routes have none. */
@@ -674,21 +866,53 @@ for (const [method, starred] of [["put", true], ["delete", false]] as const) {
 repo.get("/forks", async (c) => {
 	const p = c.var.principal;
 	const rows = await listRepos(db(c.env), { forksOf: userRepo(c).id, viewerId: viewerId(p), limit: intParam(c.req.query("limit"), 100, 500) });
-	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p))) });
+	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
 // Forks into the caller's account; the name defaults to the source's.
 repo.post("/forks", async (c) => {
 	const source = userRepo(c);
-	const input = (await c.req.json().catch(() => ({}))) as { name?: string; description?: string };
-	return createRepo(c, { name: input.name?.trim() || source.name, description: input.description }, source);
+	const input = (await c.req.json().catch(() => ({}))) as { name?: string; description?: string; owner?: string };
+	return createRepo(c, { name: input.name?.trim() || source.name, description: input.description, owner: input.owner }, source);
+});
+
+// ── Collaborators (admins only; see adminAction) ─────────────────────────────
+
+repo.get("/collaborators", async (c) => c.json({ collaborators: await listCollaborators(db(c.env), userRepo(c).id) }));
+
+repo.put("/collaborators/:username", async (c) => {
+	const row = userRepo(c);
+	const user = requireUser(c);
+	const input = await body<{ permission?: string }>(c);
+	const permission = assertPermission(input.permission);
+	const result = await setCollaborator(db(c.env), row, c.req.param("username"), permission, user.id);
+	if (result.invited) {
+		c.executionCtx.waitUntil(
+			notifyUser(db(c.env), {
+				userId: result.id,
+				kind: "invitation",
+				repoId: null,
+				title: `${user.username} invited you to ${row.owner}/${row.name} (${permission})`,
+				url: "/transfers",
+				actor: user.username,
+			}),
+		);
+	}
+	return c.json({ collaborators: await listCollaborators(db(c.env), row.id) });
+});
+
+repo.delete("/collaborators/:username", async (c) => {
+	const row = userRepo(c);
+	await removeCollaborator(db(c.env), row.id, c.req.param("username"));
+	// Live views were authorized with the old access.
+	await project(c).disconnectAll("Access changed");
+	return c.json({ collaborators: await listCollaborators(db(c.env), row.id) });
 });
 
 // ── Transfers: the owner offers the repository to another user, who accepts it from /transfers ─
 
 repo.get("/transfer", async (c) => {
 	const row = userRepo(c);
-	if (!canWrite(c.var.principal, row)) throw new HttpError(404, "NOT_FOUND", "Not found");
 	return c.json({ transfer: await getTransfer(db(c.env), row.id) });
 });
 
@@ -698,9 +922,10 @@ repo.post("/transfer", async (c) => {
 	const { to } = await body<{ to?: string }>(c);
 	const name = to?.trim().toLowerCase() ?? "";
 	const recipient = name ? await db(c.env).prepare(`select "id", "username" from "user" where "username" = ?`).bind(name).first<{ id: string; username: string }>() : null;
-	if (!recipient) throw new HttpError(404, "NOT_FOUND", `There's no user called ${to?.trim() || "that"}`);
-	if (recipient.id === row.ownerId) throw new HttpError(400, "INVALID_INPUT", "You already own this repository");
-	await offerTransfer(db(c.env), row.id, user.id, recipient.id);
+	if (!recipient) throw new HttpError(404, "NOT_FOUND", `There's no user or organization called ${to?.trim() || "that"}`);
+	if (recipient.id === row.ownerId) throw new HttpError(400, "INVALID_INPUT", "It already belongs there");
+	// The offer is from the repository's owner (a person or an organization); an organization's owners accept for it.
+	await offerTransfer(db(c.env), row.id, row.ownerId, recipient.id);
 	// The offer names the repository even if it's private: the recipient has to know what they're accepting.
 	c.executionCtx.waitUntil(
 		notifyUser(db(c.env), {
@@ -765,6 +990,23 @@ repo.get("/log", async (c) => {
 repo.get("/tree", async (c) => {
 	c.header("cache-control", "no-store");
 	return c.json({ tree: await project(c).tree(c.req.query("ref"), c.req.query("path") ?? "") });
+});
+
+// The commits that changed one file: ?path=&ref=, and ?from=<commit> for older ones.
+repo.get("/history", async (c) => {
+	const path = c.req.query("path")?.replace(/^\/+|\/+$/g, "");
+	if (!path) throw new HttpError(400, "INVALID_INPUT", "path is required");
+	return c.json(await project(c).fileHistory(c.req.query("ref"), path, c.req.query("from")));
+});
+
+// Who last changed each line of a file: ?path=&ref=.
+repo.get("/blame", async (c) => {
+	const path = c.req.query("path")?.replace(/^\/+|\/+$/g, "");
+	if (!path) throw new HttpError(400, "INVALID_INPUT", "path is required");
+	// Blame reads every version of a file, so it's limited like search.
+	const p = c.var.principal;
+	if (p.kind !== "admin") await limit(c.env, p.kind === "user" ? `user:${p.id}` : `ip:${clientIp(c.req.raw)}`, rules.search(policy(c.env)), "Too many blame requests");
+	return c.json(await project(c).blame(c.req.query("ref"), path));
 });
 
 // Every file path at a ref, for the file finder ("Go to file"). Capped like archives, but truncated rather than refused.
@@ -859,10 +1101,13 @@ repo.delete("/branches/*", async (c) => {
 
 // Commits from the web editor: write, create or delete files on a branch (or a new one). Text only.
 const MAX_EDIT_BYTES = 1024 * 1024;
+/** Uploaded files (base64) may be bigger than edited text, and binary. */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+const MAX_COMMIT_BYTES = 25 * 1024 * 1024;
 
 repo.post("/contents", async (c) => {
-	// Up to 20 files of 1 MB, JSON-escaped; anything far bigger isn't read at all.
-	if (Number(c.req.header("content-length") ?? 0) > 50 * MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", "That's too much for one web commit");
+	// Up to 25 MB of files, base64 in JSON; anything far bigger isn't read at all.
+	if (Number(c.req.header("content-length") ?? 0) > 40 * 1024 * 1024) throw new HttpError(413, "TOO_LARGE", "That's too much for one web commit");
 	const row = c.var.repo;
 	const p = c.var.principal;
 	requireVerified(c.env, p);
@@ -875,20 +1120,28 @@ repo.post("/contents", async (c) => {
 		baseCommit?: string | null;
 		newBranch?: string;
 		message?: string;
-		files?: { path?: string; content?: string | null; previousPath?: string }[];
+		/** `encoding: "base64"` for uploaded (possibly binary) files; text otherwise. */
+		files?: { path?: string; content?: string | null; previousPath?: string; encoding?: "base64" }[];
 	}>(c);
 	const message = input.message?.trim();
 	if (!message) throw new HttpError(400, "INVALID_INPUT", "A commit message is required");
-	if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 20) throw new HttpError(400, "INVALID_INPUT", "Give 1 to 20 files");
+	if (!Array.isArray(input.files) || input.files.length === 0 || input.files.length > 100) throw new HttpError(400, "INVALID_INPUT", "Give 1 to 100 files");
 	const encoder = new TextEncoder();
 	const seen = new Set<string>();
+	let total = 0;
 	const changes = input.files.map((f) => {
 		const path = normalizeRepoPath(f.path ?? "");
 		if (seen.has(path)) throw new HttpError(400, "INVALID_INPUT", `${path} is listed twice`);
 		seen.add(path);
 		if (f.content !== null && typeof f.content !== "string") throw new HttpError(400, "INVALID_INPUT", `Content for ${path} must be a string, or null to delete it`);
-		const content = f.content === null ? null : encoder.encode(f.content);
-		if (content && content.length > MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", `${path} is over 1 MB; push it with git instead`);
+		if (f.encoding !== undefined && f.encoding !== "base64") throw new HttpError(400, "INVALID_INPUT", "encoding is base64, or left out for text");
+		const content = f.content === null ? null : f.encoding === "base64" ? decodeBase64(f.content, path) : encoder.encode(f.content);
+		const max = f.encoding === "base64" ? MAX_UPLOAD_BYTES : MAX_EDIT_BYTES;
+		if (content && content.length > max) {
+			throw new HttpError(413, "TOO_LARGE", `${path} is over ${formatBytes(max)}; push it with git instead`);
+		}
+		total += content?.length ?? 0;
+		if (total > MAX_COMMIT_BYTES) throw new HttpError(413, "TOO_LARGE", `One web commit can add at most ${formatBytes(MAX_COMMIT_BYTES)}; push the rest with git`);
 		// A rename keeps the file's mode (an executable stays executable).
 		return { path, content, modeFrom: f.previousPath ? normalizeRepoPath(f.previousPath) : undefined };
 	});
@@ -917,6 +1170,17 @@ repo.post("/contents", async (c) => {
 	if (row) c.executionCtx.waitUntil(addRepoBytes(db(c.env), row.id, result.packBytes));
 	return c.json(result, 201);
 });
+
+function decodeBase64(data: string, path: string): Uint8Array {
+	try {
+		const binary = atob(data);
+		const out = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+		return out;
+	} catch {
+		throw new HttpError(400, "INVALID_INPUT", `The content of ${path} isn't valid base64`);
+	}
+}
 
 /**
  * A repository path from a form: no leading or trailing slash, no empty, "." or ".." segments, and
@@ -1013,13 +1277,14 @@ repo.get("/graph", async (c) => c.json(await project(c).graph(intParam(c.req.que
 repo.get("/protection", async (c) => c.json({ rules: await project(c).getBranchRules() }));
 
 repo.put("/protection", async (c) => {
-	const input = await body<{ pattern?: string; blockDeletions?: boolean; blockForcePushes?: boolean; requireMergeQueue?: boolean }>(c);
+	const input = await body<{ pattern?: string; blockDeletions?: boolean; blockForcePushes?: boolean; requireMergeQueue?: boolean; requireReview?: boolean }>(c);
 	if (typeof input.pattern !== "string") throw new HttpError(400, "INVALID_INPUT", "pattern is required");
 	const rules = await project(c).setBranchRule({
 		pattern: input.pattern.trim(),
 		blockDeletions: input.blockDeletions === true,
 		blockForcePushes: input.blockForcePushes === true,
 		requireMergeQueue: input.requireMergeQueue === true,
+		requireReview: input.requireReview === true,
 	});
 	return c.json({ rules });
 });
@@ -1215,16 +1480,214 @@ repo.delete("/issues/:number/comments/:id", async (c) => {
 	return c.json({ deleted: true });
 });
 
+// ── Pull requests and code review ────────────────────────────────────────────
+
+/**
+ * Where a pull request's changes come from: a branch of this repository, or of `headRepo`
+ * ("owner/name"), which has to be a fork of it that the caller can read.
+ */
+async function pullHead(c: Context<App>, headRepo: unknown): Promise<RepoRow | null> {
+	const row = userRepo(c);
+	if (headRepo === undefined || headRepo === null || headRepo === "" || headRepo === `${row.owner}/${row.name}`) return null;
+	if (typeof headRepo !== "string" || !headRepo.includes("/")) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
+	const [owner, name] = headRepo.split("/");
+	const fork = await findRepo(db(c.env), owner, name, viewerId(c.var.principal));
+	if (!fork || !canRead(c.var.principal, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
+	if (fork.forkOf !== row.id) throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't a fork of ${row.owner}/${row.name}`);
+	return fork;
+}
+
+function pullBranch(name: unknown, what: string): string {
+	if (typeof name !== "string" || !/^[A-Za-z0-9._/-]{1,200}$/.test(name) || name.includes("..")) throw new HttpError(400, "INVALID_INPUT", `${what} is a branch name`);
+	return name;
+}
+
+async function loadPull(c: Context<App>): Promise<PullRow> {
+	const pull = await getPull(db(c.env), userRepo(c).id, issueNumber(c));
+	if (!pull) throw new HttpError(404, "NOT_FOUND", `Pull request #${c.req.param("number")} not found`);
+	return pull;
+}
+
+async function reviewRequired(c: Context<App>, base: string): Promise<boolean> {
+	return protectionFor(await project(c).getBranchRules(), base).requireReview;
+}
+
+/** Tells the people involved and records the event (feed and pull_request webhooks). */
+function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.opened" | "pull.reviewed" | "pull.merged", actor: { id: string; username: string }, extra: Record<string, unknown> = {}) {
+	c.executionCtx.waitUntil(
+		(async () => {
+			const people = new Set([row.ownerId, ...(type === "pull.opened" ? [] : await issueParticipants(db(c.env), pull.id))]);
+			people.delete(actor.id);
+			const verb = type === "pull.opened" ? "opened" : type === "pull.merged" ? "merged" : extra.state === "approved" ? "approved" : extra.state === "changes_requested" ? "requested changes on" : "reviewed";
+			await Promise.all(
+				[...people].map((userId) =>
+					notifyUser(db(c.env), {
+						userId,
+						kind: "issue",
+						repoId: row.id,
+						title: `${actor.username} ${verb} pull request #${pull.number}: ${pull.title}`,
+						url: `/${row.owner}/${row.name}/pull/${pull.number}`,
+						actor: actor.username,
+					}),
+				),
+			);
+			await project(c).recordPullEvent(type, {
+				pull: { number: pull.number, title: pull.title, base: pull.baseBranch, head: pull.headBranch, url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}` },
+				sender: actor.username,
+				...extra,
+			});
+		})().catch((err) => console.error("announcing pull request activity failed", err)),
+	);
+}
+
+repo.get("/pulls", async (c) => {
+	const state = c.req.query("state");
+	return c.json(
+		await listPulls(db(c.env), userRepo(c).id, {
+			state: state === "closed" || state === "all" ? state : "open",
+			query: c.req.query("q")?.trim().slice(0, 100) || undefined,
+			limit: intParam(c.req.query("limit"), 50, 200),
+		}),
+	);
+});
+
+// What a pull request from `head` (of `headRepo`) into `base` would bring, before opening it.
+repo.get("/pulls/compare", async (c) => {
+	userRepo(c);
+	const base = pullBranch(c.req.query("base"), "base");
+	const head = pullBranch(c.req.query("head"), "head");
+	const fork = await pullHead(c, c.req.query("headRepo"));
+	return c.json({ comparison: await project(c).pullCompare(base, fork?.id ?? null, head) });
+});
+
+repo.post("/pulls", async (c) => {
+	const row = userRepo(c);
+	requireUser(c);
+	const input = await body<{ title?: string; body?: string; base?: string; head?: string; headRepo?: string }>(c);
+	const text = issueText(input, true);
+	const base = pullBranch(input.base, "base");
+	const head = pullBranch(input.head, "head");
+	const fork = await pullHead(c, input.headRepo);
+	if (!fork && base === head) throw new HttpError(400, "INVALID_INPUT", "The head and base branches are the same");
+	const comparison = await project(c).pullCompare(base, fork?.id ?? null, head);
+	if (comparison.commits.length === 0) throw new HttpError(422, "NOTHING_TO_COMPARE", `${head} has nothing that ${base} doesn't`);
+	const open = await db(c.env)
+		.prepare(`select i."number" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and p."headRepoId" is ? and p."headBranch" = ? and p."baseBranch" = ? and i."state" = 'open'`)
+		.bind(row.id, fork?.id ?? row.id, head, base)
+		.first<{ number: number }>();
+	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${head}`);
+	const user = await canPost(c);
+	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", [], { headRepoId: fork?.id ?? row.id, headBranch: head, baseBranch: base });
+	const pull = (await getPull(db(c.env), row.id, issue.number)) as PullRow;
+	announcePull(c, row, pull, "pull.opened", user);
+	return c.json({ pull: toPull(pull, { edit: true, label: canWrite(user, row), merge: canWrite(user, row) }, await reviewRequired(c, base)) }, 201);
+});
+
+repo.get("/pulls/:number", async (c) => {
+	const row = userRepo(c);
+	const pull = await loadPull(c);
+	const p = c.var.principal;
+	const owner = canWrite(p, row);
+	const me = viewerId(p);
+	const [{ comments, earlier }, review, required] = await Promise.all([
+		listComments(db(c.env), pull.id, { id: me, owner }),
+		listReviews(db(c.env), pull.id),
+		reviewRequired(c, pull.baseBranch),
+	]);
+	return c.json({
+		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required),
+		comments,
+		earlier,
+		reviews: review.reviews,
+		reviewComments: review.comments,
+	});
+});
+
+// The changes: live from the branches while open, or what the merge brought in once merged.
+repo.get("/pulls/:number/files", async (c) => {
+	const pull = await loadPull(c);
+	// Once merged, the branches may be gone or moved on; what landed is the merge (or squashed) commit.
+	if (pull.mergedAt && pull.mergeCommit) {
+		const { commit, diff } = await project(c).commit(pull.mergeCommit);
+		const comparison: Comparison = { base: commit.parents[0] ?? commit.hash, head: commit.hash, mergeBase: commit.parents[0] ?? null, commits: [commit], capped: false, diff };
+		return c.json({ comparison });
+	}
+	// Same-repository pull requests record this repository as the head; null means the fork was deleted.
+	if (pull.headRepoId === null) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
+	const headRepo = pull.headRepoId !== pull.repoId ? pull.headRepoId : null;
+	return c.json({ comparison: await project(c).pullCompare(pull.baseBranch, headRepo, pull.headBranch) });
+});
+
+repo.post("/pulls/:number/reviews", async (c) => {
+	const row = userRepo(c);
+	requireUser(c);
+	const pull = await loadPull(c);
+	if (pull.state !== "open") throw new HttpError(409, "PULL_CLOSED", "This pull request is closed");
+	const input = await body<{ state?: ReviewState; body?: string; commit?: string; comments?: { path?: unknown; line?: unknown; side?: unknown; body?: unknown }[] }>(c);
+	const state = input.state ?? "commented";
+	if (state !== "approved" && state !== "changes_requested" && state !== "commented") throw new HttpError(400, "INVALID_INPUT", "state is approved, changes_requested or commented");
+	const p = c.var.principal as Extract<Principal, { kind: "user" }>;
+	if (state !== "commented") {
+		if (!canWrite(p, row)) throw new HttpError(403, "FORBIDDEN", "Only people who can merge can approve or request changes; leave a comment instead");
+		if (p.id === pull.authorId) throw new HttpError(403, "FORBIDDEN", "You can't approve or request changes on your own pull request");
+	}
+	const text = typeof input.body === "string" ? input.body.trim() : "";
+	if (text.length > MAX_ISSUE_BODY) throw new HttpError(400, "INVALID_INPUT", `A review is up to ${MAX_ISSUE_BODY / 1024} KB`);
+	const raw = Array.isArray(input.comments) ? input.comments : [];
+	if (raw.length > MAX_REVIEW_COMMENTS) throw new HttpError(400, "INVALID_INPUT", `A review can have up to ${MAX_REVIEW_COMMENTS} line comments`);
+	const comments = raw.map((k) => {
+		if (typeof k.path !== "string" || !k.path || k.path.length > 4096) throw new HttpError(400, "INVALID_INPUT", "Each comment needs a path");
+		if (!Number.isInteger(k.line) || (k.line as number) < 1) throw new HttpError(400, "INVALID_INPUT", "Each comment needs a line number");
+		if (k.side !== "new" && k.side !== "old") throw new HttpError(400, "INVALID_INPUT", "side is new or old");
+		if (typeof k.body !== "string" || !k.body.trim() || k.body.length > MAX_ISSUE_BODY) throw new HttpError(400, "INVALID_INPUT", "Each comment needs some text");
+		return { path: k.path, line: k.line as number, side: k.side as "new" | "old", body: k.body.trim() };
+	});
+	if (state === "commented" && !text && comments.length === 0) throw new HttpError(400, "INVALID_INPUT", "A review needs a comment, line comments, or an approval");
+	const user = await canPost(c);
+	const commit = typeof input.commit === "string" && /^[0-9a-f]{40}$/.test(input.commit) ? input.commit : null;
+	const id = await addReview(db(c.env), pull, user.id, { state, body: text, commit, comments });
+	announcePull(c, row, pull, "pull.reviewed", user, { state, review: { id, body: text.slice(0, 2000), comments: comments.length } });
+	return c.json({ review: id }, 201);
+});
+
+repo.post("/pulls/:number/merge", async (c) => {
+	const row = userRepo(c);
+	const user = requireUser(c);
+	requireVerified(c.env, user);
+	const pull = await loadPull(c);
+	if (pull.mergedAt) throw new HttpError(409, "ALREADY_MERGED", "This pull request is already merged");
+	if (pull.state !== "open") throw new HttpError(409, "PULL_CLOSED", "Reopen the pull request to merge it");
+	const input = (await c.req.json().catch(() => ({}))) as { method?: MergeMethod };
+	const method = input.method ?? "merge";
+	if (method !== "merge" && method !== "squash") throw new HttpError(400, "INVALID_INPUT", "method is merge or squash");
+	if ((await reviewRequired(c, pull.baseBranch)) && pull.decision !== "approved") {
+		throw new HttpError(403, "REVIEW_REQUIRED", `${pull.baseBranch} needs an approving review before pull requests merge into it`);
+	}
+	if (pull.headRepoId === null) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
+	const headRepo = pull.headRepoId !== pull.repoId ? pull.headRepoId : null;
+	const from = pull.headOwner && headRepo ? `${pull.headOwner}:${pull.headBranch}` : pull.headBranch;
+	const message = method === "squash" ? `${pull.title} (#${pull.number})\n\n${pull.body}`.trim() : `Merge pull request #${pull.number} from ${from}\n\n${pull.title}`;
+	const result = await project(c).mergePull({
+		base: pull.baseBranch,
+		headRepo,
+		headBranch: pull.headBranch,
+		method,
+		message,
+		author: { name: user.username, email: `${user.username}@users.noreply.${new URL(c.req.url).hostname}` },
+	});
+	await markPullMerged(db(c.env), pull, user.id, result.commit);
+	// "Fixes #n" in the description closes those issues too, as GitHub does.
+	const fixes = [...new Set([...`${pull.title}\n${pull.body}`.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)].map((m) => Number(m[1])))];
+	if (fixes.length > 0 && pull.baseBranch === (await project(c).getProject()).defaultBranch) {
+		c.executionCtx.waitUntil(closeIssuesByCommits(c.env, row.id, fixes.filter((n) => n !== pull.number).slice(0, 50).map((n) => [n, result.commit])).catch(() => []));
+	}
+	announcePull(c, row, pull, "pull.merged", user, { method, commit: result.commit });
+	const merged = (await getPull(db(c.env), row.id, pull.number)) as PullRow;
+	return c.json({ pull: toPull(merged, { edit: true, label: true, merge: true }, false), commit: result.commit });
+});
+
 // ── Webhooks (owner only, reads included: they show URLs and payloads) ─────────
 
-repo.use("/hooks/*", async (c, next) => {
-	if (c.var.repo && !canWrite(c.var.principal, c.var.repo)) throw new HttpError(404, "NOT_FOUND", "Not found");
-	return next();
-});
-repo.use("/hooks", async (c, next) => {
-	if (c.var.repo && !canWrite(c.var.principal, c.var.repo)) throw new HttpError(404, "NOT_FOUND", "Not found");
-	return next();
-});
 
 /** Local development may point webhooks at http://localhost; production needs https to a public host. */
 const allowHttpHooks = (env: Env) => Boolean((env as { LOCAL_ARTIFACTS_URL?: string }).LOCAL_ARTIFACTS_URL);

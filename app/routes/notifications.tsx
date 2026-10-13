@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ArrowRightLeft, Bell, CheckCheck, CircleDot, GitFork, GitMerge, Star, TriangleAlert, Webhook } from "lucide-react";
+import { ArrowRightLeft, Bell, CheckCheck, CircleDot, GitFork, GitMerge, Star, TriangleAlert, UserPlus, Webhook } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button, cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type NotificationKind } from "../lib/api.ts";
@@ -16,6 +16,7 @@ const ICONS: Record<NotificationKind, ReactNode> = {
 	fork: <GitFork className="size-4 text-sky-300" />,
 	transfer: <ArrowRightLeft className="size-4 text-sky-300" />,
 	issue: <CircleDot className="size-4 text-emerald-300" />,
+	invitation: <UserPlus className="size-4 text-sky-300" />,
 	"task.merged": <GitMerge className="size-4 text-emerald-300" />,
 	"task.failed": <TriangleAlert className="size-4 text-rose-300" />,
 	"task.conflict": <TriangleAlert className="size-4 text-amber-300" />,

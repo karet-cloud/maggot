@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { BookMarked, Star } from "lucide-react";
+import { BookMarked, Building2, Star, Users, UsersRound } from "lucide-react";
+import { OrgHeader, People, Teams } from "../components/org.tsx";
 import type { ReactNode } from "react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Spinner } from "../components/ui.tsx";
@@ -8,7 +9,8 @@ import { api, keys, type RepoFilter } from "../lib/api.ts";
 import { useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/$owner/")({
-	validateSearch: (search: Record<string, unknown>): { tab?: "stars" } => (search.tab === "stars" ? { tab: "stars" } : {}),
+	validateSearch: (search: Record<string, unknown>): { tab?: "stars" | "people" | "teams" } =>
+		search.tab === "stars" || search.tab === "people" || search.tab === "teams" ? { tab: search.tab } : {},
 	component: Profile,
 });
 
@@ -17,8 +19,33 @@ function Profile() {
 	const { tab } = Route.useSearch();
 	const viewer = useViewer();
 	const filter: RepoFilter = tab === "stars" ? { starredBy: owner } : { owner };
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), enabled: tab !== "people" && tab !== "teams" });
+	// The same URLs serve people and organizations; an organization answers this.
+	const org = useQuery({ queryKey: keys.org(owner), queryFn: () => api.org(owner), retry: false });
 	const self = viewer.data?.username === owner;
+	if (org.data) {
+		const o = org.data;
+		return (
+			<main className="mx-auto max-w-[1100px] space-y-4 px-5 py-8">
+				<OrgHeader org={o} />
+				<nav className="flex gap-1 border-b border-line">
+					<ProfileTab owner={owner} active={!tab || tab === "stars"} icon={<BookMarked className="size-3.5" />} label="Repositories" />
+					<ProfileTab owner={owner} tab="people" active={tab === "people"} icon={<Users className="size-3.5" />} label="People" />
+					{o.role && <ProfileTab owner={owner} tab="teams" active={tab === "teams"} icon={<UsersRound className="size-3.5" />} label="Teams" />}
+				</nav>
+				{tab === "people" ? (
+					<People org={o} />
+				) : tab === "teams" && o.role ? (
+					<Teams org={o} />
+				) : (
+					<>
+						{repos.isPending ? <Spinner /> : <ErrorNote error={repos.error} />}
+						{repos.data && <RepoList repos={repos.data} empty={{ title: o.role ? "No repositories yet" : `${o.displayName} has no public repositories` }} />}
+					</>
+				)}
+			</main>
+		);
+	}
 	return (
 		<main className="mx-auto max-w-[1100px] space-y-4 px-5 py-8">
 			<div className="flex items-center gap-3">
@@ -27,6 +54,12 @@ function Profile() {
 					<h1 className="font-mono text-xl font-semibold">{owner}</h1>
 					<p className="text-xs text-dim">{tab === "stars" ? (self ? "Repositories you starred" : "Repositories they starred") : self ? "Your repositories, public and private" : "Public repositories"}</p>
 				</div>
+				{self && (
+					<Link to="/orgs/new" className="ml-auto flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint">
+						<Building2 className="size-3.5" />
+						New organization
+					</Link>
+				)}
 			</div>
 			<nav className="flex gap-1 border-b border-line">
 				<ProfileTab owner={owner} active={tab !== "stars"} icon={<BookMarked className="size-3.5" />} label="Repositories" />
@@ -48,7 +81,7 @@ function Profile() {
 	);
 }
 
-function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: "stars"; active: boolean; icon: ReactNode; label: string }) {
+function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: "stars" | "people" | "teams"; active: boolean; icon: ReactNode; label: string }) {
 	return (
 		<Link
 			to="/$owner"

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, History, Package, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
+import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
@@ -69,7 +69,22 @@ function ProjectLayout() {
 								{archived && <ArchivedBadge />}
 								<LiveDot status={live.status} />
 							</div>
-							{p?.repo.forkOf && <ForkedFrom source={p.repo.forkOf} className="mt-1" />}
+							{p?.repo.forkOf && (
+								<div className="mt-1 flex flex-wrap items-center gap-3">
+									<ForkedFrom source={p.repo.forkOf} />
+									{canWrite && p.head && (
+										<Link
+											to="/$owner/$repo/pulls/new"
+											params={{ owner: p.repo.forkOf.owner, repo: p.repo.forkOf.name }}
+											search={{ headRepo: project, head: p.defaultBranch }}
+											className="flex items-center gap-1 text-[11px] text-accent hover:underline"
+										>
+											<GitPullRequest className="size-3" />
+											Contribute back
+										</Link>
+									)}
+								</div>
+							)}
 							<p className="mt-1 text-sm text-dim">{p ? p.description || "No description" : <Spinner className="inline" />}</p>
 						</div>
 						<div className="flex flex-wrap items-center gap-2">
@@ -153,11 +168,18 @@ function ProjectLayout() {
 							label="Issues"
 							count={p?.repo.openIssues}
 						/>
+						<Tab
+							to="/$owner/$repo/pulls"
+							project={project}
+							icon={<GitPullRequest className="size-3.5" />}
+							label="Pull requests"
+							count={p?.repo.openPulls}
+						/>
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
 						<Tab to="/$owner/$repo/releases" project={project} icon={<Package className="size-3.5" />} label="Releases" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
 						<Tab to="/$owner/$repo/search" project={project} icon={<Search className="size-3.5" />} label="Search code" />
-						{canWrite && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
+						{p?.repo.canAdmin && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
 					</nav>
 				</div>
 			</div>
@@ -288,6 +310,7 @@ type TabTarget =
 	| "/$owner/$repo/branches"
 	| "/$owner/$repo/search"
 	| "/$owner/$repo/issues"
+	| "/$owner/$repo/pulls"
 	| "/$owner/$repo/releases"
 	| "/$owner/$repo/settings";
 
