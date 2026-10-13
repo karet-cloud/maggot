@@ -14,6 +14,7 @@ import {
 	listRepos,
 	listTokens,
 	revokeToken,
+	setRepoBytes,
 	toRepoInfo,
 	updateRepo,
 	type RepoRow,
@@ -21,7 +22,8 @@ import {
 import { HttpError, toHttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
 import { assertProjectName } from "./names.ts";
-import { assertCanCreateRepo, clientIp, limit, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
+import { measureRepository } from "./git/protocol.ts";
+import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
 
@@ -41,21 +43,36 @@ app.use("/api/*", cors({ origin: (origin) => origin, allowHeaders: ["authorizati
 // guessing one account's password from many addresses is slow too.
 app.use("/api/auth/*", async (c, next) => {
 	if (c.req.method !== "POST") return next();
+	// Better Auth also takes form bodies; only JSON is accepted, so the limits below always see the fields.
+	if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
+		throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "Send a JSON body");
+	}
 	const p = policy(c.env);
 	const ip = `ip:${clientIp(c.req.raw)}`;
 	const action = c.req.path.slice("/api/auth/".length);
-	const field = async (name: string) => {
-		const value = ((await c.req.raw.clone().json().catch(() => ({}))) as Record<string, unknown>)[name];
+	const fields = (await c.req.raw.clone().json().catch(() => ({}))) as Record<string, unknown>;
+	const field = (name: string) => {
+		const value = fields?.[name];
 		return typeof value === "string" ? value.trim().toLowerCase() : "";
 	};
 	if (action === "sign-up/email") {
 		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
-	} else if (action.startsWith("sign-in/")) {
-		const account = (await field("username")) || (await field("email"));
+	} else if (action === "sign-in/username" || action === "sign-in/email") {
+		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
+		const given = field(action === "sign-in/username" ? "username" : "email");
 		await limit(c.env, ip, rules.signInIp(p), "Too many sign-in attempts");
-		if (account) await limit(c.env, `account:${account}`, rules.signInAccount(p), "Too many sign-in attempts for this account");
+		if (given) {
+			await ensureSchema(db(c.env));
+			const user = await db(c.env).prepare(`select "id" from "user" where "username" = ? or "email" = ?`).bind(given, given).first<{ id: string }>();
+			await limit(c.env, `account:${user?.id ?? given}`, rules.signInAccount(p), "Too many sign-in attempts for this account");
+		}
+	} else if (action.startsWith("sign-in/")) {
+		throw new HttpError(404, "NOT_FOUND", "Sign in with a username or email and password");
+	} else if (action === "update-user" && ["username", "displayUsername", "email"].some((k) => k in (fields ?? {}))) {
+		// Repository URLs are owner/name; renaming would need every repository moved and the old name held.
+		throw new HttpError(400, "IMMUTABLE_USERNAME", "Usernames and email addresses can't be changed yet");
 	} else if (action === "request-password-reset" || action === "send-verification-email") {
-		const email = await field("email");
+		const email = field("email");
 		await limit(c.env, ip, rules.email(p), "Too many emails requested");
 		if (email) await limit(c.env, `email:${email}`, rules.email(p), "Too many emails sent to this address");
 	} else {
@@ -69,12 +86,14 @@ app.on(["GET", "POST"], "/api/auth/*", async (c) => (await auth(c.env, c.req.raw
 
 app.use("/api/*", async (c, next) => {
 	if (c.req.method === "OPTIONS") return next();
-	const principal = await resolvePrincipal(c.env, c.req.raw);
+	const principal = await guardCredentials(c.env, c.req.raw, () => resolvePrincipal(c.env, c.req.raw));
 	c.set("principal", principal);
-	// The admin key (agents, scripts) isn't limited; everyone else is, by account or else by address.
-	if (principal.kind !== "admin") {
+	// The admin key (agents, scripts) isn't limited. Signed-out callers are, by address; signed-in
+	// people only for writes, so browsing costs no extra round trip.
+	const write = !["GET", "HEAD"].includes(c.req.method);
+	if (principal.kind === "anonymous" || (principal.kind === "user" && write)) {
 		const subject = principal.kind === "user" ? `user:${principal.id}` : `ip:${clientIp(c.req.raw)}`;
-		await limit(c.env, subject, rules.api(policy(c.env), !["GET", "HEAD"].includes(c.req.method)));
+		await limit(c.env, subject, rules.api(policy(c.env), write));
 	}
 	// Browsers attach the session cookie on their own, so anything it authorizes beyond a read must come
 	// from this origin. Tokens aren't sent automatically, so they skip the check.
@@ -134,10 +153,15 @@ function intParam(value: string | undefined, fallback: number, max: number, min 
 	return Math.min(n, max);
 }
 
-/** The rest of the path after the first `segment` (repo routes never contain one before it). */
-function afterSegment(path: string, segment: string): string {
-	const at = path.indexOf(segment);
-	return at === -1 ? "" : decodeURIComponent(path.slice(at + segment.length));
+/**
+ * The rest of a per-repository route's path after `segment` (such as "/files/"), decoded. The
+ * repository prefix is skipped by position, so an owner or repository named like a segment can't
+ * be mistaken for it.
+ */
+function routeRest(c: Context<App>, segment: string): string {
+	const prefixSegments = c.req.param("owner") === undefined ? 4 : 5; // "", "api", "projects", p | "", "api", "repos", owner, repo
+	const rest = `/${c.req.path.split("/").slice(prefixSegments).join("/")}`;
+	return rest.startsWith(segment) ? decodeURIComponent(rest.slice(segment.length)) : "";
 }
 
 async function body<T>(c: Context<App>): Promise<T> {
@@ -194,7 +218,11 @@ for (const [path, kind, expiresInSeconds] of [
 			.first<{ email: string }>();
 		if (!row) throw new HttpError(404, "NOT_FOUND", "No such user");
 		const link = await issueLink(c.env, c.req.raw, kind, row.email);
-		if (!link) throw new HttpError(409, "ALREADY_VERIFIED", "That email address is already verified");
+		if (!link) {
+			throw kind === "verify"
+				? new HttpError(409, "ALREADY_VERIFIED", "That email address is already verified")
+				: new HttpError(500, "LINK_FAILED", "Couldn't issue a reset link");
+		}
 		return c.json({ url: link, expiresInSeconds });
 	});
 }
@@ -259,7 +287,7 @@ app.post("/api/repos", async (c) => {
 	await assertCanCreateRepo(c.env, db(c.env), user.id);
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
-	await insertRepo(db(c.env), row);
+	await insertRepo(db(c.env), row, policy(c.env).reposPerUser);
 	let created: Project;
 	try {
 		created = await projects(c.env).getByName(row.id).create({
@@ -273,6 +301,26 @@ app.post("/api/repos", async (c) => {
 	} catch (err) {
 		await deleteRepo(db(c.env), row.id);
 		throw err;
+	}
+	// An import's size isn't known until it's there: measure it, and undo the import if it doesn't fit.
+	if (input.importUrl) {
+		const p = policy(c.env);
+		const used = await usage(db(c.env), user.id);
+		const room = Math.min(p.repoBytes, p.userBytes - used.bytes);
+		const undo = async () => {
+			await projects(c.env).getByName(row.id).destroy();
+			await deleteRepo(db(c.env), row.id);
+		};
+		const size = await measureRepository(await projects(c.env).getByName(row.id).gitRemote("read"), Math.max(room, 0)).catch(async (err) => {
+			await undo();
+			throw err;
+		});
+		if (size > room) {
+			await undo();
+			throw new HttpError(403, "QUOTA_EXCEEDED", `That repository is bigger than the ${formatBytes(Math.max(room, 0))} you have room for.`);
+		}
+		await setRepoBytes(db(c.env), row.id, size);
+		row.bytes = size;
 	}
 	// An import keeps the source's default branch.
 	if (created.defaultBranch !== row.defaultBranch) {
@@ -354,19 +402,28 @@ repo.patch("/", async (c) => {
 		throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
 	}
 	await updateRepo(db(c.env), row.id, { visibility: input.visibility, description: input.description === undefined ? undefined : input.description?.trim() || null });
+	// Live sockets were authorized when they connected; after a visibility change they reconnect and are checked again.
+	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
 	const updated = (await findRepo(db(c.env), row.owner, row.name)) as RepoRow;
 	return c.json({ repo: toRepoInfo(updated, origin(c), true) });
 });
 
 repo.delete("/", async (c) => {
-	await project(c).destroy();
+	// A repository whose creation died partway has a record but no coordinator; deleting it still works.
+	await project(c)
+		.destroy()
+		.catch((err) => {
+			if (toHttpError(err).status !== 404) throw err;
+		});
 	if (c.var.repo) await deleteRepo(db(c.env), c.var.repo.id);
 	else await registry(c.env).remove(c.var.projectId);
 	return c.json({ deleted: true });
 });
 
 // Credentials for pushing to (or cloning) the project repo directly. Write by default.
+// Admin only: these are the storage backend's own credentials, so pushes with them skip megit's limits.
 repo.post("/credentials", async (c) => {
+	requireAdmin(c);
 	const { scope } = (await c.req.json().catch(() => ({}))) as { scope?: "read" | "write" };
 	if (scope !== undefined && scope !== "read" && scope !== "write") throw new HttpError(400, "INVALID_INPUT", "scope is read or write");
 	return c.json(await project(c).repoAccess(scope));
@@ -398,7 +455,7 @@ repo.get("/tree", async (c) => {
 });
 
 repo.get("/files/*", async (c) => {
-	const path = afterSegment(c.req.path, "/files/");
+	const path = routeRest(c, "/files/");
 	if (!path) throw new HttpError(400, "INVALID_INPUT", "File path is required");
 	const file = await project(c).readFile(c.req.query("ref"), path);
 	if (!file) throw new HttpError(404, "NOT_FOUND", `${path} not found`);
@@ -462,7 +519,7 @@ repo.get("/compare", async (c) => {
 repo.get("/branches", async (c) => c.json(await project(c).branches(c.req.query("counts") !== "0")));
 
 repo.delete("/branches/*", async (c) => {
-	const name = afterSegment(c.req.path, "/branches/");
+	const name = routeRest(c, "/branches/");
 	if (!name) throw new HttpError(400, "INVALID_INPUT", "Branch name is required");
 	await project(c).deleteBranch(name);
 	return c.json({ deleted: true });
@@ -477,10 +534,23 @@ repo.get("/tasks", async (c) => {
 
 // Waits up to ?wait=<seconds> (default and max 25) for the fork. 201 with credentials once it exists,
 // 202 with `fork: null` while the task is still provisioning (watch for `task.ready`).
+/**
+ * Agent tasks hand out credentials for their forks, so they need what a push needs: a verified email,
+ * and room under the repository's size limit.
+ */
+async function requireCanPush(c: Context<App>) {
+	const row = c.var.repo;
+	if (!row) return;
+	requireVerified(c.env, c.var.principal);
+	const blocked = await pushBlocked(c.env, db(c.env), row);
+	if (blocked) throw new HttpError(403, "QUOTA_EXCEEDED", blocked);
+}
+
 repo.post("/tasks", async (c) => {
+	await requireCanPush(c);
 	const input = await body<{ title: string; agent?: string; paths?: string[] }>(c);
 	const wait = c.req.query("wait");
-	const access = await project(c).createTask(input, wait === undefined ? undefined : Number(wait) * 1000);
+	const access = await project(c).createTask(input, wait === undefined ? undefined : intParam(wait, 25, 25, 0) * 1000);
 	return c.json(access, access.fork ? 201 : 202);
 });
 
@@ -490,7 +560,10 @@ repo.get("/tasks/:task/changes", async (c) =>
 	c.json({ comparison: await project(c).taskChanges(c.req.param("task")) }),
 );
 
-repo.post("/tasks/:task/access", async (c) => c.json(await project(c).access(c.req.param("task"))));
+repo.post("/tasks/:task/access", async (c) => {
+	await requireCanPush(c);
+	return c.json(await project(c).access(c.req.param("task")));
+});
 
 repo.post("/tasks/:task/submit", async (c) => c.json({ task: await project(c).submit(c.req.param("task")) }, 202));
 

@@ -20,6 +20,40 @@ export async function listBranches(remote: RemoteAccess): Promise<Map<string, st
 	return branches;
 }
 
+/**
+ * How big a repository is, measured as the pack a full clone downloads: every branch and tag. Stops
+ * reading once it passes `limit`, and returns `limit + 1` then.
+ */
+export async function measureRepository(remote: RemoteAccess, limit: number): Promise<number> {
+	const res = await fetch(`${remote.url}/info/refs?service=git-upload-pack`, { headers: headers(remote) });
+	if (!res.ok) throw new Error(`Listing refs failed: HTTP ${res.status}`);
+	const wants = new Set<string>();
+	for (const line of pktLines(new Uint8Array(await res.arrayBuffer()))) {
+		const [oid, ref] = line.split("\0")[0].trimEnd().split(" ");
+		if (/^[0-9a-f]{40}$/.test(oid) && oid !== ZERO && (ref?.startsWith("refs/heads/") || ref?.startsWith("refs/tags/"))) wants.add(oid);
+	}
+	if (wants.size === 0) return 0;
+	const body = `${[...wants].map((oid) => pkt(`want ${oid}\n`)).join("")}0000${pkt("done\n")}`;
+	const pack = await fetch(`${remote.url}/git-upload-pack`, {
+		method: "POST",
+		headers: headers(remote, { "content-type": "application/x-git-upload-pack-request", accept: "application/x-git-upload-pack-result" }),
+		body,
+	});
+	if (!pack.ok || !pack.body) throw new Error(`Measuring the repository failed: HTTP ${pack.status}`);
+	let size = 0;
+	const reader = pack.body.getReader();
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) return size;
+			size += value.byteLength;
+			if (size > limit) return limit + 1;
+		}
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+}
+
 /** Deletes `refs/heads/<branch>` if it still points at `oid`. */
 export async function deleteBranch(remote: RemoteAccess, branch: string, oid: string): Promise<void> {
 	const command = `${oid} ${ZERO} refs/heads/${branch}\0report-status delete-refs agent=megit\n`;
@@ -41,13 +75,34 @@ export async function deleteBranch(remote: RemoteAccess, branch: string, oid: st
 	}
 }
 
+/**
+ * Whether a receive-pack response reports an accepted push: the pack unpacked and at least one ref
+ * updated. Handles report-status sent plainly or inside side-band channel 1.
+ */
+export function pushAccepted(response: Uint8Array): boolean {
+	let lines: string[];
+	try {
+		lines = pktLines(response, true);
+		if (lines.some((l) => /^[\x01-\x03]/.test(l))) {
+			// Side-band: channel 1 carries the report as pkt-lines of its own.
+			const data = lines.filter((l) => l.startsWith("\x01")).map((l) => l.slice(1)).join("");
+			lines = pktLines(new TextEncoder().encode(data));
+		}
+	} catch {
+		return false;
+	}
+	const report = lines.map((l) => l.trimEnd());
+	return report[0] === "unpack ok" && report.some((l) => l.startsWith("ok "));
+}
+
 function pkt(line: string): string {
 	return (new TextEncoder().encode(line).length + 4).toString(16).padStart(4, "0") + line;
 }
 
 /** Data lines of a pkt-line stream, skipping flush packets and the `# service=` banner. */
-function pktLines(bytes: Uint8Array): string[] {
-	const decoder = new TextDecoder();
+function pktLines(bytes: Uint8Array, binary = false): string[] {
+	// Side-band payloads aren't UTF-8 text; latin1 keeps every byte as one character.
+	const decoder = new TextDecoder(binary ? "latin1" : "utf-8");
 	const lines: string[] = [];
 	for (let i = 0; i + 4 <= bytes.length; ) {
 		const header = decoder.decode(bytes.subarray(i, i + 4));

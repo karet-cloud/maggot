@@ -618,6 +618,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return new Response(null, { status: 101, webSocket: client });
 	}
 
+	/** Closes every live socket; clients reconnect, and their access is checked again. */
+	async disconnectAll(reason: string): Promise<void> {
+		for (const ws of this.ctx.getWebSockets()) {
+			try {
+				ws.close(4001, reason);
+			} catch {
+				// Already closed.
+			}
+		}
+	}
+
 	async webSocketClose(ws: WebSocket, code: number) {
 		// 1005/1006 are reserved and can't be sent back; reply with a normal closure instead.
 		try {
@@ -801,6 +812,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 				if (await ws.push(base)) {
 					this.markMerged(id, outcome.oid, outcome.changedFiles);
+					// The next push's "from" is this merge, not whatever was pushed before it.
+					this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pushedHead', ?)", outcome.oid);
 					this.emit("main.advanced", id, {
 						from: baseHead,
 						to: outcome.oid,

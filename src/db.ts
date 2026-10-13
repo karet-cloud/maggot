@@ -87,16 +87,31 @@ export async function findRepo(database: D1Database, owner: string, name: string
 	return database.prepare(`select * from "repo" where "owner" = ? and "name" = ?`).bind(owner.toLowerCase(), name).first<RepoRow>();
 }
 
-export async function insertRepo(database: D1Database, row: RepoRow): Promise<void> {
+/**
+ * Records a new repository, unless its owner already has `maxRepos`. The count and the insert are one
+ * statement, so concurrent creates can't both take the last slot.
+ */
+export async function insertRepo(database: D1Database, row: RepoRow, maxRepos: number): Promise<void> {
+	let inserted: boolean;
 	try {
-		await database
-			.prepare(`insert into "repo" ("id", "ownerId", "owner", "name", "description", "visibility", "defaultBranch", "createdAt") values (?, ?, ?, ?, ?, ?, ?, ?)`)
-			.bind(row.id, row.ownerId, row.owner, row.name, row.description, row.visibility, row.defaultBranch, row.createdAt)
+		const result = await database
+			.prepare(
+				`insert into "repo" ("id", "ownerId", "owner", "name", "description", "visibility", "defaultBranch", "createdAt", "bytes")
+				 select ?, ?, ?, ?, ?, ?, ?, ?, ? where (select count(*) from "repo" where "ownerId" = ?) < ?`,
+			)
+			.bind(row.id, row.ownerId, row.owner, row.name, row.description, row.visibility, row.defaultBranch, row.createdAt, row.bytes, row.ownerId, maxRepos)
 			.run();
+		inserted = result.meta.changes > 0;
 	} catch (err) {
 		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", `${row.owner}/${row.name} already exists`);
 		throw err;
 	}
+	if (!inserted) throw new HttpError(403, "QUOTA_EXCEEDED", `You have ${maxRepos} repositories, the most an account can have. Delete one to make room.`);
+}
+
+/** Sets a repository's recorded size (after an import is measured). */
+export async function setRepoBytes(database: D1Database, id: string, bytes: number): Promise<void> {
+	await database.prepare(`update "repo" set "bytes" = ? where "id" = ?`).bind(bytes, id).run();
 }
 
 export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null }): Promise<void> {

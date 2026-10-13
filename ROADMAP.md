@@ -91,3 +91,14 @@ Still open:
 - **Request budgets**: one shared cap on Artifacts calls when listing branches, and size limits for file and Markdown previews.
 - **Fork permalinks**: carry repository and commit separately, so links to fork commits stay pinned.
 - **Local Artifacts stand-in**: authenticate its control API, or bind it to loopback, and validate names before touching disk.
+
+From the three-model review of 2026-10-13 (GPT-6.1-Sol, GPT-6-Astra, Claude Fable 5.1), still open:
+- **Rate limiting at the edge**: each limited request is a round trip to a `Limiter` Durable Object; the
+  Workers Rate Limiting binding would be colo-local.
+- **Real repository sizes**: quotas count accepted push bytes (force pushes add up) and agent merges
+  aren't counted; reconcile with the stored size once Artifacts exposes it.
+- **Agent fork credentials**: tasks hand out Artifacts tokens directly; proxy them through megit so the
+  push limits and token revocation apply.
+- **Live sockets and revoked tokens**: a socket opened with a token stays open after the token is revoked.
+- **UI nits**: sign-in doesn't return to the page you came from; compare allows head = base; a profile for
+  a user who doesn't exist says they have no repositories.

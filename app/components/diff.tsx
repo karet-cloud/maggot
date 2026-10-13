@@ -184,7 +184,6 @@ interface Row {
 /** Numbers each hunk line and highlights the old and new sides separately, so tokens spanning lines stay right. */
 function useRows(file: FileDiff): Row[][] {
 	return useMemo(() => {
-		const language = languageFor(file.path);
 		const oldText: string[] = [];
 		const newText: string[] = [];
 		for (const h of file.hunks) {
@@ -193,6 +192,8 @@ function useRows(file: FileDiff): Row[][] {
 				if (line[0] === " " || line[0] === "+") newText.push(line.slice(1));
 			}
 		}
+		// Highlighting runs on the main thread; very long diffs are shown plain so the page stays responsive.
+		const language = oldText.length + newText.length > 4000 ? undefined : languageFor(file.path);
 		const oldHtml = highlightLines(oldText.join("\n"), language);
 		const newHtml = highlightLines(newText.join("\n"), language);
 		let o = 0;

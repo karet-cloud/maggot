@@ -2,7 +2,7 @@
 // concurrent-fork failures simulated. Slower than the unit tests: npm run test:e2e
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,11 +23,13 @@ const POLICY = {
 	writesPerMinute: 10_000,
 	gitPerMinute: 10_000,
 	signInsPerAccount: 5,
+	authFailuresPerIp: 5,
 	reposPerUser: 3,
 	repoBytes: 200_000,
 };
 let artifacts: Awaited<ReturnType<typeof startLocalArtifacts>>;
 let worker: ChildProcess;
+let workerLog: Awaited<ReturnType<typeof open>>;
 let root = "";
 // The dev server persists Durable Object state across runs, so every run uses fresh project names.
 const run = Date.now().toString(36);
@@ -83,10 +85,12 @@ before(async () => {
 	root = await mkdtemp(join(tmpdir(), "megit-e2e-"));
 	artifacts = await startLocalArtifacts({ root: join(root, "artifacts"), port: 0, quiet: true });
 	const port = await freePort();
-	// Its own process group, so after() can stop Vite and the workerd processes it starts in one go.
+	// Its own process group, so after() can stop Vite and the workerd processes it starts in one go. Its
+	// output goes to a log that is kept when a test fails.
+	workerLog = await open(join(tmpdir(), `megit-e2e-${run}.log`), "w");
 	worker = spawn("node_modules/.bin/vite", ["dev", "--mode", "offline"], {
 		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1", MEGIT_POLICY: JSON.stringify(POLICY) },
-		stdio: "ignore",
+		stdio: ["ignore", workerLog.fd, workerLog.fd],
 		detached: true,
 	});
 	api = `http://127.0.0.1:${port}`;
@@ -101,6 +105,7 @@ before(async () => {
 
 after(async () => {
 	if (worker.pid) process.kill(-worker.pid, "SIGTERM");
+	await workerLog.close();
 	await artifacts.close();
 	await rm(root, { recursive: true, force: true });
 });
@@ -456,11 +461,70 @@ test("unverified accounts can't create repositories, and sign-ins, repository co
 		assert.ok(i < 3, "pushes past the size limit were accepted");
 	}
 
-	// Sign-ins per account are limited no matter where they come from.
-	const signIn = () =>
-		fetch(`${api}/api/auth/sign-in/username`, { method: "POST", headers: json, body: JSON.stringify({ username: fresh.username, password: "wrong-password" }) });
-	for (let i = 0; i < POLICY.signInsPerAccount; i++) assert.equal((await signIn()).status, 401);
-	const limited = await signIn();
+	// Concurrent creates can't overshoot the repository count either.
+	const racer = await newUser("racer");
+	const raced = await Promise.all(Array.from({ length: 6 }, (_, i) => create(racer, `race-${i}`)));
+	assert.equal(raced.filter((r) => r.status === 201).length, POLICY.reposPerUser);
+
+	// The storage backend's own credentials are for the admin only; users go through megit's git URL.
+	const direct = await fetch(`${api}/api/repos/${fresh.username}/now-ok/credentials`, { method: "POST", headers: { ...json, authorization: `Bearer ${fresh.token}` } });
+	assert.equal(direct.status, 401);
+
+	// Usernames can't change: repository URLs depend on them.
+	const rename = await fetch(`${api}/api/auth/update-user`, { method: "POST", headers: { ...json, cookie: fresh.cookie }, body: JSON.stringify({ username: `${fresh.username}x` }) });
+	assert.equal(rename.status, 400);
+
+	// Sign-ins per account are limited no matter where they come from, or which name or form is used.
+	const signIn = (path: string, body: Record<string, string>, headers: Record<string, string> = json) =>
+		fetch(`${api}/api/auth/sign-in/${path}`, { method: "POST", headers, body: headers === json ? JSON.stringify(body) : new URLSearchParams(body).toString() });
+	const wrong = { username: fresh.username, password: "wrong-password" };
+	assert.equal((await signIn("username", wrong, { "content-type": "application/x-www-form-urlencoded", origin: api })).status, 415);
+	for (let i = 0; i < POLICY.signInsPerAccount - 1; i++) assert.equal((await signIn("username", wrong)).status, 401);
+	// The email address is the same account, whatever username is sent alongside it.
+	assert.equal((await signIn("email", { email: `${fresh.username}@test.invalid`, username: "someone-else", password: "wrong-password" })).status, 401);
+	const limited = await signIn("username", wrong);
 	assert.equal(limited.status, 429);
 	assert.ok(Number(limited.headers.get("retry-after")) > 0);
+
+	// Guessing tokens is limited per address (one of its own here; in production the edge sets this header).
+	const address = `198.51.100.${Math.floor(Math.random() * 250)}`;
+	const as = (token: string) => fetch(`${api}/api/me`, { headers: { authorization: `Bearer ${token}`, "cf-connecting-ip": address } });
+	for (let i = 0; i < POLICY.authFailuresPerIp; i++) assert.equal((await as("megit_pat_wrong")).status, 401);
+	assert.equal((await as("megit_pat_wrong")).status, 429);
+	assert.equal((await as(fresh.token)).status, 429, "the address is refused before any lookup");
+});
+
+test("routes take the repository from the path's position, so a repository can be named like a route", async () => {
+	const ada = await newUser("routes");
+	const headers = { "content-type": "application/json", authorization: `Bearer ${ada.token}` };
+	assert.equal((await fetch(`${api}/api/repos`, { method: "POST", headers, body: JSON.stringify({ name: "files", readme: true }) })).status, 201);
+	const readme = await fetch(`${api}/api/repos/${ada.username}/files/files/README.md`, { headers });
+	assert.equal(readme.status, 200);
+	assert.match(await readme.text(), /^# /);
+});
+
+test("only accepted pushes count toward a repository's size", async () => {
+	const ada = await newUser("sizes");
+	const headers = { "content-type": "application/json", authorization: `Bearer ${ada.token}` };
+	assert.equal((await fetch(`${api}/api/repos`, { method: "POST", headers, body: JSON.stringify({ name: "sizes" }) })).status, 201);
+	const used = async () => ((await (await fetch(`${api}/api/me`, { headers })).json()) as { user: { usage: { bytes: number } } }).user.usage.bytes;
+	const exec = promisify(execFile);
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+	const git = (args: string[], cwd: string) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env });
+	const url = new URL(`${api}/${ada.username}/sizes.git`);
+	url.username = ada.username;
+	url.password = ada.token;
+	const [one, two] = [join(root, "sizes-1"), join(root, "sizes-2")];
+	for (const [dir, text] of [[one, "one"], [two, "two"]]) {
+		await exec("git", ["init", "-q", "-b", "master", dir]);
+		await writeFile(join(dir, "f.txt"), text.repeat(1000));
+		await git(["add", "-A"], dir);
+		await git(["commit", "-q", "-m", text], dir);
+	}
+	await git(["push", "-q", url.toString(), "master"], one);
+	const after = await until(async () => ((await used()) > 0 ? used() : undefined));
+	// The second history doesn't fast-forward, so the push is refused and its pack doesn't count.
+	await assert.rejects(git(["push", "-q", url.toString(), "master"], two), /rejected|non-fast-forward|fetch first/);
+	await new Promise((r) => setTimeout(r, 1000));
+	assert.equal(await used(), after);
 });
