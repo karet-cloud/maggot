@@ -16,6 +16,7 @@ import {
 	listTokens,
 	addRepoBytes,
 	listNotifications,
+	notifiedRecently,
 	markRead,
 	notifyUser,
 	revokeToken,
@@ -31,6 +32,7 @@ import { emailConfigured } from "./mail.ts";
 import { assertProjectName } from "./names.ts";
 import { measureRepository } from "./git/protocol.ts";
 import { validateHookUrl } from "./hooks.ts";
+import { MAX_QUERY_LENGTH } from "./search.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
@@ -264,8 +266,8 @@ app.get("/api/notifications", async (c) => {
 app.post("/api/notifications/read", async (c) => {
 	const user = requireUser(c);
 	const { ids } = (await c.req.json().catch(() => ({}))) as { ids?: unknown };
-	if (ids !== undefined && (!Array.isArray(ids) || ids.length > 100 || ids.some((id) => typeof id !== "string"))) {
-		throw new HttpError(400, "INVALID_INPUT", "ids is a list of up to 100 notification ids");
+	if (ids !== undefined && (!Array.isArray(ids) || ids.length > 50 || ids.some((id) => typeof id !== "string"))) {
+		throw new HttpError(400, "INVALID_INPUT", "ids is a list of up to 50 notification ids");
 	}
 	await markRead(db(c.env), user.id, ids as string[] | undefined);
 	return c.json({ ok: true });
@@ -394,8 +396,9 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 				userId: source.ownerId,
 				kind: "fork",
 				repoId: source.id,
-				title: `${user.username} forked ${source.owner}/${source.name} to ${row.owner}/${row.name}`,
-				url: `/${row.owner}/${row.name}`,
+				// The fork can go private later, so the notification names only the source; its forks list shows what you may see.
+				title: `${user.username} forked ${source.owner}/${source.name}`,
+				url: `/${source.owner}/${source.name}/forks`,
 				actor: user.username,
 			}),
 		);
@@ -505,7 +508,7 @@ for (const [method, starred] of [["put", true], ["delete", false]] as const) {
 		const user = requireUser(c);
 		const row = userRepo(c);
 		const changed = await setStar(db(c.env), user.id, row.id, starred);
-		if (changed && starred && user.id !== row.ownerId) {
+		if (changed && starred && user.id !== row.ownerId && !(await notifiedRecently(db(c.env), row.ownerId, "star", row.id, user.username))) {
 			c.executionCtx.waitUntil(
 				notifyUser(db(c.env), { userId: row.ownerId, kind: "star", repoId: row.id, title: `${user.username} starred ${row.owner}/${row.name}`, url: `/${row.owner}/${row.name}`, actor: user.username }),
 			);
@@ -731,7 +734,12 @@ function isDotGit(part: string): boolean {
 // ── Code search ──────────────────────────────────────────────────────────────
 
 repo.get("/search", async (c) => {
-	const q = c.req.query("q")?.slice(0, 200) ?? "";
+	const q = c.req.query("q") ?? "";
+	if (q.length > MAX_QUERY_LENGTH) throw new HttpError(400, "INVALID_INPUT", `Search for at most ${MAX_QUERY_LENGTH} characters`);
+	if (/[\u0000-\u0008\u000b-\u001f]/.test(q)) throw new HttpError(400, "INVALID_INPUT", "Search text can't contain control characters");
+	// Searches cost the repository's coordinator real work, so they're limited even for signed-in reads.
+	const p = c.var.principal;
+	if (p.kind !== "admin") await limit(c.env, p.kind === "user" ? `user:${p.id}` : `ip:${clientIp(c.req.raw)}`, rules.search(policy(c.env)), "Too many searches");
 	return c.json(await project(c).searchCode(q));
 });
 
@@ -751,7 +759,9 @@ const allowHttpHooks = (env: Env) => Boolean((env as { LOCAL_ARTIFACTS_URL?: str
 
 function hookInput(c: Context<App>, input: { url?: string; secret?: string; events?: WebhookEvent[]; active?: boolean }, creating: boolean) {
 	if (creating && !input.url) throw new HttpError(400, "INVALID_INPUT", "url is required");
-	if (input.secret !== undefined && (typeof input.secret !== "string" || input.secret.length > 200)) throw new HttpError(400, "INVALID_INPUT", "The secret is up to 200 characters");
+	if ((creating || input.secret !== undefined) && (typeof input.secret !== "string" || input.secret.length < 8 || input.secret.length > 200)) {
+		throw new HttpError(400, "INVALID_INPUT", "The secret is 8 to 200 characters; receivers use it to check each payload's signature");
+	}
 	return {
 		url: input.url === undefined ? undefined : validateHookUrl(input.url, allowHttpHooks(c.env)),
 		secret: input.secret,
@@ -765,7 +775,7 @@ repo.get("/hooks", async (c) => c.json({ hooks: await project(c).listHooks() }))
 repo.post("/hooks", async (c) => {
 	const input = hookInput(c, await body(c), true);
 	if (c.var.repo) await project(c).setRepository(repositoryRef(c, c.var.repo));
-	const hook = await project(c).createHook({ url: input.url as string, secret: input.secret ?? "", events: input.events ?? ["push"] });
+	const hook = await project(c).createHook({ url: input.url as string, secret: input.secret as string, events: input.events ?? ["push"] });
 	return c.json({ hook }, 201);
 });
 

@@ -69,6 +69,7 @@ export function useProjectLive(project: string): Live {
 					invalidate(["project", project, "log"]);
 					invalidate(keys.code(project));
 					invalidate(keys.branches(project));
+					invalidate(["project", project, "search"]);
 				}
 			};
 			socket.onclose = () => {

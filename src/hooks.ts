@@ -11,6 +11,8 @@ const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600
 const TIMEOUT_MS = 10_000;
 const KEEP_DELIVERIES = 50;
 const BATCH = 20;
+/** Deliveries one repository may have waiting; past it new ones are dropped (and counted as failed). */
+const MAX_PENDING = 500;
 
 /** Who the payloads say the repository is (owner/name and URLs); internal names stay internal. */
 export interface RepositoryRef {
@@ -46,19 +48,27 @@ export function validateHookUrl(raw: string, allowHttp: boolean): string {
 	}
 	if (url.protocol !== "https:" && !(allowHttp && url.protocol === "http:")) throw new HttpError(400, "INVALID_URL", "Webhook URLs must use https");
 	if (url.username || url.password) throw new HttpError(400, "INVALID_URL", "Put credentials in the secret, not the URL");
-	const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-	const local =
-		host === "localhost" ||
-		host.endsWith(".localhost") ||
-		host.endsWith(".local") ||
-		host.endsWith(".internal") ||
-		/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) ||
-		host === "::1" ||
-		host.startsWith("fc") ||
-		host.startsWith("fd") ||
-		host.startsWith("fe80");
-	if (local && !allowHttp) throw new HttpError(400, "INVALID_URL", "Webhooks can't call local or private addresses");
+	if (!allowHttp && isPrivateHost(url.hostname)) throw new HttpError(400, "INVALID_URL", "Webhooks can't call local or private addresses");
 	return url.toString();
+}
+
+/**
+ * Hosts that name this machine or a private network, by spelling. (Workers' outbound fetches leave
+ * Cloudflare for the public internet, so a public name that resolves to a private address reaches
+ * nothing private; this catches the obvious cases early with a clear error.)
+ */
+export function isPrivateHost(hostname: string): boolean {
+	const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.+$/, "");
+	if (host === "localhost" || /\.(localhost|local|internal|home\.arpa)$/.test(host) || !host.includes(".") && !host.includes(":")) return true;
+	if (host.includes(":")) {
+		// IPv6 literal: anything starting "::" (loopback, unspecified, IPv4-mapped and -compatible), plus
+		// unique-local (fc00::/7) and link-local (fe80::/10). URL parsing has already normalized it.
+		return host.startsWith("::") || /^0+:/.test(host) || /^f[cd][0-9a-f]{0,2}:/.test(host) || /^fe[89ab][0-9a-f]?:/.test(host);
+	}
+	// IPv4 rules apply to addresses only (a name like 0.pool.ntp.org is fine); all-digit hosts are IPv4 in disguise.
+	if (/^\d+$/.test(host)) return true;
+	if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+	return /^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(host);
 }
 
 export class Webhooks {
@@ -114,11 +124,21 @@ export class Webhooks {
 	}
 
 	update(id: string, patch: { url?: string; secret?: string; events?: WebhookEvent[]; active?: boolean }): Webhook {
-		this.row(id);
-		if (patch.url !== undefined) this.sql.exec("UPDATE hooks SET url = ? WHERE id = ?", patch.url, id);
-		if (patch.secret !== undefined) this.sql.exec("UPDATE hooks SET secret = ? WHERE id = ?", patch.secret, id);
-		if (patch.events !== undefined) this.sql.exec("UPDATE hooks SET events = ? WHERE id = ?", JSON.stringify(checkEvents(patch.events)), id);
-		if (patch.active !== undefined) this.sql.exec("UPDATE hooks SET active = ? WHERE id = ?", patch.active ? 1 : 0, id);
+		const row = this.row(id);
+		// Everything is checked before anything changes.
+		const events = patch.events === undefined ? row.events : JSON.stringify(checkEvents(patch.events));
+		this.sql.exec(
+			"UPDATE hooks SET url = ?, secret = ?, events = ?, active = ? WHERE id = ?",
+			patch.url ?? row.url,
+			patch.secret ?? row.secret,
+			events,
+			patch.active === undefined ? row.active : patch.active ? 1 : 0,
+			id,
+		);
+		// A paused hook sends nothing more, including what was already queued.
+		if (patch.active === false) {
+			this.sql.exec("UPDATE deliveries SET status = 'failed', response = 'Webhook paused', next_at = NULL WHERE hook_id = ? AND status = 'pending'", id);
+		}
 		return this.get(id);
 	}
 
@@ -181,7 +201,10 @@ export class Webhooks {
 		await Promise.all(
 			due.map(async (delivery) => {
 				const hook = this.sql.exec<HookRow>("SELECT * FROM hooks WHERE id = ?", delivery.hook_id).toArray()[0];
-				if (!hook) return;
+				if (!hook || !hook.active) {
+					this.sql.exec("UPDATE deliveries SET status = 'failed', response = 'Webhook paused or removed', next_at = NULL WHERE id = ?", delivery.id);
+					return;
+				}
 				const result = await send(hook, delivery);
 				const attempts = delivery.attempts + 1;
 				if (result.ok) {
@@ -207,7 +230,17 @@ export class Webhooks {
 					retry === undefined ? null : Date.now() + retry,
 					delivery.id,
 				);
-				if (retry === undefined && delivery.event !== "ping") failed.push({ hookId: hook.id, url: hook.url, error: result.body ?? `HTTP ${result.status}` });
+				// The owner hears once when a hook starts failing, not for every delivery after that.
+				if (retry === undefined && delivery.event !== "ping") {
+					const before = this.sql
+						.exec<{ status: string }>(
+							"SELECT status FROM deliveries WHERE hook_id = ? AND id != ? AND status != 'pending' AND event != 'ping' ORDER BY created_at DESC LIMIT 1",
+							hook.id,
+							delivery.id,
+						)
+						.toArray()[0];
+					if (before?.status !== "failed") failed.push({ hookId: hook.id, url: hook.url, error: result.body ?? `HTTP ${result.status}` });
+				}
 			}),
 		);
 		this.prune();
@@ -216,6 +249,20 @@ export class Webhooks {
 
 	private queue(hookId: string, event: WebhookEvent | "ping", payload: unknown): string {
 		const id = crypto.randomUUID();
+		const pending = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM deliveries WHERE status = 'pending'").one().n;
+		if (pending >= MAX_PENDING) {
+			// The receiver is too far behind; record the drop instead of growing without bound.
+			this.sql.exec(
+				"INSERT INTO deliveries (id, hook_id, event, payload, status, response, created_at) VALUES (?, ?, ?, ?, 'failed', ?, ?)",
+				id,
+				hookId,
+				event,
+				JSON.stringify(payload),
+				`Dropped: more than ${MAX_PENDING} deliveries were waiting`,
+				new Date().toISOString(),
+			);
+			return id;
+		}
 		this.sql.exec(
 			"INSERT INTO deliveries (id, hook_id, event, payload, status, created_at, next_at) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
 			id,
@@ -283,18 +330,31 @@ function payloadsFor(type: EventType, taskId: string | null, data: Record<string
 			},
 		}));
 	}
-	if (type === "main.advanced") return [{ event: "merge", payload: { event: "merge", task: taskId, ...data, repository: repo } }];
-	if (type.startsWith("task.")) return [{ event: "task", payload: { event: "task", action: type.slice("task.".length), task: taskId, data, repository: repo } }];
+	if (type === "main.advanced") {
+		// A merge moves the default branch, so push subscribers hear about it too.
+		return [
+			{ event: "merge", payload: { event: "merge", task: taskId, ...data, repository: repo } },
+			{
+				event: "push",
+				payload: { event: "push", ref: `refs/heads/${repository.defaultBranch}`, before: data.from, after: data.to, created: false, deleted: false, repository: repo },
+			},
+		];
+	}
+	if (type.startsWith("task.")) {
+		// Fork repo names and Artifacts remotes are internal; receivers get the task id and what happened.
+		const { repo: _repo, remote: _remote, ...rest } = data;
+		return [{ event: "task", payload: { event: "task", action: type.slice("task.".length), task: taskId, data: rest, repository: repo } }];
+	}
 	return [];
 }
 
 async function send(hook: HookRow, delivery: DeliveryRow): Promise<{ ok: boolean; status: number | null; body: string | null; ms: number }> {
 	const started = Date.now();
 	const body = delivery.payload;
-	const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(hook.secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)));
-	const signature = [...mac].map((b) => b.toString(16).padStart(2, "0")).join("");
 	try {
+		const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(hook.secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+		const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)));
+		const signature = [...mac].map((b) => b.toString(16).padStart(2, "0")).join("");
 		const res = await fetch(hook.url, {
 			method: "POST",
 			// Redirects aren't followed: a webhook calls exactly the URL its owner gave.

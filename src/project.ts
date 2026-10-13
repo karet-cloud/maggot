@@ -243,6 +243,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			createdAt: new Date().toISOString(),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
+		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
+		try {
+			const refs = await listBranches({ url: created.remote, token: created.token });
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(Object.fromEntries(refs)));
+		} catch (err) {
+			console.error("recording initial branches failed", err);
+		}
 		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forked) });
 		return this.getProject();
 	}
@@ -324,8 +331,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async searchCode(query: string): Promise<CodeSearch> {
 		const meta = this.meta();
 		if (!this.code.available) return { commit: null, partial: false, files: 0, indexing: false, results: [] };
-		using repo = await this.store.get(meta.name);
-		const head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
+		// Pushes and merges record the branch head; only a repository that predates that needs a lookup.
+		let head = this.knownRefs(meta)[meta.defaultBranch] ?? null;
+		if (!head) {
+			using repo = await this.store.get(meta.name);
+			head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
+		}
 		const behind = head !== null && this.code.state()?.commit !== head;
 		if (behind) await this.requestIndex();
 		return { ...this.code.search(query), indexing: behind };
@@ -605,6 +616,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const head = (await listBranches(access)).get(name);
 		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
 		await deleteBranch(access, name, head);
+		// Like a push: the event feed and webhooks hear that the branch is gone.
+		await this.pushed();
 	}
 
 	/**
@@ -887,8 +900,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * whose request went away. Fork cleanup runs only when no merge is waiting.
 	 */
 	async alarm(): Promise<void> {
-		await Promise.all([this.drainMerges(), this.resumeProvisioning(), this.deliverHooks()]);
-		await this.indexIfWanted();
+		// Each job fails on its own: one broken webhook or index update mustn't stall merges, or each other.
+		const run = (name: string, job: () => Promise<void>) => job().catch((err) => console.error(`alarm: ${name} failed`, err));
+		await Promise.all([run("merges", () => this.drainMerges()), run("provisioning", () => this.resumeProvisioning()), run("webhooks", () => this.deliverHooks())]);
+		await run("indexing", () => this.indexIfWanted());
 		const pending = this.sql.exec<{ n: number }>(
 			"SELECT (SELECT COUNT(*) FROM tasks WHERE status = 'provisioning') + (SELECT COUNT(*) FROM cleanup) AS n",
 		).one().n;
@@ -1223,7 +1238,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				// Socket already closed; the runtime cleans it up.
 			}
 		}
-		if (this.hooks.enqueue(type, taskId, data, this.repository()) > 0) void this.scheduleAlarm(Date.now());
+		if (this.hooks.enqueue(type, taskId, data, this.repository()) > 0) {
+			this.scheduleAlarm(Date.now()).catch((err) => console.error("scheduling webhook deliveries failed", err));
+		}
 		if (taskId && (type === "task.merged" || type === "task.failed" || type === "task.conflict")) {
 			const task = this.sql.exec<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId).toArray()[0];
 			const outcome = { "task.merged": "was merged", "task.failed": "failed", "task.conflict": "has conflicts" }[type];

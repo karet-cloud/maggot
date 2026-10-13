@@ -66,8 +66,8 @@ function AddHook({ project }: { project: string }) {
 				<Field label="Payload URL">
 					<Input value={url} onChange={(e) => setUrl(e.target.value)} type="url" placeholder="https://ci.example.com/megit" required />
 				</Field>
-				<Field label="Secret" hint="Used to sign each payload.">
-					<Input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" autoComplete="off" />
+				<Field label="Secret" hint="At least 8 characters; your receiver checks each payload's signature with it.">
+					<Input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" autoComplete="off" minLength={8} required />
 				</Field>
 			</div>
 			<fieldset className="flex flex-wrap gap-x-5 gap-y-2">
@@ -123,8 +123,8 @@ function HookRow({ project, hook }: { project: string; hook: Webhook }) {
 	});
 	return (
 		<li>
-			<div className="flex flex-wrap items-center gap-3 px-3 py-2.5">
-				<button type="button" onClick={() => setOpen(!open)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+			<div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-2.5">
+				<button type="button" onClick={() => setOpen(!open)} className="flex min-w-0 basis-full items-center gap-2 text-left sm:basis-0 sm:flex-1">
 					<ChevronRight className={cx("size-4 shrink-0 text-faint transition-transform", open && "rotate-90")} />
 					<span className={cx("truncate font-mono text-xs", hook.active ? "text-fg" : "text-faint line-through")}>{hook.url}</span>
 				</button>
@@ -184,9 +184,7 @@ function Deliveries({ project, hookId }: { project: string; hookId: string }) {
 					{shown === d.id && (
 						<div className="space-y-2 border-t border-line/60 p-3">
 							{d.nextAt && d.status === "pending" && (
-								<p className="text-[11px] text-faint">
-									Next attempt <TimeAgo at={d.nextAt} />
-								</p>
+								<p className="text-[11px] text-faint">Next attempt {new Date(d.nextAt).toLocaleString()}</p>
 							)}
 							<p className="text-[11px] font-medium text-dim">Payload</p>
 							<pre className="max-h-64 overflow-auto rounded bg-bg p-2 font-mono text-[11px] text-fg/90">{JSON.stringify(d.payload, null, 2)}</pre>

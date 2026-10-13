@@ -638,7 +638,7 @@ test("code search, webhooks and notifications", async () => {
 		let body = "";
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
-			const expected = `sha256=${createHmac("sha256", "hush").update(body).digest("hex")}`;
+			const expected = `sha256=${createHmac("sha256", "hush-hush").update(body).digest("hex")}`;
 			received.push({ event: String(req.headers["x-megit-event"]), valid: req.headers["x-megit-signature-256"] === expected, body: JSON.parse(body) });
 			res.writeHead(200).end("ok");
 		});
@@ -650,7 +650,8 @@ test("code search, webhooks and notifications", async () => {
 		assert.equal((await as(null)(`${repo}/hooks`)).status, 404);
 		assert.equal((await as(bob)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, events: ["push"] }) })).status, 403);
 		assert.equal((await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: "ftp://example.com", events: ["push"] }) })).status, 400);
-		const created = await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, secret: "hush", events: ["push"] }) });
+		assert.equal((await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, events: ["push"] }) })).status, 400, "a secret is required");
+		const created = await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, secret: "hush-hush", events: ["push"] }) });
 		assert.equal(created.status, 201, await created.clone().text());
 		const { hook } = (await created.json()) as { hook: { id: string } };
 
@@ -676,6 +677,16 @@ test("code search, webhooks and notifications", async () => {
 		assert.deepEqual(search.results.map((r) => [r.path, r.lines[0]?.line]), [["src/needle.ts", 1]]);
 		const byName = (await (await as(null)(`${repo}/search?q=ne`)).json()) as { results: { path: string }[] };
 		assert.ok(byName.results.some((r) => r.path === "src/needle.ts"), "short queries match file names");
+		assert.equal((await as(null)(`${repo}/search?q=${"a".repeat(101)}`)).status, 400, "long phrases are refused");
+		assert.equal((await as(null)(`${repo}/search?q=aaa%00bbb`)).status, 400);
+
+		// A paused hook sends nothing more.
+		assert.equal((await as(ada)(`${repo}/hooks/${hook.id}`, { method: "PATCH", body: JSON.stringify({ active: false }) })).status, 200);
+		const seen = received.length;
+		const now = ((await (await as(ada)(repo)).json()) as { project: { head: string } }).project.head;
+		await as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", baseCommit: now, message: "quiet", files: [{ path: "quiet.txt", content: "q" }] }) });
+		await new Promise((r) => setTimeout(r, 1500));
+		assert.equal(received.length, seen);
 	} finally {
 		receiver.close();
 	}
