@@ -20,10 +20,12 @@ export function BranchSelect({
 	placeholder?: string;
 }) {
 	const refs = useQuery({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false) });
+	const tagList = useQuery({ queryKey: keys.tags(project), queryFn: () => api.tags(project), enabled: !branchesOnly, staleTime: 60_000 });
+	const tags = branchesOnly ? [] : (tagList.data ?? []);
 	const defaultBranch = refs.data?.defaultBranch;
 	const others = (refs.data?.branches ?? []).filter((b) => !b.default);
 	const agents = branchesOnly ? [] : (refs.data?.agents ?? []);
-	const listed = new Set<string | undefined>([defaultBranch, ...others.map((b) => b.name), ...agents.map((a) => a.name)]);
+	const listed = new Set<string | undefined>([defaultBranch, ...others.map((b) => b.name), ...agents.map((a) => a.name), ...tags.map((t) => t.name)]);
 	const current = placeholder ? value : value === defaultBranch ? undefined : value;
 	return (
 		<select
@@ -39,6 +41,15 @@ export function BranchSelect({
 					{others.map((b) => (
 						<option key={b.name} value={b.name}>
 							{b.name}
+						</option>
+					))}
+				</optgroup>
+			)}
+			{tags.length > 0 && (
+				<optgroup label="Tags">
+					{tags.map((t) => (
+						<option key={`tag:${t.name}`} value={t.name}>
+							{t.name}
 						</option>
 					))}
 				</optgroup>

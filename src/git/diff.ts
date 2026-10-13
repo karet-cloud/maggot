@@ -294,3 +294,31 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) =>
 	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 	return results;
 }
+
+/**
+ * Newest first, but never a commit before one of its children: dates alone can tie or lie (rebases,
+ * clock skew), and the graph needs every lane to reach the commit it's waiting for.
+ */
+export function topoOrder<C extends { hash: string; parents: string[]; committedAt: number }>(list: C[]): C[] {
+	const byHash = new Map(list.map((c) => [c.hash, c]));
+	const children = new Map<string, number>();
+	for (const c of list) for (const p of c.parents) if (byHash.has(p)) children.set(p, (children.get(p) ?? 0) + 1);
+	const newestFirst = (a: C, b: C) => b.committedAt - a.committedAt || a.hash.localeCompare(b.hash);
+	const ready = list.filter((c) => !children.get(c.hash)).sort(newestFirst);
+	const out: C[] = [];
+	while (ready.length > 0) {
+		const c = ready.shift() as C;
+		out.push(c);
+		for (const p of c.parents) {
+			const left = (children.get(p) ?? 0) - 1;
+			children.set(p, left);
+			const parent = byHash.get(p);
+			if (left === 0 && parent) {
+				// Insert keeping newest first.
+				const at = ready.findIndex((r) => newestFirst(parent, r) < 0);
+				ready.splice(at === -1 ? ready.length : at, 0, parent);
+			}
+		}
+	}
+	return out;
+}

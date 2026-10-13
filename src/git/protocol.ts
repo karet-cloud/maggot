@@ -10,14 +10,36 @@ function headers(remote: RemoteAccess, extra: Record<string, string> = {}) {
 
 /** Branch name to head oid, as `git ls-remote --heads` reports them. */
 export async function listBranches(remote: RemoteAccess): Promise<Map<string, string>> {
+	return (await listRefs(remote)).branches;
+}
+
+export interface TagRef {
+	/** What the tag ref points at: a commit, or an annotated tag object. */
+	oid: string;
+	/** The commit it names (the same as `oid` for a lightweight tag). */
+	commit: string;
+	annotated: boolean;
+}
+
+/** Branches and tags, from one ref advertisement. Annotated tags are peeled to their commits. */
+export async function listRefs(remote: RemoteAccess): Promise<{ branches: Map<string, string>; tags: Map<string, TagRef> }> {
 	const res = await fetch(`${remote.url}/info/refs?service=git-upload-pack`, { headers: headers(remote) });
 	if (!res.ok) throw new Error(`Listing refs failed: HTTP ${res.status}`);
 	const branches = new Map<string, string>();
+	const tags = new Map<string, TagRef>();
 	for (const line of pktLines(new Uint8Array(await res.arrayBuffer()))) {
 		const [oid, ref] = line.split("\0")[0].trimEnd().split(" ");
-		if (ref?.startsWith("refs/heads/")) branches.set(ref.slice("refs/heads/".length), oid);
+		if (!ref) continue;
+		if (ref.startsWith("refs/heads/")) branches.set(ref.slice("refs/heads/".length), oid);
+		else if (ref.startsWith("refs/tags/")) {
+			const peeled = ref.endsWith("^{}");
+			const name = ref.slice("refs/tags/".length, peeled ? -3 : undefined);
+			const known = tags.get(name);
+			if (peeled) tags.set(name, { oid: known?.oid ?? oid, commit: oid, annotated: true });
+			else tags.set(name, { oid, commit: known?.annotated ? known.commit : oid, annotated: known?.annotated ?? false });
+		}
 	}
-	return branches;
+	return { branches, tags };
 }
 
 /**
@@ -57,6 +79,21 @@ export async function measureRepository(remote: RemoteAccess, limit: number): Pr
 /** Deletes `refs/heads/<branch>` if it still points at `oid`. */
 export async function deleteBranch(remote: RemoteAccess, branch: string, oid: string): Promise<void> {
 	await receivePack(remote, `refs/heads/${branch}`, oid, ZERO, new Uint8Array(), `Deleting ${branch}`);
+}
+
+/** A pack with no objects: what receive-pack needs to point a ref at an object it already has. */
+const EMPTY_PACK = Uint8Array.from([
+	0x50, 0x41, 0x43, 0x4b, 0, 0, 0, 2, 0, 0, 0, 0,
+	// SHA-1 of the 12 bytes above.
+	0x02, 0x9d, 0x08, 0x82, 0x3b, 0xd8, 0xa8, 0xea, 0xb5, 0x10, 0xad, 0x6a, 0xc7, 0x5c, 0x82, 0x3c, 0xfd, 0x3e, 0xd3, 0x1e,
+]);
+
+/**
+ * Moves any ref from `from` to `to` (null creates or deletes it) when every object is already in the
+ * repository: creating a tag, or putting a branch back. Refused if the ref has moved since.
+ */
+export async function setRef(remote: RemoteAccess, ref: string, from: string | null, to: string | null): Promise<void> {
+	await receivePack(remote, ref, from ?? ZERO, to ?? ZERO, to ? EMPTY_PACK : new Uint8Array(), `Updating ${ref}`);
 }
 
 /**

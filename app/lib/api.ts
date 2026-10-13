@@ -5,6 +5,14 @@ import type {
 	Commit,
 	CommitDetail,
 	FileList,
+	BranchRule,
+	Graph,
+	Issue,
+	IssueComment,
+	IssueList,
+	IssueState,
+	Release,
+	Tag,
 	Comparison,
 	Diff,
 	GitCredentials,
@@ -125,6 +133,36 @@ export const api = {
 	transfers: () => call<{ transfers: RepoTransfer[] }>("GET", "/transfers").then((r) => r.transfers),
 	acceptTransfer: (id: string, name?: string) => call<{ repo: RepoInfo }>("POST", `/transfers/${encodeURIComponent(id)}/accept`, name ? { name } : {}).then((r) => r.repo),
 	declineTransfer: (id: string) => call<{ deleted: true }>("POST", `/transfers/${encodeURIComponent(id)}/decline`, {}),
+	tags: (project: string) => call<{ tags: Tag[] }>("GET", `${p(project)}/tags`).then((r) => r.tags),
+	createTag: (project: string, name: string, target?: string) => call<{ tag: Tag }>("POST", `${p(project)}/tags`, { name, target }).then((r) => r.tag),
+	deleteTag: (project: string, name: string) =>
+		call<{ deleted: true }>("DELETE", `${p(project)}/tags/${name.split("/").map(encodeURIComponent).join("/")}`),
+	releases: (project: string) => call<{ releases: Release[] }>("GET", `${p(project)}/releases`).then((r) => r.releases),
+	createRelease: (project: string, input: { tag: string; target?: string; name?: string; notes?: string; prerelease?: boolean }) =>
+		call<{ release: Release }>("POST", `${p(project)}/releases`, input).then((r) => r.release),
+	updateRelease: (project: string, id: string, patch: { name?: string; notes?: string; prerelease?: boolean }) =>
+		call<{ release: Release }>("PATCH", `${p(project)}/releases/${encodeURIComponent(id)}`, patch).then((r) => r.release),
+	deleteRelease: (project: string, id: string, deleteTag = false) =>
+		call<{ deleted: true }>("DELETE", `${p(project)}/releases/${encodeURIComponent(id)}${deleteTag ? "?deleteTag" : ""}`),
+	graph: (project: string, limit = 150) => call<Graph>("GET", `${p(project)}/graph?limit=${limit}`),
+	branchRules: (project: string) => call<{ rules: BranchRule[] }>("GET", `${p(project)}/protection`).then((r) => r.rules),
+	setBranchRule: (project: string, rule: Omit<BranchRule, "createdAt">) =>
+		call<{ rules: BranchRule[] }>("PUT", `${p(project)}/protection`, rule).then((r) => r.rules),
+	deleteBranchRule: (project: string, pattern: string) =>
+		call<{ rules: BranchRule[] }>("DELETE", `${p(project)}/protection?${new URLSearchParams({ pattern })}`).then((r) => r.rules),
+	issues: (project: string, filter: { state?: IssueState | "all"; q?: string; label?: string } = {}) =>
+		call<IssueList>("GET", `${p(project)}/issues?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`),
+	issue: (project: string, number: number) => call<{ issue: Issue; comments: IssueComment[] }>("GET", `${p(project)}/issues/${number}`),
+	createIssue: (project: string, input: { title: string; body: string; labels?: string[] }) =>
+		call<{ issue: Issue }>("POST", `${p(project)}/issues`, input).then((r) => r.issue),
+	updateIssue: (project: string, number: number, patch: { title?: string; body?: string; state?: IssueState; labels?: string[] }) =>
+		call<{ issue: Issue }>("PATCH", `${p(project)}/issues/${number}`, patch).then((r) => r.issue),
+	comment: (project: string, number: number, body: string) =>
+		call<{ comment: IssueComment }>("POST", `${p(project)}/issues/${number}/comments`, { body }).then((r) => r.comment),
+	editComment: (project: string, number: number, id: string, body: string) =>
+		call<{ comment: IssueComment }>("PATCH", `${p(project)}/issues/${number}/comments/${encodeURIComponent(id)}`, { body }).then((r) => r.comment),
+	deleteComment: (project: string, number: number, id: string) =>
+		call<{ deleted: true }>("DELETE", `${p(project)}/issues/${number}/comments/${encodeURIComponent(id)}`),
 	ssh: () => call<SshInfo>("GET", "/ssh"),
 	sshKeys: () => call<{ keys: SshKey[] }>("GET", "/ssh/keys").then((r) => r.keys),
 	addSshKey: (key: string, name?: string) => call<{ key: SshKey }>("POST", "/ssh/keys", { key, name }).then((r) => r.key),
@@ -225,6 +263,12 @@ export const keys = {
 	transfers: ["transfers"] as const,
 	transfer: (project: string) => ["project", project, "transfer"] as const,
 	paths: (project: string, ref?: string) => ["project", project, "paths", ref ?? ""] as const,
+	tags: (project: string) => ["project", project, "tags"] as const,
+	releases: (project: string) => ["project", project, "releases"] as const,
+	graph: (project: string) => ["project", project, "graph"] as const,
+	branchRules: (project: string) => ["project", project, "protection"] as const,
+	issues: (project: string) => ["project", project, "issues"] as const,
+	issue: (project: string, number: number) => ["project", project, "issues", number] as const,
 	projects: ["projects"] as const,
 	project: (project: string) => ["project", project] as const,
 	tasks: (project: string) => ["project", project, "tasks"] as const,

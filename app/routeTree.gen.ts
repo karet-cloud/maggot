@@ -32,9 +32,13 @@ import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.comp
 import { Route as OwnerRepoEditRouteImport } from './routes/$owner.$repo.edit'
 import { Route as OwnerRepoForksRouteImport } from './routes/$owner.$repo.forks'
 import { Route as OwnerRepoHistoryRouteImport } from './routes/$owner.$repo.history'
+import { Route as OwnerRepoReleasesRouteImport } from './routes/$owner.$repo.releases'
 import { Route as OwnerRepoSearchRouteImport } from './routes/$owner.$repo.search'
 import { Route as OwnerRepoSettingsRouteImport } from './routes/$owner.$repo.settings'
 import { Route as OwnerRepoCommitHashRouteImport } from './routes/$owner.$repo.commit.$hash'
+import { Route as OwnerRepoIssuesIndexRouteImport } from './routes/$owner.$repo.issues.index'
+import { Route as OwnerRepoIssuesNumberRouteImport } from './routes/$owner.$repo.issues.$number'
+import { Route as OwnerRepoIssuesNewRouteImport } from './routes/$owner.$repo.issues.new'
 import { Route as OwnerRepoTTaskRouteImport } from './routes/$owner.$repo.t.$task'
 
 const IndexRoute = IndexRouteImport.update({
@@ -152,6 +156,11 @@ const OwnerRepoHistoryRoute = OwnerRepoHistoryRouteImport.update({
   path: '/history',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
+const OwnerRepoReleasesRoute = OwnerRepoReleasesRouteImport.update({
+  id: '/releases',
+  path: '/releases',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
 const OwnerRepoSearchRoute = OwnerRepoSearchRouteImport.update({
   id: '/search',
   path: '/search',
@@ -165,6 +174,21 @@ const OwnerRepoSettingsRoute = OwnerRepoSettingsRouteImport.update({
 const OwnerRepoCommitHashRoute = OwnerRepoCommitHashRouteImport.update({
   id: '/commit/$hash',
   path: '/commit/$hash',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoIssuesIndexRoute = OwnerRepoIssuesIndexRouteImport.update({
+  id: '/issues/',
+  path: '/issues/',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoIssuesNumberRoute = OwnerRepoIssuesNumberRouteImport.update({
+  id: '/issues/$number',
+  path: '/issues/$number',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoIssuesNewRoute = OwnerRepoIssuesNewRouteImport.update({
+  id: '/issues/new',
+  path: '/issues/new',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
 const OwnerRepoTTaskRoute = OwnerRepoTTaskRouteImport.update({
@@ -196,11 +220,15 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
+  '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -224,11 +252,15 @@ export interface FileRoutesByTo {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
+  '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/issues': typeof OwnerRepoIssuesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -254,11 +286,15 @@ export interface FileRoutesById {
   '/$owner/$repo/edit': typeof OwnerRepoEditRoute
   '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
+  '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -285,11 +321,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/issues/$number'
+    | '/$owner/$repo/issues/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/issues/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -313,11 +353,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo'
     | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/issues/$number'
+    | '/$owner/$repo/issues/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/issues'
   id:
     | '__root__'
     | '/'
@@ -342,11 +386,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/edit'
     | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
+    | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/issues/$number'
+    | '/$owner/$repo/issues/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/issues/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -531,6 +579,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoHistoryRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/releases': {
+      id: '/$owner/$repo/releases'
+      path: '/releases'
+      fullPath: '/$owner/$repo/releases'
+      preLoaderRoute: typeof OwnerRepoReleasesRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/search': {
       id: '/$owner/$repo/search'
       path: '/search'
@@ -552,6 +607,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoCommitHashRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/issues/': {
+      id: '/$owner/$repo/issues/'
+      path: '/issues'
+      fullPath: '/$owner/$repo/issues/'
+      preLoaderRoute: typeof OwnerRepoIssuesIndexRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/issues/$number': {
+      id: '/$owner/$repo/issues/$number'
+      path: '/issues/$number'
+      fullPath: '/$owner/$repo/issues/$number'
+      preLoaderRoute: typeof OwnerRepoIssuesNumberRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/issues/new': {
+      id: '/$owner/$repo/issues/new'
+      path: '/issues/new'
+      fullPath: '/$owner/$repo/issues/new'
+      preLoaderRoute: typeof OwnerRepoIssuesNewRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/t/$task': {
       id: '/$owner/$repo/t/$task'
       path: '/t/$task'
@@ -569,11 +645,15 @@ interface OwnerRepoRouteChildren {
   OwnerRepoEditRoute: typeof OwnerRepoEditRoute
   OwnerRepoForksRoute: typeof OwnerRepoForksRoute
   OwnerRepoHistoryRoute: typeof OwnerRepoHistoryRoute
+  OwnerRepoReleasesRoute: typeof OwnerRepoReleasesRoute
   OwnerRepoSearchRoute: typeof OwnerRepoSearchRoute
   OwnerRepoSettingsRoute: typeof OwnerRepoSettingsRoute
   OwnerRepoIndexRoute: typeof OwnerRepoIndexRoute
   OwnerRepoCommitHashRoute: typeof OwnerRepoCommitHashRoute
+  OwnerRepoIssuesNumberRoute: typeof OwnerRepoIssuesNumberRoute
+  OwnerRepoIssuesNewRoute: typeof OwnerRepoIssuesNewRoute
   OwnerRepoTTaskRoute: typeof OwnerRepoTTaskRoute
+  OwnerRepoIssuesIndexRoute: typeof OwnerRepoIssuesIndexRoute
 }
 
 const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
@@ -583,11 +663,15 @@ const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
   OwnerRepoEditRoute: OwnerRepoEditRoute,
   OwnerRepoForksRoute: OwnerRepoForksRoute,
   OwnerRepoHistoryRoute: OwnerRepoHistoryRoute,
+  OwnerRepoReleasesRoute: OwnerRepoReleasesRoute,
   OwnerRepoSearchRoute: OwnerRepoSearchRoute,
   OwnerRepoSettingsRoute: OwnerRepoSettingsRoute,
   OwnerRepoIndexRoute: OwnerRepoIndexRoute,
   OwnerRepoCommitHashRoute: OwnerRepoCommitHashRoute,
+  OwnerRepoIssuesNumberRoute: OwnerRepoIssuesNumberRoute,
+  OwnerRepoIssuesNewRoute: OwnerRepoIssuesNewRoute,
   OwnerRepoTTaskRoute: OwnerRepoTTaskRoute,
+  OwnerRepoIssuesIndexRoute: OwnerRepoIssuesIndexRoute,
 }
 
 const OwnerRepoRouteWithChildren = OwnerRepoRoute._addFileChildren(

@@ -31,10 +31,10 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 7 | **Pull requests for humans** | Open a PR from any branch, show its diff, and merge it through the same merge queue the agents use. Reuses the task and queue machinery. | M |
 | 8 | **Code review** | Inline line comments on diffs, approve or request changes, and resolvable threads. | M |
 | 9 | **Compare view** | `base...head` for any two refs: commits plus diff. Becomes the "open PR" entry point. | S (after 1) |
-| 10 | **Branch protection** | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
-| 11 | **Issues** | Title, body, labels, open/closed, and a "fixes #n" link that closes the issue on merge. Can turn into an agent task in one click. | M |
+| 10 | **Branch protection** (done: no force pushes, no deletion, merge queue only; checks and reviews once they exist) | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
+| 11 | **Issues** (done, with labels and "fixes #n"; agent task from an issue next) | Title, body, labels, open/closed, and a "fixes #n" link that closes the issue on merge. Can turn into an agent task in one click. | M |
 | 12 | **User accounts and permissions** (partly done: accounts, tokens, owner-only repos; password reset and change; email verification, rate limits and quotas; next: collaborators, orgs) | Better Auth with GitHub or email login. Per-project roles: read, write, admin. Per-user personal access tokens instead of one shared key. | L |
-| 13 | **Tags and releases** | List tags. Create a release with notes and a downloadable archive. | S–M |
+| 13 | **Tags and releases** (done; uploaded release files next) | List tags. Create a release with notes and a downloadable archive. | S–M |
 
 ## Tier 3: Git depth
 
@@ -43,7 +43,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 14 | **Blame** | Per-line last commit. Expensive; compute lazily and cache in the DO or KV. | M |
 | 15 | **File history** | Commits that touched a path. | S–M |
 | 16 | **Code search** (done: repository search, per-repository code search on the default branch, and "Go to file") | Filename "go to file" first (S), then full-text search over the default branch, indexed on push (L). | S / L |
-| 17 | **Commit graph** | A branch and merge visualization in history. Useful to show agent merges. | M |
+| 17 | **Commit graph** (done) | A branch and merge visualization in history. Useful to show agent merges. | M |
 | 18 | **Edit in browser** (done) | Edit a file, commit it to a branch, and optionally open a PR. | M |
 | 19 | **Forks** (done; stars too; PRs across forks next) | Artifacts fork into another project, then PR back across forks. | M |
 | 20 | **Signed commit badges** | Verify GPG/SSH signatures and show "Verified". | M |

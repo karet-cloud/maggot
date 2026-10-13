@@ -24,6 +24,8 @@ export interface Policy {
 	gitPerMinute: number;
 	/** Code searches per user or IP address per minute. */
 	searchesPerMinute: number;
+	/** Issues and comments one user may post per hour, across all repositories. */
+	postsPerHour: number;
 	/** Requests with a wrong token or password per IP address per 5 minutes, before the address is refused. */
 	authFailuresPerIp: number;
 	reposPerUser: number;
@@ -50,6 +52,7 @@ export const DEFAULT_POLICY: Policy = {
 	gitPerMinute: 120,
 	authFailuresPerIp: 30,
 	searchesPerMinute: 30,
+	postsPerHour: 60,
 	reposPerUser: 50,
 	pushBytes: 100 * MB,
 	repoBytes: 1024 * MB,
@@ -224,6 +227,7 @@ export const rules = {
 	repoCreate: (p: Policy): Rule[] => [{ name: "repo-create", limit: p.repoCreatesPerHour, windowSeconds: HOUR }],
 	git: (p: Policy): Rule[] => [{ name: "git", limit: p.gitPerMinute, windowSeconds: MINUTE }],
 	search: (p: Policy): Rule[] => [{ name: "search", limit: p.searchesPerMinute, windowSeconds: MINUTE }],
+	post: (p: Policy): Rule[] => [{ name: "post", limit: p.postsPerHour, windowSeconds: HOUR }],
 	authFailure: (p: Policy): Rule[] => [{ name: "auth-failure", limit: p.authFailuresPerIp, windowSeconds: 5 * MINUTE }],
 };
 

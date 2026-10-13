@@ -137,7 +137,28 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 - **Notifications**: the bell in the top bar. Stars and forks of your repositories, agent tasks that
   merged, failed or hit conflicts, and webhooks that keep failing. Kept in D1, newest 200 per user.
 - **README**: the root README renders on the repository's front page (the Code tab), like GitHub.
-- **History**: first-parent history of the default branch; every commit opens a commit page with its
+- **History**: first-parent history of any branch, tag or agent fork (the picker), and a Graph view:
+  recent commits across every branch, newest first but never before their children, drawn in lanes
+  with branch and tag labels. Each branch's history comes from one log request; merges whose
+  branches are gone are filled in from their second parents.
+- **Tags and releases**: the Releases tab lists releases (Markdown notes, pre-release flag, source
+  `.zip` and `.tar.gz` of the tag) and tags. Tags can be created at any branch from the web (a ref
+  update with an empty pack) or pushed with git; a release can create its own tag. Tag names work
+  anywhere a branch does when browsing. Tags appearing or going away are push webhooks; releases
+  have their own.
+- **Branch protection**: rules per branch name or pattern (`*` within a segment, `**` across) in
+  repository settings. "Block deletion" and "only the merge queue" are refused from the push's
+  commands, before the pack is stored. "Block force pushes" needs the new commits to tell, so the push
+  goes through, megit checks the old head is an ancestor of the new one, and if not puts the branch
+  back (a compare-and-swap ref update) and rewrites git's report so the client sees
+  `! [remote rejected] … (protected branch: force pushes aren't allowed)`. The same rules apply to
+  SSH pushes, web commits and branch deletes; the merge queue is never blocked.
+- **Issues**: numbered per repository. Anyone signed in (verified) who can read the repository opens
+  and comments; authors and the owner edit and close; the owner labels. Markdown with a preview,
+  search, label filters, notifications for the owner and everyone in the conversation, `issues`
+  webhooks, and the activity feed. A commit landing on the default branch (push or merge queue) that
+  says "fixes #12", "closes #12" or "resolves #12" closes it. Posting is limited per user per hour.
+- **Commit pages**: every commit opens a commit page with its
   message, author, parents and diff (unified or split).
 - **Branches**: the default branch, other branches with ahead/behind counts against it (delete them
   here), and each active task's fork grouped separately. "Compare" shows the commits and diff a branch
@@ -249,6 +270,14 @@ the owner); anything else needs the owner. A private repository someone can't re
 | POST | `/transfers/:id/accept`, `/transfers/:id/decline` | `{ name? }` | take the repository (under `name` if given) → `{ repo }`, or turn it down |
 | GET | `/repos/:owner/:repo/paths` | `?ref=` | `FileList`: every file path at `ref` (up to 20,000), for the file finder |
 | GET | `/ssh` | | `SshInfo`: the host key, its fingerprint and the WebSocket URL |
+| GET / POST / DELETE | `/repos/:owner/:repo/tags`, `…/tags/<name>` | `{ name, target? }` | list tags (with their commits); create one at a branch, tag or commit; delete one (owner) |
+| GET / POST | `/repos/:owner/:repo/releases` | `{ tag, target?, name?, notes?, prerelease? }` | list releases; publish one, creating the tag at `target` if needed (owner) |
+| PATCH / DELETE | `/repos/:owner/:repo/releases/:id` | `{ name?, notes?, prerelease? }`, `?deleteTag` | edit or delete a release (owner) |
+| GET | `/repos/:owner/:repo/graph` | `?limit=` (≤ 400) | `Graph`: recent commits across every branch, children before parents, with branch and tag labels |
+| GET / PUT / DELETE | `/repos/:owner/:repo/protection` | `{ pattern, blockDeletions?, blockForcePushes?, requireMergeQueue? }`, `?pattern=` | branch rules (anyone who can read sees them; the owner sets them) |
+| GET / POST | `/repos/:owner/:repo/issues` | `?state=open\|closed\|all&q=&label=`; `{ title, body?, labels? }` | `IssueList` with open and closed counts; open an issue (signed in) |
+| GET / PATCH | `/repos/:owner/:repo/issues/:n` | `{ title?, body?, state?, labels? }` | the issue and its comments; edit, close or reopen (author or owner; labels: owner) |
+| POST / PATCH / DELETE | `/repos/:owner/:repo/issues/:n/comments`, `…/comments/:id` | `{ body }` | comment (signed in); edit (author); delete (author or owner) |
 | GET / POST / DELETE | `/ssh/keys`, `/ssh/keys/:id` | `{ key, name? }` | list, add (an authorized_keys line) or remove your SSH keys |
 | DELETE | `/repos/:owner/:repo` | | deletes it, its agent forks and state (owner) |
 | PUT / DELETE | `/repos/:owner/:repo/star` | | star or unstar (signed in, read access) → `{ starred, stars }` |
@@ -333,6 +362,7 @@ src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
 src/search.ts         Code search index (FTS5 trigram) kept in each repository's coordinator
 src/hooks.ts          Webhook subscriptions, signed deliveries and retries, in the coordinator
 src/archive.ts        Streaming .tar.gz / .zip of a tree
+src/protection.ts     Branch rules: matching, push command checks, ancestry, git report rewriting
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
