@@ -77,8 +77,9 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 - **Rename and transfer**: a rename keeps the old name as a redirect (the web, the API and git all
   follow it) until another repository takes that name. A transfer is an offer: the new owner gets a
   notification and accepts or declines on `/transfers` within a week, picking another name if they
-  already have one like it; accepting checks their quotas, moves the repository (stars, forks and
-  webhooks included) and leaves the old address redirecting.
+  already have one like it; accepting checks their quotas, moves the repository (stars, forks, issues
+  and webhooks included; the webhooks arrive paused, since they point at the previous owner's
+  endpoints) and leaves the old address redirecting.
 - **Archive**: an archived repository is read-only. Pushes (HTTPS and SSH), web edits, branch deletes,
   agent tasks and settings changes are refused until it's unarchived; cloning, forking and starring
   still work. It can't be archived while agent tasks are active, so nothing is left half merged.

@@ -84,3 +84,25 @@ test("ancestry: found through any parent, refused for unrelated history, unknown
 	assert.equal(await isAncestor(repo, "c2", "x"), false);
 	assert.equal(await isAncestor(repo, "c1", "c4", 1), null);
 });
+
+test("patterns match in time proportional to their size, however they're written", () => {
+	const started = Date.now();
+	assert.equal(patternMatches(`${"*a".repeat(30)}b`, "a".repeat(100)), false);
+	assert.ok(Date.now() - started < 200, "no backtracking blow-up");
+	assert.ok(patternMatches("caf?", "café"), "? is one character, not one byte");
+});
+
+test("quarantine sends fast-forward-only updates to a holding ref and leaves everything else alone", async () => {
+	const { quarantine, INCOMING } = await import("../src/protection.ts");
+	const head = enc.encode(`${pkt(`${A} ${B} refs/heads/master\0report-status side-band-64k\n`)}${pkt(`${Z} ${A} refs/heads/other\n`)}0000`);
+	const { head: rewritten, staged } = quarantine(head, [{ old: A, new: B, ref: "refs/heads/master" }]);
+	assert.equal(staged.length, 1);
+	assert.ok(staged[0].temp.startsWith(INCOMING) && staged[0].temp.endsWith("/master"));
+	const { commands, capabilities } = parseCommands(rewritten);
+	assert.deepEqual(commands, [
+		{ old: Z, new: B, ref: staged[0].temp },
+		{ old: Z, new: A, ref: "refs/heads/other" },
+	]);
+	assert.deepEqual(capabilities, ["report-status", "side-band-64k"], "capabilities stay on the first line");
+	assert.equal(checkPush([], [{ old: Z, new: A, ref: `${INCOMING}x/master` }]).refused.size, 1, "nobody pushes there directly");
+});

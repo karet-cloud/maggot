@@ -25,6 +25,10 @@ ws.binaryType = "arraybuffer";
 const pending = [];
 let open = false;
 let done = false;
+let waiting = false;
+
+// ssh went away first: nothing left to say.
+process.stdout.on("error", () => process.exit(0));
 
 ws.addEventListener("open", () => {
 	open = true;
@@ -48,11 +52,13 @@ process.stdin.on("data", (chunk) => {
 	}
 	ws.send(chunk);
 	// The WebSocket has no backpressure of its own; stop reading while a lot is waiting to go out.
-	if (ws.bufferedAmount > 4 * 1024 * 1024) {
+	if (ws.bufferedAmount > 4 * 1024 * 1024 && !waiting) {
+		waiting = true;
 		process.stdin.pause();
 		const wait = setInterval(() => {
 			if (ws.bufferedAmount < 1024 * 1024 || ws.readyState !== WebSocket.OPEN) {
 				clearInterval(wait);
+				waiting = false;
 				process.stdin.resume();
 			}
 		}, 10);

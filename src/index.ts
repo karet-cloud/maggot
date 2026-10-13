@@ -323,8 +323,9 @@ app.post("/api/transfers/:id/accept", async (c) => {
 	const after: RepoRow = { ...before, ownerId: user.id, owner: user.username, name };
 	const coordinator = projects(c.env).getByName(after.id);
 	await coordinator.setRepository(repositoryRef(c, after));
-	// Live views were authorized for the old owner.
+	// Live views were authorized for the old owner, and webhooks point at the old owner's endpoints.
 	await coordinator.disconnectAll("Ownership changed");
+	await coordinator.pauseHooks();
 	c.executionCtx.waitUntil(
 		notifyUser(db(c.env), {
 			userId: transfer.fromUserId,
@@ -343,7 +344,7 @@ app.post("/api/transfers/:id/decline", async (c) => {
 	const user = requireUser(c);
 	const transfer = await getTransfer(db(c.env), c.req.param("id"));
 	if (!transfer || transfer.toUserId !== user.id) throw new HttpError(404, "NOT_FOUND", "No transfer offer for you with that id");
-	await cancelTransfer(db(c.env), transfer.id);
+	await cancelTransfer(db(c.env), transfer.id, user.id);
 	return c.json({ deleted: true });
 });
 
@@ -567,8 +568,15 @@ function readerAction(rest: string, method: string): boolean {
 	if (/^\/issues\/\d+\/comments\/[^/]+$/.test(rest)) return method === "PATCH" || method === "DELETE";
 	return false;
 }
-/** Changes the owner can still make to an archived repository: its settings (unarchiving included), deleting it, and handing it on. */
-const ARCHIVED_ACTIONS: Record<string, string[]> = { "/": ["PATCH", "DELETE"], "/transfer": ["POST", "DELETE"] };
+/**
+ * Changes the owner can still make to an archived repository: its settings (unarchiving included),
+ * deleting it, handing it on, and pausing or removing webhooks (a leaked secret shouldn't wait).
+ */
+function archivedAction(rest: string, method: string): boolean {
+	if (rest === "/") return method === "PATCH" || method === "DELETE";
+	if (rest === "/transfer") return method === "POST" || method === "DELETE";
+	return /^\/hooks\/[^/]+$/.test(rest) && (method === "PATCH" || method === "DELETE");
+}
 
 /**
  * Resolves the repository and checks access: reads (and starring or forking) need read access,
@@ -589,7 +597,9 @@ repo.use("*", async (c, next) => {
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
 	const write = !["GET", "HEAD"].includes(c.req.method) && !readerAction(routeRest(c, ""), c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
-	if (write && row.archivedAt && !ARCHIVED_ACTIONS[routeRest(c, "")]?.includes(c.req.method)) {
+	// Archived means read-only for everyone: issues and comments too, but starring and forking still work.
+	const mutating = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS[routeRest(c, "")]?.includes(c.req.method);
+	if (mutating && row.archivedAt && !archivedAction(routeRest(c, ""), c.req.method)) {
 		throw new HttpError(403, "ARCHIVED", "This repository is archived, so it's read-only. Its owner can unarchive it in Settings.");
 	}
 	c.set("projectId", row.id);
@@ -814,7 +824,7 @@ repo.get("/archive", async (c) => {
 	const repo = await repoStore(c.env).get(at.repo);
 	try {
 		const { files } = await listFiles(repo, at.treeHash);
-		const label = ref && !ref.startsWith("task:") && ref !== at.commit ? ref.replaceAll("/", "-") : at.commit.slice(0, 7);
+		const label = ref && !ref.startsWith("task:") && ref !== at.commit ? ref.replace(/^refs\/(tags|heads)\//, "").replaceAll("/", "-") : at.commit.slice(0, 7);
 		const root = `${name}-${label}`;
 		const stream = archiveStream(repo, files, { format, root, mtime: at.committedAt, onDone: () => repo[Symbol.dispose]() });
 		return c.body(stream, 200, {
@@ -944,7 +954,8 @@ repo.get("/search", async (c) => {
 
 // ── Tags and releases ────────────────────────────────────────────────────────
 
-repo.get("/tags", async (c) => c.json({ tags: await project(c).tags() }));
+// ?summary=0 leaves out each tag's commit summary, for pickers that only need names.
+repo.get("/tags", async (c) => c.json({ tags: await project(c).tags(c.req.query("summary") !== "0") }));
 
 repo.post("/tags", async (c) => {
 	const { name, target } = await body<{ name?: string; target?: string }>(c);
@@ -959,7 +970,8 @@ repo.delete("/tags/*", async (c) => {
 	return c.json({ deleted: true });
 });
 
-repo.get("/releases", async (c) => c.json({ releases: await project(c).releases() }));
+// Newest first, `limit` at a time (default 20); `more` says there are older ones.
+repo.get("/releases", async (c) => c.json(await project(c).releases(intParam(c.req.query("limit"), 20, 200))));
 
 repo.post("/releases", async (c) => {
 	const input = await body<{ tag?: string; target?: string; name?: string; notes?: string; prerelease?: boolean }>(c);
@@ -1103,11 +1115,12 @@ repo.get("/issues", async (c) => {
 
 repo.post("/issues", async (c) => {
 	const row = userRepo(c);
-	const user = await canPost(c);
+	requireUser(c);
 	const input = await body<{ title?: string; body?: string; labels?: unknown }>(c);
 	const text = issueText(input, true);
 	// Only the owner labels issues.
-	const labels = input.labels !== undefined && canWrite(user, row) ? cleanLabels(input.labels) : [];
+	const labels = input.labels !== undefined && canWrite(c.var.principal, row) ? cleanLabels(input.labels) : [];
+	const user = await canPost(c);
 	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", labels);
 	announceIssue(c, row, issue, "opened", user);
 	return c.json({ issue: toIssue(issue, true, canWrite(user, row)) }, 201);
@@ -1119,10 +1132,17 @@ repo.get("/issues/:number", async (c) => {
 	const p = c.var.principal;
 	const owner = canWrite(p, row);
 	const me = viewerId(p);
-	return c.json({
-		issue: toIssue(issue, owner || (me !== null && me === issue.authorId), owner),
-		comments: await listComments(db(c.env), issue.id, { id: me, owner }),
-	});
+	const { comments, earlier } = await listComments(db(c.env), issue.id, { id: me, owner });
+	return c.json({ issue: toIssue(issue, owner || (me !== null && me === issue.authorId), owner), comments, earlier });
+});
+
+// Earlier comments, a page at a time: ?before=<comment id>.
+repo.get("/issues/:number/comments", async (c) => {
+	const row = userRepo(c);
+	const issue = await loadIssue(c);
+	const before = c.req.query("before");
+	if (!before) throw new HttpError(400, "INVALID_INPUT", "before is required");
+	return c.json(await listComments(db(c.env), issue.id, { id: viewerId(c.var.principal), owner: canWrite(c.var.principal, row) }, before));
 });
 
 repo.patch("/issues/:number", async (c) => {
@@ -1144,17 +1164,30 @@ repo.patch("/issues/:number", async (c) => {
 	return c.json({ issue: toIssue(updated, true, owner) });
 });
 
+// A comment, optionally closing or reopening the issue in the same request ("Close with comment").
 repo.post("/issues/:number/comments", async (c) => {
 	const row = userRepo(c);
-	const user = await canPost(c);
+	requireUser(c);
 	const issue = await loadIssue(c);
-	const input = await body<{ body?: string }>(c);
+	const input = await body<{ body?: string; state?: IssueState }>(c);
 	const text = typeof input.body === "string" ? input.body.trim() : "";
 	if (!text) throw new HttpError(400, "INVALID_INPUT", "A comment needs some text");
 	if (text.length > MAX_ISSUE_BODY) throw new HttpError(400, "INVALID_INPUT", `Comments are up to ${MAX_ISSUE_BODY / 1024} KB`);
-	const comment = await addComment(db(c.env), issue, user.id, text, { id: user.id, owner: canWrite(user, row) });
+	if (input.state !== undefined && input.state !== "open" && input.state !== "closed") throw new HttpError(400, "INVALID_INPUT", "state is open or closed");
+	const owner = canWrite(c.var.principal, row);
+	const changing = input.state !== undefined && input.state !== issue.state;
+	if (changing && !owner && c.var.principal.kind === "user" && c.var.principal.id !== issue.authorId) {
+		throw new HttpError(403, "FORBIDDEN", "Only the issue's author and the repository's owner can close or reopen it");
+	}
+	const user = await canPost(c);
+	const comment = await addComment(db(c.env), issue, user.id, text, { id: user.id, owner });
 	announceIssue(c, row, issue, "commented", user, { comment: { id: comment.id, body: text.slice(0, 2000) } });
-	return c.json({ comment }, 201);
+	let updated = issue;
+	if (changing) {
+		updated = await updateIssue(db(c.env), issue, { state: input.state, by: user.id });
+		announceIssue(c, row, updated, input.state === "closed" ? "closed" : "reopened", user);
+	}
+	return c.json({ comment, issue: toIssue(updated, true, owner) }, 201);
 });
 
 repo.patch("/issues/:number/comments/:id", async (c) => {

@@ -188,10 +188,13 @@ const transferLive = () => new Date(Date.now() - TRANSFER_DAYS * 86400_000).toIS
 
 /** Offers a repository to another user, replacing any earlier offer for it. */
 export async function offerTransfer(database: D1Database, repoId: string, fromUserId: string, toUserId: string): Promise<void> {
-	await database
-		.prepare(`insert or replace into "repo_transfer" ("repoId", "fromUserId", "toUserId", "createdAt") values (?, ?, ?, ?)`)
-		.bind(repoId, fromUserId, toUserId, new Date().toISOString())
-		.run();
+	await database.batch([
+		// Expired offers are only ever filtered out; clear them away as new ones are made.
+		database.prepare(`delete from "repo_transfer" where "createdAt" <= ?`).bind(transferLive()),
+		database
+			.prepare(`insert or replace into "repo_transfer" ("repoId", "fromUserId", "toUserId", "createdAt") values (?, ?, ?, ?)`)
+			.bind(repoId, fromUserId, toUserId, new Date().toISOString()),
+	]);
 }
 
 /** The live offer for a repository, if there is one. */
@@ -209,8 +212,11 @@ export async function incomingTransfers(database: D1Database, userId: string): P
 	return results.map(toTransfer);
 }
 
-export async function cancelTransfer(database: D1Database, repoId: string): Promise<boolean> {
-	const result = await database.prepare(`delete from "repo_transfer" where "repoId" = ?`).bind(repoId).run();
+/** Withdraws the offer for a repository; with `toUserId`, only if it's still the one made to that user (declining). */
+export async function cancelTransfer(database: D1Database, repoId: string, toUserId?: string): Promise<boolean> {
+	const result = toUserId
+		? await database.prepare(`delete from "repo_transfer" where "repoId" = ? and "toUserId" = ?`).bind(repoId, toUserId).run()
+		: await database.prepare(`delete from "repo_transfer" where "repoId" = ?`).bind(repoId).run();
 	return result.meta.changes > 0;
 }
 
@@ -221,7 +227,7 @@ export async function cancelTransfer(database: D1Database, repoId: string): Prom
  */
 export async function completeTransfer(
 	database: D1Database,
-	transfer: { id: string; fromUserId: string },
+	transfer: { id: string; fromUserId: string; createdAt: string },
 	to: { id: string; username: string },
 	name: string,
 	limits: { maxRepos: number; maxBytes: number },
@@ -234,17 +240,26 @@ export async function completeTransfer(
 			.prepare(
 				`update "repo" set "ownerId" = ?1, "owner" = ?2, "name" = ?3
 				 where "id" = ?4 and "ownerId" = ?5
+				 and exists (select 1 from "repo_transfer" where "repoId" = ?4 and "toUserId" = ?1 and "fromUserId" = ?5 and "createdAt" = ?8 and "createdAt" > ?9)
 				 and (select count(*) from "repo" where "ownerId" = ?1) < ?6
 				 and (select coalesce(sum("bytes"), 0) from "repo" where "ownerId" = ?1) + "bytes" <= ?7`,
 			)
-			.bind(to.id, to.username, name, transfer.id, transfer.fromUserId, limits.maxRepos, limits.maxBytes)
+			// The exact offer this user saw, still live: a replaced, cancelled or expired one doesn't count.
+			.bind(to.id, to.username, name, transfer.id, transfer.fromUserId, limits.maxRepos, limits.maxBytes, transfer.createdAt, transferLive())
 			.run();
 		changed = result.meta.changes;
 	} catch (err) {
 		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", `You already have a repository called ${name}; pick another name`);
 		throw err;
 	}
-	if (changed === 0) throw new HttpError(403, "QUOTA_EXCEEDED", "You don't have room for this repository: you're at your repository count or storage quota.");
+	if (changed === 0) {
+		const live = await database
+			.prepare(`select 1 from "repo_transfer" where "repoId" = ? and "toUserId" = ? and "createdAt" = ? and "createdAt" > ?`)
+			.bind(transfer.id, to.id, transfer.createdAt, transferLive())
+			.first();
+		if (!live) throw new HttpError(409, "TRANSFER_STALE", "That offer was withdrawn or replaced");
+		throw new HttpError(403, "QUOTA_EXCEEDED", "You don't have room for this repository: you're at your repository count or storage quota.");
+	}
 	const now = new Date().toISOString();
 	await database.batch([
 		database.prepare(`delete from "repo_redirect" where "owner" = ? and "name" = ?`).bind(to.username, name),
@@ -282,6 +297,9 @@ export async function insertRepo(database: D1Database, row: RepoRow, maxRepos: n
 	if (!inserted) {
 		throw new HttpError(403, "QUOTA_EXCEEDED", `That would take you past ${maxRepos} repositories or your storage quota. Delete a repository to make room.`);
 	}
+	// A real repository now has this name, so an old redirect under it is gone for good (it would come
+	// back to life if this one were deleted).
+	await database.prepare(`delete from "repo_redirect" where "owner" = ? and "name" = ?`).bind(row.owner, row.name).run();
 }
 
 /** Sets a repository's recorded size (after an import is measured). */
@@ -725,9 +743,29 @@ interface CommentRow {
 
 const COMMENT = `select k.*, u."username" as "author" from "issue_comment" k left join "user" u on u."id" = k."authorId"`;
 
-export async function listComments(database: D1Database, issueId: string, viewer: { id: string | null; owner: boolean }): Promise<IssueComment[]> {
-	const { results } = await database.prepare(`${COMMENT} where k."issueId" = ? order by k."createdAt" limit 500`).bind(issueId).all<CommentRow>();
-	return results.map((r) => toComment(r, viewer));
+export const COMMENT_PAGE = 100;
+
+/**
+ * The newest page of an issue's comments (or the page before comment `before`), oldest first, and
+ * whether there are earlier ones.
+ */
+export async function listComments(
+	database: D1Database,
+	issueId: string,
+	viewer: { id: string | null; owner: boolean },
+	before?: string,
+): Promise<{ comments: IssueComment[]; earlier: boolean }> {
+	const cursor = before ? await database.prepare(`select "createdAt", "id" from "issue_comment" where "id" = ? and "issueId" = ?`).bind(before, issueId).first<{ createdAt: string; id: string }>() : null;
+	if (before && !cursor) throw new HttpError(404, "NOT_FOUND", "No such comment");
+	const { results } = await database
+		.prepare(
+			`${COMMENT} where k."issueId" = ?1 ${cursor ? `and (k."createdAt" < ?2 or (k."createdAt" = ?2 and k."id" < ?3))` : ""}
+			 order by k."createdAt" desc, k."id" desc limit ${COMMENT_PAGE + 1}`,
+		)
+		.bind(issueId, ...(cursor ? [cursor.createdAt, cursor.id] : []))
+		.all<CommentRow>();
+	const page = results.slice(0, COMMENT_PAGE).reverse();
+	return { comments: page.map((r) => toComment(r, viewer)), earlier: results.length > COMMENT_PAGE };
 }
 
 function toComment(r: CommentRow, viewer: { id: string | null; owner: boolean }): IssueComment {

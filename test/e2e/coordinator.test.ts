@@ -739,6 +739,7 @@ test("repositories can be renamed, archived and transferred with the recipient's
 	assert.equal((await edit()).status, 403);
 	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ description: "nope" }) })).status, 403);
 	assert.equal((await as(bob)(`${repo}/star`, { method: "PUT" })).status, 200);
+	assert.equal((await as(bob)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "late" }) })).status, 403, "no new issues either");
 	const push = join(root, "renamed-clone");
 	await exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "late"], { cwd: push });
 	const authed = new URL(`${api}/${ada.username}/renamed.git`);

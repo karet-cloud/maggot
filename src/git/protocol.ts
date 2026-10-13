@@ -21,8 +21,14 @@ export interface TagRef {
 	annotated: boolean;
 }
 
-/** Branches and tags, from one ref advertisement. Annotated tags are peeled to their commits. */
-export async function listRefs(remote: RemoteAccess): Promise<{ branches: Map<string, string>; tags: Map<string, TagRef> }> {
+/** Branches holding pushes to protected branches while they're checked (see src/protection.ts); never listed. */
+const INCOMING_BRANCHES = "megit-incoming/";
+
+/**
+ * Branches and tags, from one ref advertisement. Annotated tags are peeled to their commits.
+ * `incoming` includes the holding branches of pushes being checked.
+ */
+export async function listRefs(remote: RemoteAccess, incoming = false): Promise<{ branches: Map<string, string>; tags: Map<string, TagRef> }> {
 	const res = await fetch(`${remote.url}/info/refs?service=git-upload-pack`, { headers: headers(remote) });
 	if (!res.ok) throw new Error(`Listing refs failed: HTTP ${res.status}`);
 	const branches = new Map<string, string>();
@@ -30,7 +36,10 @@ export async function listRefs(remote: RemoteAccess): Promise<{ branches: Map<st
 	for (const line of pktLines(new Uint8Array(await res.arrayBuffer()))) {
 		const [oid, ref] = line.split("\0")[0].trimEnd().split(" ");
 		if (!ref) continue;
-		if (ref.startsWith("refs/heads/")) branches.set(ref.slice("refs/heads/".length), oid);
+		if (ref.startsWith("refs/heads/")) {
+			const name = ref.slice("refs/heads/".length);
+			if (incoming || !name.startsWith(INCOMING_BRANCHES)) branches.set(name, oid);
+		}
 		else if (ref.startsWith("refs/tags/")) {
 			const peeled = ref.endsWith("^{}");
 			const name = ref.slice("refs/tags/".length, peeled ? -3 : undefined);

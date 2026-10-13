@@ -142,6 +142,14 @@ export class Webhooks {
 		return this.get(id);
 	}
 
+	/** Pauses every hook (and drops what they had queued); returns how many were active. */
+	pauseAll(): number {
+		const active = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM hooks WHERE active = 1").one().n;
+		this.sql.exec("UPDATE hooks SET active = 0");
+		this.sql.exec("UPDATE deliveries SET status = 'failed', response = 'Webhook paused', next_at = NULL WHERE status = 'pending'");
+		return active;
+	}
+
 	remove(id: string): void {
 		this.row(id);
 		this.sql.exec("DELETE FROM deliveries WHERE hook_id = ?", id);
