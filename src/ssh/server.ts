@@ -56,6 +56,8 @@ const CHANNEL_WINDOW = 2 * 1024 * 1024;
 const CHANNEL_MAX_PACKET = 32 * 1024;
 const MAX_CHANNELS = 4;
 const MAX_AUTH_ATTEMPTS = 20;
+/** Unparsed input a client may have waiting: every channel's window and then some. */
+const MAX_UNPARSED = (MAX_CHANNELS + 2) * CHANNEL_WINDOW;
 /** Time allowed from connecting to authenticating. */
 const AUTH_TIMEOUT_MS = 30_000;
 
@@ -83,7 +85,10 @@ type Cipher = { key: CryptoKey; iv: Uint8Array };
 /** One SSH connection. Feed it the client's bytes with `receive`; it answers through `send`. */
 export class SshServer<U extends SshUser> {
 	private readonly opts: SshOptions<U>;
+	/** Bytes received but not yet parsed: a partial packet, then whatever arrived since. */
 	private input: Uint8Array = new Uint8Array(0);
+	private arrived: Uint8Array[] = [];
+	private arrivedBytes = 0;
 	private versionSeen = false;
 	private clientVersion = "";
 	/** Incoming bytes are handled one packet at a time, in order. */
@@ -125,7 +130,13 @@ export class SshServer<U extends SshUser> {
 	/** Bytes from the client. */
 	receive(bytes: Uint8Array): void {
 		if (this.closed) return;
-		this.input = this.input.length === 0 ? bytes.slice() : concat([this.input, bytes]);
+		// Joined once per pass of drain(), not per message, so a burst isn't copied over and over.
+		this.arrived.push(bytes.slice());
+		this.arrivedBytes += bytes.length;
+		if (this.arrivedBytes > MAX_UNPARSED) {
+			this.fail(new SshError("Sending faster than the window allows"));
+			return;
+		}
 		this.processing = this.processing.then(() => this.drain()).catch((err) => this.fail(err));
 	}
 
@@ -160,6 +171,11 @@ export class SshServer<U extends SshUser> {
 	// ── Reading packets ──────────────────────────────────────────────────────
 
 	private async drain(): Promise<void> {
+		if (this.arrived.length > 0) {
+			this.input = concat([this.input, ...this.arrived]);
+			this.arrived = [];
+			this.arrivedBytes = 0;
+		}
 		if (!this.versionSeen) {
 			const end = this.input.indexOf(0x0a);
 			if (end < 0) {

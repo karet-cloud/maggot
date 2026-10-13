@@ -770,7 +770,7 @@ test("repositories can be renamed, archived and transferred with the recipient's
 	assert.equal(((await (await as(bob)("/transfers")).json()) as { transfers: unknown[] }).transfers.length, 0);
 });
 
-test("git over SSH: keys, clone, push, permissions and archived repositories", async () => {
+test("git over SSH: keys, clone, push, permissions, branch protection and archived repositories", async () => {
 	const ada = await newUser("ssha");
 	const bob = await newUser("sshb");
 	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
@@ -825,6 +825,18 @@ test("git over SSH: keys, clone, push, permissions and archived repositories", a
 	await git("ada", ["push", "-q", "origin", "--delete", "topic"], join(dir, "clone"));
 	await git("ada", ["fetch", "-q", "origin"], join(dir, "clone"));
 
+	// Branch protection holds over SSH too: a force push is put back, a deletion refused.
+	const sshRepo = `/repos/${ada.username}/over-ssh`;
+	assert.equal((await as(ada)(`${sshRepo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", blockForcePushes: true, blockDeletions: true }) })).status, 200);
+	const protectedHead = (await git("ada", ["rev-parse", "HEAD"], join(dir, "clone"))).stdout.trim();
+	await git("ada", ["reset", "-q", "--hard", "HEAD~1"], join(dir, "clone"));
+	await git("ada", ["commit", "-q", "--allow-empty", "-m", "rewritten"], join(dir, "clone"));
+	await assert.rejects(git("ada", ["push", "-q", "--force", "origin", "master"], join(dir, "clone")), /force pushes aren't allowed/);
+	assert.equal(((await (await as(ada)(sshRepo)).json()) as { project: { head: string } }).project.head, protectedHead);
+	await assert.rejects(git("ada", ["push", "-q", "origin", "--delete", "master"], join(dir, "clone")), /can't be deleted/);
+	await git("ada", ["reset", "-q", "--hard", protectedHead], join(dir, "clone"));
+	assert.equal((await as(ada)(`${sshRepo}/protection?pattern=master`, { method: "DELETE" })).status, 200);
+
 	// Someone else's private repository doesn't exist for them.
 	await assert.rejects(git("bob", ["clone", "-q", remote, join(dir, "bob-clone")]), /not found/);
 
@@ -847,4 +859,131 @@ test("git over SSH: keys, clone, push, permissions and archived repositories", a
 	assert.equal(keys.length, 1);
 	assert.equal((await as(ada)(`/ssh/keys/${keys[0].id}`, { method: "DELETE" })).status, 200);
 	await assert.rejects(git("ada", ["fetch", "-q", "origin"], join(dir, "clone")), /Permission denied/);
+});
+
+test("tags, releases, the commit graph, branch protection over HTTPS, and issues", async () => {
+	const ada = await newUser("tga");
+	const bob = await newUser("tgb");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "tagged", visibility: "public", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/tagged`;
+	const exec = promisify(execFile);
+	const dir = join(root, "tagged");
+	const authed = new URL(`${api}/${ada.username}/tagged.git`);
+	authed.username = ada.username;
+	authed.password = ada.token;
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", authed.toString(), dir]);
+
+	// A feature branch merged back in makes a graph with two lanes.
+	await git("checkout", "-q", "-b", "feature");
+	await git("commit", "-q", "--allow-empty", "-m", "feature work");
+	await git("checkout", "-q", "master");
+	await git("commit", "-q", "--allow-empty", "-m", "mainline work");
+	await git("merge", "-q", "--no-ff", "-m", "Merge feature", "feature");
+	await git("push", "-q", "origin", "master", "feature");
+	await git("tag", "pushed-tag");
+	await git("push", "-q", "origin", "pushed-tag");
+	const graph = (await (await as(null)(`${repo}/graph`)).json()) as { commits: { message: string; parents: string[]; branches: string[]; tags: string[] }[] };
+	assert.equal(graph.commits.length, 4);
+	assert.equal(graph.commits[0].parents.length, 2);
+	assert.deepEqual([graph.commits[0].branches, graph.commits[0].tags], [["master"], ["pushed-tag"]]);
+	assert.ok(graph.commits.some((c) => c.branches.includes("feature")));
+
+	// Tags from the web and from git; a release can make its own tag; downloads work by tag name.
+	assert.equal((await as(bob)(`${repo}/tags`, { method: "POST", body: JSON.stringify({ name: "v0" }) })).status, 403);
+	assert.equal((await as(ada)(`${repo}/tags`, { method: "POST", body: JSON.stringify({ name: "v1.0", target: "feature" }) })).status, 201);
+	assert.equal((await as(ada)(`${repo}/tags`, { method: "POST", body: JSON.stringify({ name: "v1.0" }) })).status, 409);
+	assert.equal((await as(ada)(`${repo}/tags`, { method: "POST", body: JSON.stringify({ name: "bad..name" }) })).status, 400);
+	const release = await as(ada)(`${repo}/releases`, { method: "POST", body: JSON.stringify({ tag: "v2.0", name: "Two", notes: "# Notes", prerelease: true }) });
+	assert.equal(release.status, 201, await release.clone().text());
+	const tags = (await (await as(null)(`${repo}/tags`)).json()) as { tags: { name: string; commit: string }[] };
+	assert.deepEqual(tags.tags.map((t) => t.name).sort(), ["pushed-tag", "v1.0", "v2.0"]);
+	const releases = (await (await as(null)(`${repo}/releases`)).json()) as { releases: { id: string; tag: string; prerelease: boolean; commit: string | null }[] };
+	assert.deepEqual(releases.releases.map((r) => [r.tag, r.prerelease, Boolean(r.commit)]), [["v2.0", true, true]]);
+	const zip = await as(null)(`${repo}/archive?format=zip&ref=v1.0`);
+	assert.equal(zip.status, 200);
+	assert.match(zip.headers.get("content-disposition") ?? "", /tagged-v1\.0\.zip/);
+	await zip.arrayBuffer();
+	await git("fetch", "-q", "--tags", "origin");
+	assert.equal((await git("rev-parse", "v1.0^{commit}")).stdout.trim(), (await git("rev-parse", "feature")).stdout.trim());
+	assert.equal((await as(ada)(`${repo}/releases/${releases.releases[0].id}?deleteTag`, { method: "DELETE" })).status, 200);
+	assert.ok(!((await (await as(null)(`${repo}/tags`)).json()) as { tags: { name: string }[] }).tags.some((t) => t.name === "v2.0"));
+
+	// Branch protection: force pushes are put back, deletion and direct pushes are refused, for git and the web.
+	assert.equal((await as(bob)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", blockForcePushes: true }) })).status, 403);
+	assert.equal((await as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", blockForcePushes: true, blockDeletions: true }) })).status, 200);
+	assert.equal((await as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "release/*", requireMergeQueue: true }) })).status, 200);
+	const before = (await git("rev-parse", "master")).stdout.trim();
+	await git("reset", "-q", "--hard", "HEAD~1");
+	await git("commit", "-q", "--allow-empty", "-m", "rewritten");
+	await assert.rejects(git("push", "-q", "--force", "origin", "master"), /force pushes aren't allowed/);
+	assert.equal(((await (await as(null)(repo)).json()) as { project: { head: string } }).project.head, before, "the branch was put back");
+	await git("reset", "-q", "--hard", before);
+	await git("commit", "-q", "--allow-empty", "-m", "fast-forward");
+	await git("push", "-q", "origin", "master");
+	await assert.rejects(git("push", "-q", "origin", "--delete", "master"), /can't be deleted/);
+	await git("push", "-q", "origin", "master:feature-2");
+	await assert.rejects(git("push", "-q", "origin", "master:release/1"), /merge queue/);
+	assert.equal((await as(ada)(`${repo}/branches/master`, { method: "DELETE" })).status, 400, "the default branch is never deletable");
+	const head = ((await (await as(ada)(repo)).json()) as { project: { head: string } }).project.head;
+	assert.equal(
+		(await as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", baseCommit: head, newBranch: "release/2", message: "m", files: [{ path: "x", content: "x" }] }) })).status,
+		403,
+	);
+	const rules = (await (await as(null)(`${repo}/protection`)).json()) as { rules: { pattern: string }[] };
+	assert.deepEqual(rules.rules.map((r) => r.pattern), ["master", "release/*"]);
+
+	// Issues: anyone signed in opens and comments; the owner labels; authors and the owner close.
+	assert.equal((await as(null)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "anon" }) })).status, 401);
+	const opened = await as(bob)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "It breaks", body: "Steps: **run it**", labels: ["bug"] }) });
+	assert.equal(opened.status, 201, await opened.clone().text());
+	const issue = ((await opened.json()) as { issue: { number: number; labels: string[]; canLabel: boolean } }).issue;
+	assert.deepEqual([issue.number, issue.labels, issue.canLabel], [1, [], false], "only the owner labels");
+	assert.equal((await as(bob)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "" }) })).status, 400);
+	const second = ((await (await as(ada)(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: "Docs", labels: ["docs"] }) })).json()) as { issue: { number: number; labels: string[] } }).issue;
+	assert.deepEqual([second.number, second.labels], [2, ["docs"]]);
+	assert.equal((await as(ada)(`${repo}/issues/1`, { method: "PATCH", body: JSON.stringify({ labels: ["bug", "p1"] }) })).status, 200);
+	assert.equal((await as(bob)(`${repo}/issues/2`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) })).status, 403, "not bob's issue");
+	const comment = await as(ada)(`${repo}/issues/1/comments`, { method: "POST", body: JSON.stringify({ body: "Thanks, looking." }) });
+	assert.equal(comment.status, 201);
+	const { comment: posted } = (await comment.json()) as { comment: { id: string } };
+	assert.equal((await as(bob)(`${repo}/issues/1/comments/${posted.id}`, { method: "PATCH", body: JSON.stringify({ body: "edited" }) })).status, 403);
+	assert.equal((await as(bob)(`${repo}/issues/1`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) })).status, 200, "authors close their own");
+	const detail = (await (await as(null)(`${repo}/issues/1`)).json()) as { issue: { state: string; closedBy: string; labels: string[]; comments: number }; comments: { body: string }[] };
+	assert.deepEqual([detail.issue.state, detail.issue.closedBy, detail.issue.labels, detail.issue.comments], ["closed", bob.username, ["bug", "p1"], 1]);
+	const open = (await (await as(null)(`${repo}/issues`)).json()) as { issues: { number: number }[]; open: number; closed: number };
+	assert.deepEqual([open.issues.map((i) => i.number), open.open, open.closed], [[2], 1, 1]);
+	const labelled = (await (await as(null)(`${repo}/issues?state=all&label=p1`)).json()) as { issues: { number: number }[] };
+	assert.deepEqual(labelled.issues.map((i) => i.number), [1]);
+	const searched = (await (await as(null)(`${repo}/issues?state=all&q=run%20it`)).json()) as { issues: { number: number }[] };
+	assert.deepEqual(searched.issues.map((i) => i.number), [1]);
+	const listing = (await (await as(null)(repo)).json()) as { repo: { openIssues: number } };
+	assert.equal(listing.repo.openIssues, 1);
+	// The owner hears about bob's issue; bob hears about the comment on his.
+	const adaInbox = await until(async () => {
+		const n = (await (await as(ada)("/notifications")).json()) as { notifications: { kind: string; url: string }[] };
+		return n.notifications.some((x) => x.kind === "issue") ? n : undefined;
+	});
+	assert.ok(adaInbox.notifications.some((x) => x.url === `/${ada.username}/tagged/issues/1`));
+	await until(async () => {
+		const n = (await (await as(bob)("/notifications")).json()) as { notifications: { kind: string }[] };
+		return n.notifications.some((x) => x.kind === "issue") ? true : undefined;
+	});
+	// A commit on the default branch that says it fixes an issue closes it.
+	await git("commit", "-q", "--allow-empty", "-m", "Write the docs\n\nFixes #2");
+	await git("push", "-q", "origin", "master");
+	const fixed = await until(async () => {
+		const i = ((await (await as(null)(`${repo}/issues/2`)).json()) as { issue: { state: string; closedByCommit: string | null } }).issue;
+		return i.state === "closed" ? i : undefined;
+	});
+	assert.equal(fixed.closedByCommit, (await git("rev-parse", "HEAD")).stdout.trim());
+	const events = (await (await as(null)(`${repo}/events`)).json()) as { events: { type: string }[] };
+	for (const type of ["tag.created", "release.published", "issue.opened", "issue.commented", "issue.closed"]) {
+		assert.ok(events.events.some((e) => e.type === type), `${type} is in the feed`);
+	}
 });

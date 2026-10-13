@@ -70,6 +70,18 @@ export function useProjectLive(project: string): Live {
 					invalidate(keys.code(project));
 					invalidate(keys.branches(project));
 					invalidate(["project", project, "search"]);
+					invalidate(keys.graph(project));
+					invalidate(keys.tags(project));
+				}
+				if (event.type.startsWith("tag.") || event.type === "release.published") {
+					invalidate(keys.tags(project));
+					invalidate(keys.releases(project));
+					invalidate(keys.graph(project));
+				}
+				if (event.type.startsWith("issue.")) {
+					invalidate(keys.issues(project));
+					const number = (event.data.issue as { number?: number } | undefined)?.number;
+					if (number) invalidate(keys.issue(project, number));
 				}
 			};
 			socket.onclose = () => {

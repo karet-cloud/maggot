@@ -36,6 +36,9 @@ function Code() {
 	const shown = file ?? readme?.path;
 	// Archived repositories are read-only, even for their owner.
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
+	// Files are edited on branches, not on tags or commits.
+	const tags = useQuery({ queryKey: keys.tags(project), queryFn: () => api.tags(project), enabled: Boolean(ref) && writable, staleTime: 60_000 });
+	const onBranch = isBranch(ref) && !(ref && tags.data?.some((t) => t.name === ref));
 
 	// Links from READMEs guess whether a path is a file or a directory; correct the guess either way.
 	const listedAsDir = file !== undefined && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
@@ -82,7 +85,7 @@ function Code() {
 							</Link>
 						</span>
 						<GoToFile project={project} refName={ref} />
-						{writable && isBranch(ref) && (
+						{writable && onBranch && (
 							<Link
 								to="/$owner/$repo/edit"
 								params={repoParams(project)}
@@ -135,7 +138,7 @@ function Code() {
 						refName={ref}
 						path={shown}
 						commit={tree.data?.commit ?? null}
-						editable={writable && isBranch(ref)}
+						editable={writable && onBranch}
 						branch={ref ?? info.data?.defaultBranch}
 					/>
 				) : (

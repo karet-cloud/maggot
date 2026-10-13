@@ -110,7 +110,14 @@ export type EventType =
 	| "task.conflict"
 	| "task.failed"
 	| "task.abandoned"
-	| "main.advanced";
+	| "main.advanced"
+	| "tag.created"
+	| "tag.deleted"
+	| "release.published"
+	| "issue.opened"
+	| "issue.closed"
+	| "issue.reopened"
+	| "issue.commented";
 
 export interface ProjectEvent {
 	seq: number;
@@ -241,6 +248,7 @@ export interface RepoInfo {
 	sshUrl: string;
 	/** When it was archived (made read-only); null if it's live. */
 	archivedAt: string | null;
+	openIssues: number;
 }
 
 /** A pending offer to hand a repository to another user, who has to accept it. */
@@ -312,7 +320,7 @@ export interface CodeSearch {
 	results: { path: string; matches: number; lines: { line: number; text: string }[] }[];
 }
 
-export type WebhookEvent = "push" | "task" | "merge";
+export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues";
 
 export interface Webhook {
 	id: string;
@@ -341,7 +349,7 @@ export interface WebhookDelivery {
 	nextAt: string | null;
 }
 
-export type NotificationKind = "star" | "fork" | "transfer" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
+export type NotificationKind = "star" | "fork" | "transfer" | "issue" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
 
 export interface Notification {
 	id: string;
@@ -354,4 +362,99 @@ export interface Notification {
 	actor: string | null;
 	createdAt: string;
 	readAt: string | null;
+}
+
+// ── Tags and releases ────────────────────────────────────────────────────────
+
+export interface Tag {
+	name: string;
+	/** The commit the tag names. */
+	commit: string;
+	annotated: boolean;
+	/** The commit's first line, author and date; null if it couldn't be read. */
+	summary: Pick<Commit, "message" | "author" | "committedAt"> | null;
+}
+
+export interface Release {
+	id: string;
+	tag: string;
+	name: string;
+	/** Markdown. */
+	notes: string;
+	prerelease: boolean;
+	author: string | null;
+	createdAt: string;
+	updatedAt: string;
+	/** The commit the tag names now; null if the tag has since been deleted. */
+	commit: string | null;
+}
+
+// ── Commit graph ─────────────────────────────────────────────────────────────
+
+export interface GraphCommit extends Commit {
+	/** Branches whose head is this commit. */
+	branches: string[];
+	tags: string[];
+}
+
+/** Recent commits across every branch, newest first, with their parents, for drawing the graph. */
+export interface Graph {
+	commits: GraphCommit[];
+	/** Older history exists beyond what's listed. */
+	truncated: boolean;
+}
+
+// ── Branch protection ────────────────────────────────────────────────────────
+
+export interface BranchRule {
+	/** A branch name, or a pattern: `*` matches within one path segment, `**` across them. */
+	pattern: string;
+	blockDeletions: boolean;
+	/** Pushes may only fast-forward. */
+	blockForcePushes: boolean;
+	/** No pushes or web commits at all: changes land through the merge queue (agent tasks). */
+	requireMergeQueue: boolean;
+	createdAt: string;
+}
+
+// ── Issues ───────────────────────────────────────────────────────────────────
+
+export type IssueState = "open" | "closed";
+
+export interface IssueSummary {
+	number: number;
+	title: string;
+	state: IssueState;
+	labels: string[];
+	author: string | null;
+	comments: number;
+	createdAt: string;
+	updatedAt: string;
+	closedAt: string | null;
+}
+
+export interface Issue extends IssueSummary {
+	/** Markdown. */
+	body: string;
+	closedBy: string | null;
+	/** The commit that closed it with "fixes #n", if one did. */
+	closedByCommit: string | null;
+	/** Whether the caller may edit, close and label it. */
+	canEdit: boolean;
+	canLabel: boolean;
+}
+
+export interface IssueComment {
+	id: string;
+	author: string | null;
+	body: string;
+	createdAt: string;
+	updatedAt: string;
+	canEdit: boolean;
+}
+
+export interface IssueList {
+	issues: IssueSummary[];
+	open: number;
+	closed: number;
 }

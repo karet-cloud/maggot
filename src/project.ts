@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import {
 	ACTIVE_STATUSES,
 	TASK_STATUSES,
+	type BranchRule,
 	type Branches,
 	type CodeSearch,
 	type Commit,
@@ -11,6 +12,10 @@ import {
 	type Diff,
 	type EventType,
 	type GitCredentials,
+	type Graph,
+	type GraphCommit,
+	type Release,
+	type Tag,
 	type Project,
 	type ProjectEvent,
 	type QueueEntry,
@@ -22,11 +27,12 @@ import {
 	type WebhookDelivery,
 	type WebhookEvent,
 } from "./api.ts";
-import { notify } from "./db.ts";
+import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
-import { diffTrees, mapLimit, walkToMainline, type ObjectReader } from "./git/diff.ts";
+import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
-import { deleteBranch, listBranches, RefUpdateRejected } from "./git/protocol.ts";
+import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef } from "./git/protocol.ts";
+import { protectionFor, validPattern } from "./protection.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
@@ -179,6 +185,23 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				task_id TEXT,
 				data TEXT NOT NULL
 			);
+			CREATE TABLE IF NOT EXISTS releases (
+				id TEXT PRIMARY KEY,
+				tag TEXT NOT NULL UNIQUE,
+				name TEXT NOT NULL,
+				notes TEXT NOT NULL,
+				prerelease INTEGER NOT NULL DEFAULT 0,
+				author TEXT,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS branch_rules (
+				pattern TEXT PRIMARY KEY,
+				block_deletions INTEGER NOT NULL,
+				block_force_pushes INTEGER NOT NULL,
+				require_merge_queue INTEGER NOT NULL,
+				created_at TEXT NOT NULL
+			);
 		`);
 		// Columns added after the first schema; ALTER fails harmlessly when they already exist.
 		try {
@@ -281,18 +304,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Called after a push through the Git proxy: records the new head so live views refresh. */
 	async pushed(): Promise<void> {
 		const meta = this.meta();
-		// The proxy can't see which refs a push touched, so compare every branch with what was seen last.
-		const now = Object.fromEntries(await listBranches(await this.baseAccess(meta)));
+		// The proxy can't see which refs a push touched, so compare every branch and tag with what was seen last.
+		const listed = await listRefs(await this.baseAccess(meta));
+		const now = Object.fromEntries(listed.branches);
 		const before = this.knownRefs(meta);
 		const refs = [...new Set([...Object.keys(before), ...Object.keys(now)])]
 			.filter((branch) => before[branch] !== now[branch])
 			.map((branch) => ({ branch, from: before[branch] ?? null, to: now[branch] ?? null }));
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(now));
+		this.recordTags(Object.fromEntries([...listed.tags].map(([name, t]) => [name, t.commit])), true);
 		const head = now[meta.defaultBranch] ?? null;
 		if (head) this.hasCommits = true;
 		const main = refs.find((r) => r.branch === meta.defaultBranch);
 		this.emit("repo.pushed", null, { branch: meta.defaultBranch, from: main ? main.from : head, to: head, moved: Boolean(main), refs });
 		if (main) await this.requestIndex();
+		if (main?.to) this.closeReferencedIssues(main.from, main.to);
 	}
 
 	/** Branch heads as last seen (by a push or a merge). Older coordinators only kept the default branch's. */
@@ -302,6 +328,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (refs) return JSON.parse(refs.value);
 		const head = rows.find((r) => r.key === "pushedHead")?.value;
 		return head ? { [meta.defaultBranch]: head } : {};
+	}
+
+	/** Tag name to commit, as last seen; how tag names typed into a URL resolve. */
+	private knownTags(): Record<string, string> {
+		const row = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'tags'").toArray()[0];
+		return row ? JSON.parse(row.value) : {};
+	}
+
+	/** Records the tags; with `announce`, tags that appeared or went away become events (and push webhooks). */
+	private recordTags(now: Record<string, string>, announce: boolean) {
+		const before = this.knownTags();
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('tags', ?)", JSON.stringify(now));
+		if (!announce) return;
+		for (const name of Object.keys(now)) if (before[name] !== now[name]) this.emit("tag.created", null, { tag: name, commit: now[name], from: before[name] ?? null });
+		for (const name of Object.keys(before)) if (!(name in now)) this.emit("tag.deleted", null, { tag: name, commit: before[name] });
 	}
 
 	private recordRef(meta: Meta, branch: string, oid: string) {
@@ -617,6 +658,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const meta = this.meta();
 		this.assertWritable();
 		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
+		const rule = protectionFor(this.branchRules(), name);
+		if (rule.blockDeletions || rule.requireMergeQueue) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
 		const access = await this.baseAccess(meta);
 		const head = (await listBranches(access)).get(name);
 		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
@@ -641,6 +684,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			throw new HttpError(409, "BRANCH_MOVED", `${input.branch} has new commits since you started editing; reload to see them`);
 		}
 		const target = input.newBranch ?? input.branch;
+		if (protectionFor(this.branchRules(), target).requireMergeQueue) {
+			throw new HttpError(403, "PROTECTED_BRANCH", `${target} is a protected branch: changes to it go through the merge queue. Commit to a new branch instead.`);
+		}
 		if (input.newBranch !== undefined) {
 			if (!validBranchName(input.newBranch)) throw new HttpError(400, "INVALID_INPUT", `${input.newBranch} isn't a valid branch name`);
 			if (refs.has(input.newBranch)) throw new HttpError(409, "ALREADY_EXISTS", `Branch ${input.newBranch} already exists`);
@@ -1091,6 +1137,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 						fastForward: outcome.fastForward,
 						changedFiles: outcome.changedFiles,
 					});
+					this.closeReferencedIssues(baseHead, outcome.oid);
 					this.sql.exec("INSERT OR IGNORE INTO cleanup (repo) VALUES (?)", row.repo);
 					return;
 				}
@@ -1119,6 +1166,263 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private fail(id: string, code: string, message: string) {
 		this.sql.exec("UPDATE tasks SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", message, new Date().toISOString(), id);
 		this.emit("task.failed", id, { code, message });
+	}
+
+	// ── Tags and releases ────────────────────────────────────────────────────
+
+	/** Every tag with its commit's first line, newest commit first (up to 300). */
+	async tags(): Promise<Tag[]> {
+		const meta = this.meta();
+		const { tags } = await listRefs(await this.baseAccess(meta));
+		this.recordTags(Object.fromEntries([...tags].map(([name, t]) => [name, t.commit])), false);
+		using repo = await this.store.get(meta.name);
+		const listed = await mapLimit([...tags].slice(0, 300), 8, async ([name, t]) => {
+			const commit = await repo.readCommit(t.commit).catch(() => null);
+			return {
+				name,
+				commit: t.commit,
+				annotated: t.annotated,
+				summary: commit ? { message: commit.message.split("\n")[0], author: commit.author, committedAt: commit.committedAt } : null,
+			};
+		});
+		return listed.sort((a, b) => (b.summary?.committedAt ?? 0) - (a.summary?.committedAt ?? 0) || b.name.localeCompare(a.name));
+	}
+
+	/** Creates a lightweight tag at `target` (a branch, tag or commit; the default branch if absent). */
+	async createTag(name: string, target?: string): Promise<Tag> {
+		const meta = this.meta();
+		this.assertWritable();
+		if (!validBranchName(name)) throw new HttpError(400, "INVALID_INPUT", `${name} isn't a valid tag name`);
+		const access = await this.baseAccess(meta);
+		const { tags } = await listRefs(access);
+		if (tags.has(name)) throw new HttpError(409, "ALREADY_EXISTS", `Tag ${name} already exists`);
+		using repo = await this.store.get(meta.name);
+		const { ref } = this.resolveRef(target?.trim() || meta.defaultBranch);
+		const commit = await resolveCommit(repo, ref);
+		try {
+			await setRef(access, `refs/tags/${name}`, null, commit.hash);
+		} catch (err) {
+			if (err instanceof RefUpdateRejected) throw new HttpError(409, "ALREADY_EXISTS", `Tag ${name} already exists`);
+			throw err;
+		}
+		this.recordTags({ ...this.knownTags(), [name]: commit.hash }, true);
+		return { name, commit: commit.hash, annotated: false, summary: { message: commit.message.split("\n")[0], author: commit.author, committedAt: commit.committedAt } };
+	}
+
+	async deleteTag(name: string): Promise<void> {
+		const meta = this.meta();
+		this.assertWritable();
+		const access = await this.baseAccess(meta);
+		const tag = (await listRefs(access)).tags.get(name);
+		if (!tag) throw new HttpError(404, "NOT_FOUND", `Tag ${name} not found`);
+		await setRef(access, `refs/tags/${name}`, tag.oid, null);
+		const { [name]: _gone, ...rest } = this.knownTags();
+		this.recordTags(rest, true);
+	}
+
+	async releases(): Promise<Release[]> {
+		const meta = this.meta();
+		// Fresh, so a release shows its tag's current commit (and tags pushed before megit tracked them).
+		const listed = (await listRefs(await this.baseAccess(meta))).tags;
+		const tags = Object.fromEntries([...listed].map(([name, t]) => [name, t.commit]));
+		this.recordTags(tags, false);
+		return this.sql
+			.exec<ReleaseRow>("SELECT * FROM releases ORDER BY created_at DESC")
+			.toArray()
+			.map((r) => toRelease(r, tags[r.tag] ?? null));
+	}
+
+	/** Publishes a release of `tag`, creating the tag at `target` first if it doesn't exist. */
+	async createRelease(input: { tag: string; target?: string; name?: string; notes?: string; prerelease?: boolean; author: string | null }): Promise<Release> {
+		const meta = this.meta();
+		this.assertWritable();
+		const tag = input.tag.trim();
+		if (this.sql.exec("SELECT 1 FROM releases WHERE tag = ?", tag).toArray().length > 0) {
+			throw new HttpError(409, "ALREADY_EXISTS", `There's already a release for ${tag}`);
+		}
+		const existing = (await listRefs(await this.baseAccess(meta))).tags.get(tag);
+		const commit = existing ? existing.commit : (await this.createTag(tag, input.target)).commit;
+		const now = new Date().toISOString();
+		const row: ReleaseRow = {
+			id: crypto.randomUUID(),
+			tag,
+			name: input.name?.trim().slice(0, 200) || tag,
+			notes: (input.notes ?? "").slice(0, 100_000),
+			prerelease: input.prerelease ? 1 : 0,
+			author: input.author,
+			created_at: now,
+			updated_at: now,
+		};
+		this.sql.exec(
+			"INSERT INTO releases (id, tag, name, notes, prerelease, author, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			row.id, row.tag, row.name, row.notes, row.prerelease, row.author, row.created_at, row.updated_at,
+		);
+		const release = toRelease(row, commit);
+		this.emit("release.published", null, { id: release.id, tag, name: release.name, prerelease: release.prerelease, commit, author: input.author });
+		return release;
+	}
+
+	async updateRelease(id: string, patch: { name?: string; notes?: string; prerelease?: boolean }): Promise<Release> {
+		this.meta();
+		this.assertWritable();
+		const row = this.sql.exec<ReleaseRow>("SELECT * FROM releases WHERE id = ?", id).toArray()[0];
+		if (!row) throw new HttpError(404, "NOT_FOUND", "No such release");
+		const next = {
+			name: patch.name === undefined ? row.name : patch.name.trim().slice(0, 200) || row.tag,
+			notes: patch.notes === undefined ? row.notes : patch.notes.slice(0, 100_000),
+			prerelease: patch.prerelease === undefined ? row.prerelease : patch.prerelease ? 1 : 0,
+		};
+		const now = new Date().toISOString();
+		this.sql.exec("UPDATE releases SET name = ?, notes = ?, prerelease = ?, updated_at = ? WHERE id = ?", next.name, next.notes, next.prerelease, now, id);
+		return toRelease({ ...row, ...next, updated_at: now }, this.knownTags()[row.tag] ?? null);
+	}
+
+	/** Deletes a release; the tag stays unless `deleteTag`. */
+	async deleteRelease(id: string, deleteTag = false): Promise<void> {
+		this.meta();
+		this.assertWritable();
+		const row = this.sql.exec<ReleaseRow>("SELECT * FROM releases WHERE id = ?", id).toArray()[0];
+		if (!row) throw new HttpError(404, "NOT_FOUND", "No such release");
+		if (deleteTag && row.tag in this.knownTags()) await this.deleteTag(row.tag);
+		this.sql.exec("DELETE FROM releases WHERE id = ?", id);
+	}
+
+	// ── Commit graph ─────────────────────────────────────────────────────────
+
+	/**
+	 * Recent commits across every branch, newest first, for drawing the graph. Each branch's
+	 * first-parent history comes from one log request; merged-in history whose branch is gone is
+	 * filled in from the merges' other parents, a few rounds deep.
+	 */
+	async graph(limit = 150): Promise<Graph> {
+		const meta = this.meta();
+		const max = Math.max(10, Math.min(limit, 400));
+		const access = await this.baseAccess(meta);
+		const { branches, tags } = await listRefs(access);
+		using repo = await this.store.get(meta.name);
+		const commits = new Map<string, Commit>();
+		const add = (list: ArtifactsCommitMetadata[]) => {
+			for (const c of list) {
+				if (!commits.has(c.hash)) commits.set(c.hash, { hash: c.hash, message: c.message, author: c.author, parents: c.parents, committedAt: c.committedAt });
+			}
+		};
+		// The default branch first, then the others, most recently moved first, up to 30.
+		const heads = [...branches].sort(([a], [b]) => Number(b === meta.defaultBranch) - Number(a === meta.defaultBranch)).slice(0, 30);
+		for (const list of await mapLimit(heads, 4, ([, head]) => repo.log({ ref: head, limit: max }).catch(() => []))) add(list);
+		// Second parents of merges whose history isn't listed yet: follow them for a few rounds.
+		for (let round = 0; round < 3; round++) {
+			const newest = [...commits.values()].sort((a, b) => b.committedAt - a.committedAt).slice(0, max);
+			const cutoff = newest.at(-1)?.committedAt ?? 0;
+			const missing = [...new Set(newest.flatMap((c) => c.parents.slice(1)).filter((p) => !commits.has(p)))].slice(0, 10);
+			if (missing.length === 0) break;
+			for (const list of await mapLimit(missing, 4, (hash) => repo.log({ ref: hash, limit: 50 }).catch(() => []))) {
+				add(list.filter((c) => c.committedAt >= cutoff));
+			}
+		}
+		const sorted = topoOrder([...commits.values()]);
+		const labels = new Map<string, { branches: string[]; tags: string[] }>();
+		const label = (hash: string) => labels.get(hash) ?? labels.set(hash, { branches: [], tags: [] }).get(hash)!;
+		for (const [name, head] of branches) label(head).branches.push(name);
+		for (const [name, t] of tags) label(t.commit).tags.push(name);
+		const shown: GraphCommit[] = sorted.slice(0, max).map((c) => ({ ...c, branches: labels.get(c.hash)?.branches ?? [], tags: labels.get(c.hash)?.tags ?? [] }));
+		// Older history exists unless every listed commit was found and a root commit is among them.
+		return { commits: shown, truncated: sorted.length > max || !shown.some((c) => c.parents.length === 0) };
+	}
+
+	// ── Branch protection ────────────────────────────────────────────────────
+
+	branchRules(): BranchRule[] {
+		return this.sql
+			.exec<{ pattern: string; block_deletions: number; block_force_pushes: number; require_merge_queue: number; created_at: string }>(
+				"SELECT * FROM branch_rules ORDER BY created_at",
+			)
+			.toArray()
+			.map((r) => ({
+				pattern: r.pattern,
+				blockDeletions: Boolean(r.block_deletions),
+				blockForcePushes: Boolean(r.block_force_pushes),
+				requireMergeQueue: Boolean(r.require_merge_queue),
+				createdAt: r.created_at,
+			}));
+	}
+
+	/** The rules, for git pushes checked in the Worker. */
+	async getBranchRules(): Promise<BranchRule[]> {
+		this.meta();
+		return this.branchRules();
+	}
+
+	async setBranchRule(rule: Omit<BranchRule, "createdAt">): Promise<BranchRule[]> {
+		this.meta();
+		if (!validPattern(rule.pattern)) throw new HttpError(400, "INVALID_INPUT", "A pattern is a branch name, optionally with * (within a segment) or ** (across them)");
+		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue) {
+			throw new HttpError(400, "INVALID_INPUT", "Choose at least one protection");
+		}
+		const existing = this.sql.exec<{ created_at: string }>("SELECT created_at FROM branch_rules WHERE pattern = ?", rule.pattern).toArray()[0];
+		if (!existing && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM branch_rules").one().n >= 50) {
+			throw new HttpError(403, "QUOTA_EXCEEDED", "A repository can have at most 50 branch rules");
+		}
+		this.sql.exec(
+			"INSERT OR REPLACE INTO branch_rules (pattern, block_deletions, block_force_pushes, require_merge_queue, created_at) VALUES (?, ?, ?, ?, ?)",
+			rule.pattern,
+			rule.blockDeletions ? 1 : 0,
+			rule.blockForcePushes ? 1 : 0,
+			rule.requireMergeQueue ? 1 : 0,
+			existing?.created_at ?? new Date().toISOString(),
+		);
+		return this.branchRules();
+	}
+
+	async deleteBranchRule(pattern: string): Promise<BranchRule[]> {
+		this.meta();
+		this.sql.exec("DELETE FROM branch_rules WHERE pattern = ?", pattern);
+		return this.branchRules();
+	}
+
+	/**
+	 * Closes the issues that commits newly on the default branch say they fix ("fixes #12", "closes #3",
+	 * "resolves #7"), in the background. Looks at up to 100 new commits.
+	 */
+	private closeReferencedIssues(from: string | null, to: string) {
+		const meta = this.meta();
+		this.ctx.waitUntil(
+			(async () => {
+				using repo = await this.store.get(meta.name);
+				const commits = await repo.log({ ref: to, limit: 100 });
+				const fixes = new Map<number, string>();
+				for (const commit of commits) {
+					if (commit.hash === from) break;
+					for (const m of commit.message.matchAll(FIXES)) if (!fixes.has(Number(m[1]))) fixes.set(Number(m[1]), commit.hash);
+				}
+				if (fixes.size === 0) return;
+				const closed = await closeIssuesByCommits(this.env, meta.name, [...fixes].slice(0, 50));
+				for (const issue of closed) {
+					this.emit("issue.closed", null, {
+						issue: { number: issue.number, title: issue.title, state: "closed", url: `${this.repository().url}/issues/${issue.number}` },
+						sender: null,
+						commit: issue.commit,
+					});
+					if (issue.authorId) {
+						await notifyUser(databaseOf(this.env), {
+							userId: issue.authorId,
+							kind: "issue",
+							repoId: meta.name,
+							title: `#${issue.number} ${issue.title} was closed by commit ${issue.commit.slice(0, 7)}`,
+							url: `/${issue.owner}/${issue.name}/issues/${issue.number}`,
+							actor: null,
+						});
+					}
+				}
+			})().catch((err) => console.error("closing referenced issues failed", err)),
+		);
+	}
+
+	// ── Events from the Worker ───────────────────────────────────────────────
+
+	/** Records something that happened outside the coordinator (issues), for the feed and webhooks. */
+	async recordEvent(type: Extract<EventType, `issue.${string}`>, data: Record<string, unknown>): Promise<void> {
+		this.meta();
+		this.emit(type, null, data);
 	}
 
 	// ── Archiving ────────────────────────────────────────────────────────────
@@ -1180,7 +1484,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	private resolveRef(ref: string): { repoName: string; ref: string } {
 		const meta = this.meta();
-		if (!ref.startsWith("task:")) return { repoName: meta.name, ref };
+		if (!ref.startsWith("task:")) {
+			// A tag name resolves to its commit, unless a branch has the same name: browsing means the branch.
+			const tag = ref.startsWith("refs/tags/") ? this.knownTags()[ref.slice("refs/tags/".length)] : this.knownTags()[ref];
+			if (tag && !(ref in this.knownRefs(meta))) return { repoName: meta.name, ref: tag };
+			return { repoName: meta.name, ref };
+		}
 		const row = this.row(ref.slice("task:".length));
 		if (row.status === "merged" || row.status === "abandoned") {
 			// The fork is gone; merged work lives on the default branch.
@@ -1312,6 +1621,9 @@ const TRANSIENT = new Set(["INTERNAL_ERROR", "UPSTREAM_UNAVAILABLE", "FORK_IN_PR
 /** A fork attempt that failed this way is retried under a new name. NOT_FOUND/ALREADY_EXISTS mean a half-created fork. */
 const FORK_RETRYABLE = new Set([...TRANSIENT, "NOT_FOUND", "ALREADY_EXISTS", "CREATE_IN_PROGRESS"]);
 
+/** "fixes #12", "Closes #3", "resolved: #7", as GitHub reads them. */
+const FIXES = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi;
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** FIFO counting semaphore. A released slot is handed straight to the next waiter, so the cap is never exceeded. */
@@ -1391,6 +1703,31 @@ async function resolveCommit(repo: RepoHandle, ref: string): Promise<ArtifactsCo
 function tokenExpiry(token: string): string {
 	const expires = Number(new URL(token, "https://token.invalid").searchParams.get("expires"));
 	return Number.isFinite(expires) && expires > 0 ? new Date(expires * 1000).toISOString() : "";
+}
+
+type ReleaseRow = {
+	id: string;
+	tag: string;
+	name: string;
+	notes: string;
+	prerelease: number;
+	author: string | null;
+	created_at: string;
+	updated_at: string;
+};
+
+function toRelease(r: ReleaseRow, commit: string | null): Release {
+	return {
+		id: r.id,
+		tag: r.tag,
+		name: r.name,
+		notes: r.notes,
+		prerelease: Boolean(r.prerelease),
+		author: r.author,
+		createdAt: r.created_at,
+		updatedAt: r.updated_at,
+		commit,
+	};
 }
 
 function toTask(project: string, r: TaskRow): Task {

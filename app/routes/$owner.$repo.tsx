@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
+import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, History, Package, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
@@ -146,7 +146,15 @@ function ProjectLayout() {
 					<nav className="-mx-5 mt-4 flex gap-1 overflow-x-auto px-5">
 						<Tab to="/$owner/$repo" project={project} icon={<FolderCode className="size-3.5" />} label="Code" exact />
 						<Tab to="/$owner/$repo/history" project={project} icon={<History className="size-3.5" />} label="History" />
+						<Tab
+							to="/$owner/$repo/issues"
+							project={project}
+							icon={<CircleDot className="size-3.5" />}
+							label="Issues"
+							count={p?.repo.openIssues}
+						/>
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
+						<Tab to="/$owner/$repo/releases" project={project} icon={<Package className="size-3.5" />} label="Releases" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
 						<Tab to="/$owner/$repo/search" project={project} icon={<Search className="size-3.5" />} label="Search code" />
 						{canWrite && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
@@ -279,9 +287,11 @@ type TabTarget =
 	| "/$owner/$repo/history"
 	| "/$owner/$repo/branches"
 	| "/$owner/$repo/search"
+	| "/$owner/$repo/issues"
+	| "/$owner/$repo/releases"
 	| "/$owner/$repo/settings";
 
-function Tab({ to, project, icon, label, exact }: { to: TabTarget; project: string; icon: ReactNode; label: string; exact?: boolean }) {
+function Tab({ to, project, icon, label, exact, count }: { to: TabTarget; project: string; icon: ReactNode; label: string; exact?: boolean; count?: number }) {
 	return (
 		<Link
 			to={to}
@@ -291,6 +301,7 @@ function Tab({ to, project, icon, label, exact }: { to: TabTarget; project: stri
 		>
 			{icon}
 			{label}
+			{count !== undefined && count > 0 && <span className="rounded-full bg-raised px-1.5 text-[11px] tabular-nums text-dim">{count}</span>}
 		</Link>
 	);
 }

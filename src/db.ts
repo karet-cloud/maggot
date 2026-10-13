@@ -1,6 +1,6 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
 // The schema is created idempotently on first use in each isolate, so deploys need no migration step.
-import type { Notification, NotificationKind, RepoInfo, RepoTransfer, SshKey, Visibility } from "./api.ts";
+import type { Issue, IssueComment, IssueList, IssueState, IssueSummary, Notification, NotificationKind, RepoInfo, RepoTransfer, SshKey, Visibility } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
 // Generated from Better Auth 1.7 (email/password + username plugin) with getMigrations().compileMigrations().
@@ -34,6 +34,11 @@ const APP_SCHEMA = [
 	`create index if not exists "repo_transfer_to_idx" on "repo_transfer" ("toUserId")`,
 	`create table if not exists "ssh_key" ("id" text not null primary key, "userId" text not null references "user" ("id") on delete cascade, "name" text not null, "type" text not null, "fingerprint" text not null unique, "publicKey" text not null, "createdAt" text not null, "lastUsedAt" text)`,
 	`create index if not exists "ssh_key_userId_idx" on "ssh_key" ("userId")`,
+	// Issues are numbered per repository; `comments` is kept in step with issue_comment for listing.
+	`create table if not exists "issue" ("id" text not null primary key, "repoId" text not null references "repo" ("id") on delete cascade, "number" integer not null, "title" text not null, "body" text not null, "state" text not null check ("state" in ('open', 'closed')), "labels" text not null default '[]', "authorId" text references "user" ("id") on delete set null, "comments" integer not null default 0, "createdAt" text not null, "updatedAt" text not null, "closedAt" text, "closedById" text references "user" ("id") on delete set null, unique ("repoId", "number"))`,
+	`create index if not exists "issue_repo_state_idx" on "issue" ("repoId", "state", "number")`,
+	`create table if not exists "issue_comment" ("id" text not null primary key, "issueId" text not null references "issue" ("id") on delete cascade, "authorId" text references "user" ("id") on delete set null, "body" text not null, "createdAt" text not null, "updatedAt" text not null)`,
+	`create index if not exists "issue_comment_issue_idx" on "issue_comment" ("issueId", "createdAt")`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -43,6 +48,8 @@ const COLUMNS = [
 	`alter table "repo" add column "forkOf" text references "repo" ("id") on delete set null`,
 	// Archived repositories are read-only.
 	`alter table "repo" add column "archivedAt" text`,
+	// The commit whose "fixes #n" closed the issue, when one did.
+	`alter table "issue" add column "closedByCommit" text`,
 ];
 
 /** Indexes on added columns, created once the columns exist. */
@@ -106,6 +113,7 @@ export interface RepoListing extends RepoRow {
 	parentName: string | null;
 	parentVisibility: Visibility | null;
 	parentOwnerId: string | null;
+	openIssues: number;
 }
 
 /** GitHub's rule: letters, digits, '.', '-', '_'; not "." or "..", and not ending in ".git". */
@@ -300,6 +308,7 @@ const LISTING = `select r.*,
 	(select count(*) from "star" s where s."repoId" = r."id") as "stars",
 	(select count(*) from "repo" f where f."forkOf" = r."id" and (f."visibility" = 'public' or f."ownerId" = ?1)) as "forks",
 	exists (select 1 from "star" s where s."repoId" = r."id" and s."userId" = ?1) as "starred",
+	(select count(*) from "issue" i where i."repoId" = r."id" and i."state" = 'open') as "openIssues",
 	p."owner" as "parentOwner", p."name" as "parentName", p."visibility" as "parentVisibility", p."ownerId" as "parentOwnerId"
 	from "repo" r left join "repo" p on p."id" = r."forkOf"`;
 
@@ -380,6 +389,7 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		sizeBytes: row.bytes,
 		sshUrl: `git@${new URL(origin).hostname}:${row.owner}/${row.name}.git`,
 		archivedAt: row.archivedAt ?? null,
+		openIssues: row.openIssues ?? 0,
 	};
 }
 
@@ -566,4 +576,231 @@ export async function userForSshKey(
 export async function touchSshKey(database: D1Database, keyId: string, lastUsedAt: string | null): Promise<void> {
 	if (lastUsedAt && Date.parse(lastUsedAt) > Date.now() - 60_000) return;
 	await database.prepare(`update "ssh_key" set "lastUsedAt" = ? where "id" = ?`).bind(new Date().toISOString(), keyId).run();
+}
+
+// ── Issues ───────────────────────────────────────────────────────────────────
+
+export const MAX_ISSUE_TITLE = 256;
+export const MAX_ISSUE_BODY = 64 * 1024;
+export const MAX_LABELS = 10;
+
+export interface IssueRow {
+	id: string;
+	repoId: string;
+	number: number;
+	title: string;
+	body: string;
+	state: IssueState;
+	labels: string;
+	authorId: string | null;
+	comments: number;
+	createdAt: string;
+	updatedAt: string;
+	closedAt: string | null;
+	closedById: string | null;
+	closedByCommit: string | null;
+	author: string | null;
+	closedBy: string | null;
+}
+
+const ISSUE = `select i.*, a."username" as "author", c."username" as "closedBy" from "issue" i
+	left join "user" a on a."id" = i."authorId" left join "user" c on c."id" = i."closedById"`;
+
+export function toIssueSummary(row: IssueRow): IssueSummary {
+	return {
+		number: row.number,
+		title: row.title,
+		state: row.state,
+		labels: JSON.parse(row.labels),
+		author: row.author,
+		comments: row.comments,
+		createdAt: row.createdAt,
+		updatedAt: row.updatedAt,
+		closedAt: row.closedAt,
+	};
+}
+
+export function toIssue(row: IssueRow, canEdit: boolean, canLabel: boolean): Issue {
+	return { ...toIssueSummary(row), body: row.body, closedBy: row.closedBy, closedByCommit: row.closedByCommit ?? null, canEdit, canLabel };
+}
+
+/** Labels as given: trimmed, deduplicated, each up to 50 characters, at most MAX_LABELS. */
+export function cleanLabels(labels: unknown): string[] {
+	if (!Array.isArray(labels) || labels.some((l) => typeof l !== "string")) throw new HttpError(400, "INVALID_INPUT", "labels is a list of strings");
+	const clean = [...new Set((labels as string[]).map((l) => l.trim().replace(/\s+/g, " ")).filter(Boolean))];
+	if (clean.length > MAX_LABELS || clean.some((l) => l.length > 50)) throw new HttpError(400, "INVALID_INPUT", `Up to ${MAX_LABELS} labels of up to 50 characters`);
+	return clean;
+}
+
+/** Opens an issue with the repository's next number. */
+export async function createIssue(database: D1Database, repoId: string, authorId: string, title: string, body: string, labels: string[]): Promise<IssueRow> {
+	const now = new Date().toISOString();
+	// Two issues opened at once can pick the same number; the unique index refuses one, which tries again.
+	for (let attempt = 0; ; attempt++) {
+		const id = crypto.randomUUID();
+		try {
+			await database
+				.prepare(
+					`insert into "issue" ("id", "repoId", "number", "title", "body", "state", "labels", "authorId", "createdAt", "updatedAt")
+					 select ?1, ?2, coalesce(max("number"), 0) + 1, ?3, ?4, 'open', ?5, ?6, ?7, ?7 from "issue" where "repoId" = ?2`,
+				)
+				.bind(id, repoId, title, body, JSON.stringify(labels), authorId, now)
+				.run();
+			return (await database.prepare(`${ISSUE} where i."id" = ?`).bind(id).first<IssueRow>()) as IssueRow;
+		} catch (err) {
+			if (attempt < 4 && /unique/i.test(String(err))) continue;
+			throw err;
+		}
+	}
+}
+
+export async function getIssue(database: D1Database, repoId: string, number: number): Promise<IssueRow | null> {
+	return database.prepare(`${ISSUE} where i."repoId" = ? and i."number" = ?`).bind(repoId, number).first<IssueRow>();
+}
+
+/** A page of issues, newest first, with the open and closed counts for the same search. */
+export async function listIssues(
+	database: D1Database,
+	repoId: string,
+	opts: { state?: IssueState | "all"; query?: string; label?: string; limit?: number },
+): Promise<IssueList> {
+	const where = [`i."repoId" = ?`];
+	const args: unknown[] = [repoId];
+	if (opts.query) {
+		where.push(`(i."title" || ' ' || i."body") like ? escape '\\'`);
+		args.push(`%${opts.query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+	}
+	if (opts.label) {
+		where.push(`exists (select 1 from json_each(i."labels") where json_each.value = ?)`);
+		args.push(opts.label);
+	}
+	const filter = where.join(" and ");
+	const state = opts.state === "closed" || opts.state === "all" ? opts.state : "open";
+	const [list, counts] = await database.batch<Record<string, unknown>>([
+		database
+			.prepare(`${ISSUE} where ${filter}${state === "all" ? "" : ` and i."state" = '${state}'`} order by i."number" desc limit ?`)
+			.bind(...args, opts.limit ?? 50),
+		database.prepare(`select i."state", count(*) as "n" from "issue" i where ${filter} group by i."state"`).bind(...args),
+	]);
+	const count = (s: IssueState) => Number((counts.results as { state: string; n: number }[]).find((r) => r.state === s)?.n ?? 0);
+	return { issues: (list.results as unknown as IssueRow[]).map(toIssueSummary), open: count("open"), closed: count("closed") };
+}
+
+export async function updateIssue(
+	database: D1Database,
+	row: IssueRow,
+	patch: { title?: string; body?: string; state?: IssueState; labels?: string[]; by: string },
+): Promise<IssueRow> {
+	const now = new Date().toISOString();
+	const closing = patch.state === "closed" && row.state === "open";
+	const reopening = patch.state === "open" && row.state === "closed";
+	await database
+		.prepare(
+			`update "issue" set "title" = ?, "body" = ?, "state" = ?, "labels" = ?, "updatedAt" = ?, "closedAt" = ?, "closedById" = ?, "closedByCommit" = ? where "id" = ?`,
+		)
+		.bind(
+			patch.title ?? row.title,
+			patch.body ?? row.body,
+			patch.state ?? row.state,
+			patch.labels ? JSON.stringify(patch.labels) : row.labels,
+			now,
+			closing ? now : reopening ? null : row.closedAt,
+			closing ? patch.by : reopening ? null : row.closedById,
+			closing || reopening ? null : (row.closedByCommit ?? null),
+			row.id,
+		)
+		.run();
+	return (await database.prepare(`${ISSUE} where i."id" = ?`).bind(row.id).first<IssueRow>()) as IssueRow;
+}
+
+interface CommentRow {
+	id: string;
+	issueId: string;
+	authorId: string | null;
+	author: string | null;
+	body: string;
+	createdAt: string;
+	updatedAt: string;
+}
+
+const COMMENT = `select k.*, u."username" as "author" from "issue_comment" k left join "user" u on u."id" = k."authorId"`;
+
+export async function listComments(database: D1Database, issueId: string, viewer: { id: string | null; owner: boolean }): Promise<IssueComment[]> {
+	const { results } = await database.prepare(`${COMMENT} where k."issueId" = ? order by k."createdAt" limit 500`).bind(issueId).all<CommentRow>();
+	return results.map((r) => toComment(r, viewer));
+}
+
+function toComment(r: CommentRow, viewer: { id: string | null; owner: boolean }): IssueComment {
+	return { id: r.id, author: r.author, body: r.body, createdAt: r.createdAt, updatedAt: r.updatedAt, canEdit: viewer.owner || (viewer.id !== null && viewer.id === r.authorId) };
+}
+
+export async function getComment(database: D1Database, issueId: string, id: string): Promise<CommentRow | null> {
+	return database.prepare(`${COMMENT} where k."issueId" = ? and k."id" = ?`).bind(issueId, id).first<CommentRow>();
+}
+
+export const MAX_COMMENTS = 2_000;
+
+export async function addComment(database: D1Database, issue: IssueRow, authorId: string, body: string, viewer: { id: string; owner: boolean }): Promise<IssueComment> {
+	const now = new Date().toISOString();
+	const id = crypto.randomUUID();
+	const [inserted] = await database.batch([
+		database
+			.prepare(
+				`insert into "issue_comment" ("id", "issueId", "authorId", "body", "createdAt", "updatedAt")
+				 select ?, ?, ?, ?, ?, ? where (select "comments" from "issue" where "id" = ?) < ?`,
+			)
+			.bind(id, issue.id, authorId, body, now, now, issue.id, MAX_COMMENTS),
+		database.prepare(`update "issue" set "comments" = (select count(*) from "issue_comment" where "issueId" = ?1), "updatedAt" = ?2 where "id" = ?1`).bind(issue.id, now),
+	]);
+	if (inserted.meta.changes === 0) throw new HttpError(403, "QUOTA_EXCEEDED", `An issue can have at most ${MAX_COMMENTS} comments`);
+	return toComment((await getComment(database, issue.id, id)) as CommentRow, viewer);
+}
+
+export async function editComment(database: D1Database, comment: CommentRow, body: string, viewer: { id: string; owner: boolean }): Promise<IssueComment> {
+	const now = new Date().toISOString();
+	await database.prepare(`update "issue_comment" set "body" = ?, "updatedAt" = ? where "id" = ?`).bind(body, now, comment.id).run();
+	return toComment({ ...comment, body, updatedAt: now }, viewer);
+}
+
+export async function deleteComment(database: D1Database, issueId: string, id: string): Promise<void> {
+	await database.batch([
+		database.prepare(`delete from "issue_comment" where "id" = ? and "issueId" = ?`).bind(id, issueId),
+		database.prepare(`update "issue" set "comments" = (select count(*) from "issue_comment" where "issueId" = ?1) where "id" = ?1`).bind(issueId),
+	]);
+}
+
+/** Who to tell about activity on an issue: its author and everyone who commented. */
+export async function issueParticipants(database: D1Database, issueId: string): Promise<string[]> {
+	const { results } = await database
+		.prepare(
+			`select "authorId" from "issue" where "id" = ?1 and "authorId" is not null
+			 union select "authorId" from "issue_comment" where "issueId" = ?1 and "authorId" is not null limit 50`,
+		)
+		.bind(issueId)
+		.all<{ authorId: string }>();
+	return results.map((r) => r.authorId);
+}
+
+/** Closes open issues named by commits that landed on the default branch ("fixes #12"). Returns the ones it closed. */
+export async function closeIssuesByCommits(
+	env: Env,
+	repoId: string,
+	refs: [number, string][],
+): Promise<{ number: number; title: string; authorId: string | null; commit: string; owner: string; name: string }[]> {
+	const database = db(env);
+	await ensureSchema(database);
+	const repo = await database.prepare(`select "owner", "name" from "repo" where "id" = ?`).bind(repoId).first<{ owner: string; name: string }>();
+	if (!repo) return [];
+	const now = new Date().toISOString();
+	const results = await database.batch<{ number: number; title: string; authorId: string | null }>(
+		refs.map(([number, commit]) =>
+			database
+				.prepare(
+					`update "issue" set "state" = 'closed', "closedAt" = ?, "closedById" = null, "closedByCommit" = ?, "updatedAt" = ?
+					 where "repoId" = ? and "number" = ? and "state" = 'open' returning "number", "title", "authorId"`,
+				)
+				.bind(now, commit, now, repoId, number),
+		),
+	);
+	return results.flatMap((r, i) => r.results.map((row) => ({ ...row, commit: refs[i][1], ...repo })));
 }

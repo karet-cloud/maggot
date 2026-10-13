@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Bot, GitBranch, GitCompareArrows, Trash2 } from "lucide-react";
+import { Bot, GitBranch, GitCompareArrows, ShieldCheck, Trash2 } from "lucide-react";
+import { protectionFor } from "../../src/protection.ts";
 import type { ReactNode } from "react";
 import { Button, Empty, ErrorNote, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type BranchSummary, repoParams } from "../lib/api.ts";
@@ -15,6 +16,8 @@ function BranchesPage() {
 	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
 	// Only the owner deletes branches, and not while the repository is archived.
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
+	const rules = useQuery({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
+	const protectedBranch = (name: string) => protectionFor(rules.data ?? [], name).patterns.length > 0;
 	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
 	const remove = useMutation({ mutationFn: (name: string) => api.deleteBranch(project, name), onSuccess: refresh });
 	const abandon = useMutation({
@@ -37,7 +40,7 @@ function BranchesPage() {
 			<ErrorNote error={remove.error ?? abandon.error} />
 			{main && (
 				<Panel title="Default branch">
-					<BranchRow project={project} branch={main} name={main.name} refName={undefined} scale={scale} isDefault />
+					<BranchRow project={project} branch={main} name={main.name} refName={undefined} scale={scale} isDefault protectedBranch={protectedBranch(main.name)} />
 				</Panel>
 			)}
 
@@ -56,8 +59,9 @@ function BranchesPage() {
 									name={b.name}
 									refName={b.name}
 									scale={scale}
+									protectedBranch={protectedBranch(b.name)}
 									actions={
-										writable && <Button
+										writable && !protectionFor(rules.data ?? [], b.name).blockDeletions && !protectionFor(rules.data ?? [], b.name).requireMergeQueue && <Button
 											variant="ghost"
 											className="px-2 text-xs hover:text-red-300"
 											busy={remove.isPending && remove.variables === b.name}
@@ -130,6 +134,7 @@ function BranchRow({
 	isDefault,
 	byline,
 	actions,
+	protectedBranch,
 }: {
 	project: string;
 	branch: BranchSummary;
@@ -139,6 +144,7 @@ function BranchRow({
 	isDefault?: boolean;
 	byline?: string | null;
 	actions?: ReactNode;
+	protectedBranch?: boolean;
 }) {
 	const subject = branch.commit?.message.split("\n")[0];
 	return (
@@ -152,6 +158,12 @@ function BranchRow({
 						</Link>
 					) : (
 						name
+					)}
+					{protectedBranch && (
+						<span className="flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300" title="Protected by a branch rule (see Settings)">
+							<ShieldCheck className="size-3" />
+							Protected
+						</span>
 					)}
 				</div>
 				{branch.commit && (

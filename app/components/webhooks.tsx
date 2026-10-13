@@ -5,9 +5,11 @@ import { api, keys, type Webhook, type WebhookDelivery, type WebhookEvent } from
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
-	{ id: "push", label: "Pushes", hint: "One per branch a push, web edit or merge moves" },
+	{ id: "push", label: "Pushes", hint: "One per branch or tag a push, web edit or merge moves" },
 	{ id: "merge", label: "Merges", hint: "The merge queue landed an agent task" },
 	{ id: "task", label: "Agent tasks", hint: "Created, ready, submitted, conflicts, failures" },
+	{ id: "release", label: "Releases", hint: "A release was published" },
+	{ id: "issues", label: "Issues", hint: "Opened, closed, reopened, commented on" },
 ];
 
 /** A repository's webhooks: add, pause, test and inspect them. */
