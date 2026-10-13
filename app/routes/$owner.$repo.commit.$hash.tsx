@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { FolderCode } from "lucide-react";
+import { ChecksBadge } from "../components/actions.tsx";
 import { DiffView } from "../components/diff.tsx";
 import { ErrorNote, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
@@ -79,6 +80,7 @@ function CommitPage() {
 						))}
 					</span>
 					<span className="ml-auto flex items-center gap-1.5">
+						<ChecksBadge project={project} sha={c.hash} />
 						commit <Oid oid={c.hash} />
 					</span>
 				</div>

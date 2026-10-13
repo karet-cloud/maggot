@@ -15,7 +15,7 @@ export interface ParitySection {
 	items: ParityItem[];
 }
 
-export const PARITY_UPDATED = "2026-10-13";
+export const PARITY_UPDATED = "2026-10-14";
 
 export const PARITY: ParitySection[] = [
 	{
@@ -59,7 +59,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Branches page", status: "done", comment: "Ahead and behind counts, and delete." },
 			{ feature: "Tags and releases", status: "done", comment: "Tags from git or the web; releases with Markdown notes, pre-releases and source downloads. No uploaded release files yet." },
 			{ feature: "Commit graph", status: "done", comment: "History → Graph: recent commits across every branch in lanes, with branch and tag labels." },
-			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, only the merge queue, or only reviewed pull requests (an approval of the head commit). Enforced for HTTPS, SSH and the web. No required status checks; there are no checks to require." },
+			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, only the merge queue, or only reviewed pull requests (an approval of the head commit). Enforced for HTTPS, SSH and the web. Can require megit Actions runs on the head commit to pass (pull requests only, then). No statuses from external CI yet." },
 			{ feature: "Verified (signed) commit badges", status: "missing", comment: "" },
 		],
 	},
@@ -91,9 +91,16 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "Automation and integrations",
 		items: [
-			{ feature: "Webhooks", status: "done", comment: "Push (branches and tags), merge, release, issue and task events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
-			{ feature: "Actions / built-in CI", status: "missing", comment: "Planned: tests in Cloudflare Sandbox or Containers." },
-			{ feature: "Commit status checks API", status: "missing", comment: "For external CI to report into, and to gate merges." },
+			{ feature: "Webhooks", status: "done", comment: "Push (branches and tags), merge, release, issue, task and workflow_run events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
+			{
+				feature: "Actions / built-in CI",
+				status: "partial",
+				comment:
+					"Workflows in .megit/workflows: push, pull_request and workflow_dispatch triggers, shell run steps, built-in checkout, needs, env, secrets and step if. Jobs run in a Depot sandbox on your Depot token, or a Cloudflare container where the deploy enables it. Live logs, cancel, re-run, approval for readers' and forks' pull requests, and Run workflow. No matrix, services, caches, artifacts, schedules or third-party actions.",
+			},
+			{ feature: "Checks on commits and pull requests", status: "partial", comment: "megit Actions runs show on commit pages and pull requests. A branch rule can require the base branch's pull request workflows (and every other run on the head) to pass; missing ones can be started from the pull request. No status API for external CI to report into yet." },
+			{ feature: "Actions secrets", status: "done", comment: "Per repository, encrypted, write-only, masked in logs, withheld from forks' runs. No organization or environment secrets." },
+			{ feature: "Self-hosted runners", status: "missing", comment: "Jobs run in a Cloudflare container or a Depot sandbox. Blacksmith isn't an option: it only runs GitHub Actions jobs for GitHub organizations." },
 			{ feature: "REST API", status: "partial", comment: "Everything the UI does goes through /api. No API reference page yet." },
 			{ feature: "GraphQL API", status: "missing", comment: "" },
 			{ feature: "Deploy keys", status: "missing", comment: "" },

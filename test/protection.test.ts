@@ -14,6 +14,7 @@ const rule = (pattern: string, flags: Partial<BranchRule>): BranchRule => ({
 	blockForcePushes: false,
 	requireMergeQueue: false,
 	requireReview: false,
+	requireChecks: false,
 	createdAt: "",
 	...flags,
 });
@@ -49,6 +50,15 @@ test("rules refuse deletions and direct pushes outright, and mark updates that m
 	const update = checkPush(rules, [{ old: A, new: B, ref: "refs/heads/master" }, { old: Z, new: B, ref: "refs/heads/master" }]);
 	assert.equal(update.refused.size, 0);
 	assert.deepEqual(update.fastForwardOnly.map((c) => c.old), [A], "creating the branch isn't a force push");
+});
+
+test("a branch that requires Actions to pass takes no direct pushes, only pull requests", () => {
+	const push = checkPush([rule("main", { requireChecks: true })], [
+		{ old: A, new: B, ref: "refs/heads/main" },
+		{ old: A, new: B, ref: "refs/heads/feature" },
+	]);
+	assert.deepEqual([...push.refused.keys()], ["refs/heads/main"]);
+	assert.match(push.refused.get("refs/heads/main") ?? "", /Actions pass/);
 });
 
 test("reports: refusals name every ref, and rewrites keep side-band progress", () => {

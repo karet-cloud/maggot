@@ -185,6 +185,14 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   search, label filters, notifications for the owner and everyone in the conversation, `issues`
   webhooks, and the activity feed. A commit landing on the default branch (push or merge queue) that
   says "fixes #12", "closes #12" or "resolves #12" closes it. Posting is limited per user per hour.
+- **Actions**: workflows in `.megit/workflows/*.yml`, a subset of GitHub Actions syntax (shell `run`
+  steps, built-in checkout, `needs`, secrets), run on pushes, pull requests and by hand. Jobs run in a
+  Depot sandbox paid for with the repository's own Depot token (Settings → Actions), or a Cloudflare
+  container when the deploy turns that on. The Actions tab lists runs with live logs, cancel, re-run,
+  approval for pull requests from people who can't write (forks' runs never get secrets) and Run
+  workflow; commits and pull requests show their checks, and a branch rule can require the base
+  branch's pull request workflows to pass before merging. Syntax, runners and the API:
+  [`docs/actions.md`](docs/actions.md).
 - **Commit pages**: every commit opens a commit page with its
   message, author, parents and diff (unified or split).
 - **Branches**: the default branch, other branches with ahead/behind counts against it (delete them
@@ -398,6 +406,7 @@ src/git/diff.ts       Tree diffs and merge-base walks over the Artifacts object 
 src/git/protocol.ts   Branch listing, deletion, pushes and repo measuring over Git smart HTTP
 src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
 src/search.ts         Code search index (FTS5 trigram) kept in each repository's coordinator
+src/ci/               Actions: workflow parsing, runs and logs in the coordinator, job DOs, Cloudflare and Depot sandboxes
 src/hooks.ts          Webhook subscriptions, signed deliveries and retries, in the coordinator
 src/archive.ts        Streaming .tar.gz / .zip of a tree
 src/protection.ts     Branch rules: push command checks, holding refs, ancestry, git report rewriting
@@ -409,6 +418,8 @@ src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
 scripts/              local Artifacts server, dev launcher, demo
 test/                 merge engine tests against real git
+docs/actions.md       Actions workflow syntax, runners, Depot, secrets, API
+.megit/workflows/     This repository's own megit Actions workflow
 test/e2e/             the Worker under vite dev against the local stand-in with simulated fork failures
 ```
 
@@ -443,8 +454,9 @@ npm run typecheck
   a token doesn't close a socket it opened.
 - Git LFS. SSH needs the ProxyCommand: Workers can't take raw TCP on port 22 (Spectrum could, on
   Enterprise plans), and SSH fetches need Git protocol v2 (git 2.26 and newer use it by default).
-- Pull request niceties: suggested changes, threaded replies to line comments, draft pull requests, and required status checks.
-- Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).
+- Pull request niceties: suggested changes, threaded replies to line comments, and draft pull requests.
+- Actions: no matrix builds, services, caches, artifacts, schedules or third-party `uses:` actions, and
+  no status API for external CI to report into (see [`docs/actions.md`](docs/actions.md)).
 - Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's
   Git URL already emit `repo.pushed`.
 - Per-agent identities: agents act as their owner's personal access token (or the admin key), not as

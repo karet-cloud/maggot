@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
+import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
@@ -167,6 +167,7 @@ function ProjectLayout() {
 							icon={<CircleDot className="size-3.5" />}
 							label="Issues"
 							count={p?.repo.openIssues}
+							sections={["issues"]}
 						/>
 						<Tab
 							to="/$owner/$repo/pulls"
@@ -174,7 +175,9 @@ function ProjectLayout() {
 							icon={<GitPullRequest className="size-3.5" />}
 							label="Pull requests"
 							count={p?.repo.openPulls}
+							sections={["pulls", "pull"]}
 						/>
+						<Tab to="/$owner/$repo/actions" project={project} icon={<Workflow className="size-3.5" />} label="Actions" sections={["actions"]} />
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
 						<Tab to="/$owner/$repo/releases" project={project} icon={<Package className="size-3.5" />} label="Releases" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
@@ -306,6 +309,7 @@ function ForkDialog({ project, repo, onClose }: { project: string; repo: RepoInf
 type TabTarget =
 	| "/$owner/$repo"
 	| "/$owner/$repo/agents"
+	| "/$owner/$repo/actions"
 	| "/$owner/$repo/history"
 	| "/$owner/$repo/branches"
 	| "/$owner/$repo/search"
@@ -314,13 +318,38 @@ type TabTarget =
 	| "/$owner/$repo/releases"
 	| "/$owner/$repo/settings";
 
-function Tab({ to, project, icon, label, exact, count }: { to: TabTarget; project: string; icon: ReactNode; label: string; exact?: boolean; count?: number }) {
+/**
+ * `sections`: first path segments after the repository that belong to this tab. Tabs that link to an
+ * index route (`/actions/`) aren't matched by the router on the pages under it (`/actions/runs/3`).
+ */
+function Tab({
+	to,
+	project,
+	icon,
+	label,
+	exact,
+	count,
+	sections,
+}: {
+	to: TabTarget;
+	project: string;
+	icon: ReactNode;
+	label: string;
+	exact?: boolean;
+	count?: number;
+	sections?: string[];
+}) {
+	const section = useRouterState({ select: (s) => s.location.pathname.split("/")[3] ?? "" });
+	const inSection = sections?.includes(decodeURIComponent(section)) ?? false;
 	return (
 		<Link
 			to={to}
 			params={repoParams(project)}
 			activeOptions={{ exact, includeSearch: false }}
-			className="-mb-px flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-fg data-[status=active]:border-accent data-[status=active]:text-fg"
+			className={cx(
+				"-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm hover:text-fg data-[status=active]:border-accent data-[status=active]:text-fg",
+				inSection ? "border-accent text-fg" : "border-transparent text-dim",
+			)}
 		>
 			{icon}
 			{label}

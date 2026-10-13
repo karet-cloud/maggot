@@ -4,7 +4,7 @@
 import type { EventType, Webhook, WebhookDelivery, WebhookEvent } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
-export const WEBHOOK_EVENTS: WebhookEvent[] = ["push", "task", "merge", "release", "issues", "pull_request"];
+export const WEBHOOK_EVENTS: WebhookEvent[] = ["push", "task", "merge", "release", "issues", "pull_request", "workflow_run"];
 const MAX_HOOKS = 20;
 /** Delay before each retry; a delivery that fails them all is marked failed. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600_000];
@@ -371,6 +371,9 @@ function payloadsFor(type: EventType, taskId: string | null, data: Record<string
 	}
 	if (type.startsWith("pull.")) {
 		return [{ event: "pull_request", payload: { event: "pull_request", action: type.slice("pull.".length), ...data, repository: repo } }];
+	}
+	if (type === "ci.completed") {
+		return [{ event: "workflow_run", payload: { event: "workflow_run", action: "completed", ...data, repository: repo } }];
 	}
 	if (type.startsWith("issue.")) {
 		return [{ event: "issues", payload: { event: "issues", action: type.slice("issue.".length), ...data, repository: repo } }];

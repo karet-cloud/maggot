@@ -81,6 +81,10 @@ export function useProjectLive(project: string): Live {
 				if (event.type.startsWith("pull.") || event.type === "repo.pushed") {
 					invalidate(keys.pulls(project));
 				}
+				// Pushes and pull requests start workflow runs; ci.completed ends one.
+				if (event.type === "ci.completed" || event.type === "repo.pushed" || event.type === "pull.opened") {
+					invalidate(["project", project, "actions", "runs"]);
+				}
 				if (event.type.startsWith("issue.")) {
 					invalidate(keys.issues(project));
 					// Pull requests are issues too: their comments arrive as issue events.

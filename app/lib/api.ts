@@ -45,6 +45,14 @@ import type {
 	WebhookDelivery,
 	WebhookEvent,
 	Notification,
+	CiLogChunk,
+	CiRun,
+	CiRunList,
+	CiRunner,
+	CiRunSummary,
+	CiSettings,
+	CiWorkflow,
+	PullChecks,
 } from "../../src/api.ts";
 
 export type * from "../../src/api.ts";
@@ -236,6 +244,33 @@ export const api = {
 	notifications: (unread = false) => call<{ notifications: Notification[]; unread: number }>("GET", `/notifications${unread ? "?unread" : ""}`),
 	markRead: (ids?: string[]) => call<{ ok: true }>("POST", "/notifications/read", ids ? { ids } : {}),
 
+	// Actions: workflow runs from .megit/workflows, their jobs and logs, and the repository's CI settings.
+	/** A pull request's checks on its head, as the server judges them for merging. */
+	pullChecks: (project: string, number: number) => call<PullChecks>("GET", `${p(project)}/pulls/${number}/checks`),
+	/** Starts the pull request's missing runs (people who can merge). */
+	startPullChecks: (project: string, number: number) => call<PullChecks>("POST", `${p(project)}/pulls/${number}/checks`, {}),
+	ciRuns: (project: string, filter: { before?: number; sha?: string; pull?: number } = {}) =>
+		call<CiRunList>(
+			"GET",
+			`${p(project)}/actions/runs?${new URLSearchParams(Object.entries(filter).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)]])))}`,
+		),
+	ciRun: (project: string, number: number) => call<CiRun>("GET", `${p(project)}/actions/runs/${number}`),
+	/** `after`: the seq of the last chunk already shown. `next` is non-null when more is ready right away. */
+	ciLogs: (project: string, number: number, job: string, after = 0) =>
+		call<{ logs: CiLogChunk[]; next: number | null }>("GET", `${p(project)}/actions/runs/${number}/jobs/${encodeURIComponent(job)}/logs?after=${after}`),
+	ciRunAction: (project: string, number: number, action: "cancel" | "rerun" | "approve") => call<CiRun>("POST", `${p(project)}/actions/runs/${number}/${action}`, {}),
+	ciWorkflows: (project: string, ref?: string) =>
+		call<{ workflows: CiWorkflow[] }>("GET", `${p(project)}/actions/workflows${ref ? `?${new URLSearchParams({ ref })}` : ""}`).then((r) => r.workflows),
+	ciDispatch: (project: string, path: string, ref: string) =>
+		call<{ runs: CiRunSummary[] }>("POST", `${p(project)}/actions/dispatch`, { path, ref }).then((r) => r.runs),
+	ciSettings: (project: string) => call<CiSettings>("GET", `${p(project)}/actions/settings`),
+	ciSetDefaultRunner: (project: string, defaultRunner: CiRunner) => call<CiSettings>("PUT", `${p(project)}/actions/settings`, { defaultRunner }),
+	ciSetDepot: (project: string, token: string, orgId: string | null) => call<CiSettings>("PUT", `${p(project)}/actions/depot`, { token, orgId }),
+	ciRemoveDepot: (project: string) => call<CiSettings>("DELETE", `${p(project)}/actions/depot`),
+	ciSetSecret: (project: string, name: string, value: string) =>
+		call<CiSettings>("PUT", `${p(project)}/actions/secrets/${encodeURIComponent(name)}`, { value }),
+	ciDeleteSecret: (project: string, name: string) => call<CiSettings>("DELETE", `${p(project)}/actions/secrets/${encodeURIComponent(name)}`),
+
 	/** Commits files from the web editor; `content: null` deletes a file. */
 	commitFiles: (
 		project: string,
@@ -346,4 +381,12 @@ export const keys = {
 	commit: (project: string, hash: string) => ["commit", project, hash] as const,
 	compare: (project: string, base: string, head: string) => ["project", project, "compare", base, head] as const,
 	taskChanges: (project: string, id: string) => ["project", project, "task", id, "changes"] as const,
+	ciRuns: (project: string) => ["project", project, "actions", "runs"] as const,
+	ciRun: (project: string, number: number) => ["project", project, "actions", "runs", number] as const,
+	/** Under ciRuns, so refreshing runs (approving one, say) refreshes these too. */
+	pullChecks: (project: string, number: number) => ["project", project, "actions", "runs", "pull-checks", number] as const,
+	/** Runs for one commit or pull request, for check badges. Under ciRuns, so refreshing runs refreshes these. */
+	ciChecks: (project: string, filter: { sha?: string; pull?: number }) => ["project", project, "actions", "runs", "for", filter.sha ?? "", filter.pull ?? 0] as const,
+	ciWorkflows: (project: string, ref?: string) => ["project", project, "actions", "workflows", ref ?? ""] as const,
+	ciSettings: (project: string) => ["project", project, "actions", "settings"] as const,
 };

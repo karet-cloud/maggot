@@ -9,6 +9,7 @@ const OPTIONS: { id: keyof Omit<BranchRule, "pattern" | "createdAt">; label: str
 	{ id: "blockDeletions", label: "Block deletion", hint: "Nobody can delete the branch, from git or the web" },
 	{ id: "requireMergeQueue", label: "No direct pushes", hint: "No pushes or web commits; work lands through pull requests or agent tasks" },
 	{ id: "requireReview", label: "Require an approving review", hint: "Changes land only through pull requests approved by someone who can merge (no changes requested): no direct pushes, web commits or merge queue" },
+	{ id: "requireChecks", label: "Require Actions to pass", hint: "Changes land only through pull requests whose latest run of every megit Actions workflow on the head commit succeeded: no direct pushes, web commits or merge queue" },
 ];
 
 /** A repository's branch protection rules: add, change and remove them. */
@@ -16,7 +17,7 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 	const queryClient = useQueryClient();
 	const rules = useQuery({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
 	const [pattern, setPattern] = useState(defaultBranch);
-	const [flags, setFlags] = useState({ blockForcePushes: true, blockDeletions: true, requireMergeQueue: false, requireReview: false });
+	const [flags, setFlags] = useState({ blockForcePushes: true, blockDeletions: true, requireMergeQueue: false, requireReview: false, requireChecks: false });
 	const set = (rules: BranchRule[]) => {
 		queryClient.setQueryData(keys.branchRules(project), rules);
 		void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
@@ -43,7 +44,7 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 										onClick={() => {
 											const next = { ...r, [o.id]: false };
 											// Turning off the last protection removes the rule.
-											if (!next.blockDeletions && !next.blockForcePushes && !next.requireMergeQueue && !next.requireReview) {
+											if (!OPTIONS.some((option) => next[option.id])) {
 												if (confirm(`Stop protecting ${r.pattern}?`)) remove.mutate(r.pattern);
 											} else save.mutate(next);
 										}}

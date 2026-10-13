@@ -1,0 +1,25 @@
+# megit Actions: runs when this repository is hosted on megit. See docs/actions.md for the syntax.
+name: CI
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest # the repository's default runner (Settings → Actions)
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4 # built in: megit checks the commit out before the first step
+      - name: Tool versions
+        run: node --version && npm --version && git --version
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests
+        run: npm test
+      - name: Type-check the UI
+        run: npx tsc -p tsconfig.app.json
+      - name: Disk usage
+        if: ${{ always() }}
+        run: df -h /workspace
