@@ -54,10 +54,13 @@ export function Elapsed({ from, to }: { from: string | null; to: string | null }
 
 export const isActive = (r: { status: CiStatus }) => r.status !== "completed";
 
-/** The newest run of each workflow, which is what a commit's checks are. Runs come newest first. */
+/**
+ * The newest run of each workflow and event, which is what a commit's checks are (the server's merge
+ * rule counts the same). Runs come newest first.
+ */
 export function latestPerWorkflow(runs: CiRunSummary[]): CiRunSummary[] {
 	const seen = new Map<string, CiRunSummary>();
-	for (const r of runs) if (!seen.has(r.path)) seen.set(r.path, r);
+	for (const r of runs) if (!seen.has(`${r.path}\0${r.event}`)) seen.set(`${r.path}\0${r.event}`, r);
 	return [...seen.values()];
 }
 
@@ -86,7 +89,8 @@ export function usePullChecks(project: string, number: number, enabled: boolean)
 		queryKey: keys.pullChecks(project, number),
 		queryFn: () => api.pullChecks(project, number),
 		enabled,
-		refetchInterval: (q) => (q.state.data && ["pending", "waiting"].includes(q.state.data.state) ? 5000 : false),
+		// Runs waiting for approval change only when someone approves them, which the live connection reports.
+		refetchInterval: (q) => (q.state.data?.state === "pending" ? 5000 : false),
 		retry: false,
 	});
 }

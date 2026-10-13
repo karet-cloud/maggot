@@ -129,6 +129,7 @@ function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_C
 		repoId: () => REPO,
 		repository: () => ({ fullName: "alice/app", url: "https://megit.test/alice/app", cloneUrl: "https://megit.test/alice/app.git", defaultBranch: "main" }),
 		emit: (data) => h.events.push(data),
+		changed: () => {},
 		wake: async () => {},
 		archived: () => h.archived.on,
 	};
@@ -808,4 +809,41 @@ test("reopening a pull request starts the runs closing cancelled (waiting again 
 	const c = await checks(h, H);
 	assert.equal(c.state, "waiting");
 	assert.equal(h.starts.length, 0);
+});
+
+test("re-running a run of the base's required definition runs that definition again, not the head's file", async () => {
+	const H = sha(1);
+	const h = harness({ [REPO]: { [BASE]: { "pr.yml": PR_ONLY }, [H]: { "pr.yml": PUSH_ONLY } } });
+	h.refs[REPO] = { main: BASE, topic: H };
+	await withDepot(h);
+	await h.ci.queuePull(pr({ sha: H }));
+	const [run] = h.ci.listRuns({ pull: 1 }).runs;
+	await finishAll(h, "failure");
+	const again = await h.ci.rerun(run.number, "alice");
+	assert.equal(again.workflow, "PR", "the base's definition, as it ran");
+	assert.equal(h.starts.at(-1)?.steps.length, h.starts[0].steps.length);
+});
+
+test("a pull request closed before its opening event is acted on starts nothing", async () => {
+	const H = sha(1);
+	const h = harness({ [REPO]: { [BASE]: { "pr.yml": PR_ONLY }, [H]: { "pr.yml": PR_ONLY } } });
+	h.refs[REPO] = { main: BASE, topic: H };
+	await withDepot(h);
+	await h.ci.closePull(1, false);
+	await h.ci.queuePull(pr({ sha: H }));
+	assert.deepEqual(h.ci.listRuns({ pull: 1 }).runs, []);
+	assert.equal(h.starts.length, 0);
+	// Reopening it does start them.
+	await h.ci.queuePull(pr({ sha: H, action: "reopened" }));
+	assert.equal(h.ci.listRuns({ pull: 1 }).runs.length, 1);
+});
+
+test("a job's steps are its runner's: setup, the workflow's steps, then cleanup; one that fails before a machine fails in setup", async () => {
+	const h = harness({ [REPO]: { [SHA]: { "build.yml": BUILD } } });
+	const [run] = await h.ci.onPush("main", SHA, null);
+	const steps = h.ci.getRun(run.number).jobs[0].steps;
+	assert.equal(steps[0].name, "Set up job");
+	assert.equal(steps.at(-1)?.name, "Complete job");
+	assert.equal(steps[0].conclusion, "failure", "no Depot token: setup failed");
+	assert.ok(steps.slice(1).every((s) => s.conclusion === "skipped"));
 });

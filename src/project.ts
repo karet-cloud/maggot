@@ -238,6 +238,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			// Its own Worker's class, so a loopback namespace rather than a binding (a container can't be attached to a Durable Object bound by Worker name).
 			job: (id) => (ctx.exports.CiJob as unknown as DurableObjectNamespace<CiJob>).getByName(id),
 			emit: (data) => this.emit("ci.completed", null, data),
+			changed: () => {
+				for (const ws of this.ctx.getWebSockets()) {
+					try {
+						ws.send("ci");
+					} catch {
+						// Socket already closed; the runtime cleans it up.
+					}
+				}
+			},
 			wake: (at) => this.scheduleAlarm(at),
 			archived: () => this.sql.exec("SELECT 1 FROM meta WHERE key = 'archived'").toArray().length > 0,
 		});
@@ -1814,11 +1823,6 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async ciLogs(number: number, job: string, after?: number): Promise<{ logs: CiLogChunk[]; next: number | null }> {
 		this.meta();
 		return this.ci.logs(number, job, after);
-	}
-
-	async ciChecks(sha: string): Promise<{ state: ChecksState; runs: CiRunSummary[] }> {
-		this.meta();
-		return this.ci.checksFor(sha);
 	}
 
 	async ciCancel(number: number): Promise<CiRun> {

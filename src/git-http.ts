@@ -125,7 +125,7 @@ export function upstreamFetch(
  * UI, its live feed and webhooks hear about it. Reads a copy of the response, so this happens even if
  * the client hangs up first. Returns the body to pass on.
  */
-export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: ReadableStream<Uint8Array>, sent: () => number): ReadableStream<Uint8Array> {
+export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: ReadableStream<Uint8Array>, sent: () => number, actor: string | null): ReadableStream<Uint8Array> {
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(row.id);
 	const [client, watcher] = body.tee();
 	ctx.waitUntil(
@@ -134,7 +134,7 @@ export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: R
 			.then(async (report) => {
 				if (!pushAccepted(new Uint8Array(report))) return;
 				const bytes = sent();
-				await Promise.all([coordinator.pushed(), bytes > 0 ? addRepoBytes(db(env), row.id, bytes) : null]);
+				await Promise.all([coordinator.pushed(actor), bytes > 0 ? addRepoBytes(db(env), row.id, bytes) : null]);
 			})
 			.catch((err) => console.error("recording push failed", err)),
 	);
@@ -290,6 +290,8 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		return access.inProtocol ? refusePush(access.message) : deny(access.status, access.message);
 	}
 	const { row } = access;
+	// Who pushed, for the runs a push starts.
+	const pusher = principal.kind === "user" ? principal.username : null;
 	const maxPush = policy(env).pushBytes;
 	if (pushing && route.endpoint === "git-receive-pack" && Number(request.headers.get("content-length") ?? 0) > maxPush) {
 		return deny(413, `A push can be at most ${formatBytes(maxPush)}.`);
@@ -357,9 +359,9 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		if (protect && protect.staged.length > 0) {
 			// The report is small; hold it until the protected branches have been checked and moved.
 			const report = await settleStaged(env, row, upstream, new Uint8Array(await res.arrayBuffer()), protect.staged, protect.capabilities);
-			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent), { status: res.status, headers: out });
+			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent, pusher), { status: res.status, headers: out });
 		}
-		return new Response(watchPush(env, ctx, row, res.body, () => sent), { status: res.status, headers: out });
+		return new Response(watchPush(env, ctx, row, res.body, () => sent, pusher), { status: res.status, headers: out });
 	}
 	return new Response(res.body, { status: res.status, headers: out });
 }

@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ChevronRight, CircleStop, Cpu, GitBranch, RotateCw, ShieldCheck } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CiIcon, ciLabel, ciState, Elapsed, isActive, type CiState } from "../components/actions.tsx";
 import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type CiJob, type CiLogChunk } from "../lib/api.ts";
@@ -21,6 +21,7 @@ function RunPage() {
 	const search = Route.useSearch();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
+	const picked = useRef<{ run: number; job: string } | null>(null);
 	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
 	const run = useQuery({
 		queryKey: keys.ciRun(project, number),
@@ -56,7 +57,14 @@ function RunPage() {
 	const canWrite = Boolean(info.data?.repo.canWrite);
 	// An archived repository starts nothing, but what's still going can be stopped.
 	const canAct = canWrite && !info.data?.repo.archivedAt;
-	const selected = r.jobs.find((j) => j.key === search.job) ?? r.jobs.find((j) => ciState(j) === "failure") ?? r.jobs.find(isActive) ?? r.jobs[0];
+	// Without ?job, the first pick stays picked as jobs finish, so the log being read doesn't vanish.
+	const selected =
+		r.jobs.find((j) => j.key === search.job) ??
+		r.jobs.find((j) => picked.current?.run === r.number && j.key === picked.current.job) ??
+		r.jobs.find((j) => ciState(j) === "failure") ??
+		r.jobs.find(isActive) ??
+		r.jobs[0];
+	if (!search.job && selected) picked.current = { run: r.number, job: selected.key };
 
 	return (
 		<div className="space-y-4">
@@ -171,18 +179,14 @@ function RunPage() {
 
 function JobView({ project, run, job }: { project: string; run: number; job: CiJob }) {
 	const logs = useJobLogs(project, run, job);
-	// Steps a failed setup never reached are marked skipped, so "started" goes by their start times.
-	const started = job.steps.some((s) => s.startedAt !== null);
-	// Log step 0 is setup (starting the machine, checking the commit out); step i + 1 is the workflow's step i.
-	const setup = {
-		name: "Set up job",
-		state: started ? "success" : job.status === "completed" ? ciState(job) : job.startedAt ? "in_progress" : "pending",
-		startedAt: job.startedAt,
-		finishedAt: job.steps.find((s) => s.startedAt)?.startedAt ?? job.finishedAt,
-	} as const;
-	const steps = [setup, ...job.steps.map((s) => ({ name: s.name, state: ciState(s), startedAt: s.startedAt, finishedAt: s.finishedAt }))];
-	const byStep = new Map<number, string>();
-	for (const c of logs.chunks) byStep.set(c.step, (byStep.get(c.step) ?? "") + c.text);
+	// The runner's steps: setup, the workflow's steps, then cleanup. Log step i belongs to step i.
+	const steps = job.steps.map((s) => ({ name: s.name, state: ciState(s), startedAt: s.startedAt, finishedAt: s.finishedAt }));
+	// Rebuilt when the log grows, not on every poll of the run.
+	const byStep = useMemo(() => {
+		const out = new Map<number, string>();
+		for (const c of logs.chunks) out.set(c.step, (out.get(c.step) ?? "") + c.text);
+		return out;
+	}, [logs.chunks]);
 	return (
 		<Panel
 			title={
@@ -225,7 +229,10 @@ function JobView({ project, run, job }: { project: string; run: number; job: CiJ
 
 function StepLog({ name, state, startedAt, finishedAt, text }: { name: string; state: CiState; startedAt: string | null; finishedAt: string | null; text: string }) {
 	const [open, setOpen] = useState<boolean | null>(null);
-	// Failed and running steps start open; the reader's choice wins after that.
+	// Failed and running steps start open, and a running one stays open when it ends; the reader's choice wins.
+	useEffect(() => {
+		if (state === "in_progress") setOpen((o) => o ?? true);
+	}, [state]);
 	const shown = open ?? (state === "failure" || state === "in_progress");
 	const ref = useRef<HTMLPreElement>(null);
 	useEffect(() => {
@@ -275,8 +282,8 @@ function useJobLogs(project: string, run: number, job: CiJob) {
 					return;
 				}
 				after.current = res.next;
-				// A full batch may have more behind it; otherwise wait for the job to write more.
-				timer = setTimeout(load, res.logs.length ? 250 : 2000);
+				// A big batch may have more behind it; otherwise the job reports every couple of seconds.
+				timer = setTimeout(load, res.logs.length >= 500 ? 250 : res.logs.length ? 1000 : 2000);
 			} catch (err) {
 				if (cancelled) return;
 				setError(err);
