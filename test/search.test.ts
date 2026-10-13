@@ -4,16 +4,16 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { CommitObject, ObjectReader, TreeEntry } from "../src/git/diff.ts";
-import { CodeIndex } from "../src/search.ts";
+import { CodeIndex, type Sql } from "../src/search.ts";
 
-/** Just enough of SqlStorage: `exec` with bound parameters, returning rows. */
-function sqlStorage(db: DatabaseSync): SqlStorage {
+/** A Durable Object's `exec`, on Node's SQLite: bound parameters, rows back. */
+function sqlStorage(db: DatabaseSync): Sql {
 	return {
 		exec(query: string, ...params: unknown[]) {
 			const rows = params.length === 0 && query.trim().split(";").filter((s) => s.trim()).length > 1 ? (db.exec(query), []) : db.prepare(query).all(...(params as never[]));
 			return { toArray: () => rows, one: () => rows[0], [Symbol.iterator]: () => rows[Symbol.iterator]() };
 		},
-	} as unknown as SqlStorage;
+	} as Sql;
 }
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");

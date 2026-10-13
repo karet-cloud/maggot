@@ -23,6 +23,14 @@ const BATCH = 16;
 export const MAX_QUERY_LENGTH = 100;
 const MAX_LINES_PER_FILE = 5;
 
+/**
+ * The part of a Durable Object's SqlStorage the index uses, written out so this module also
+ * type-checks (and runs) outside the Worker, in tests.
+ */
+export interface Sql {
+	exec<T extends Record<string, ArrayBuffer | string | number | null>>(query: string, ...bindings: unknown[]): { toArray(): T[]; one(): T };
+}
+
 interface IndexState {
 	commit: string;
 	tree: string;
@@ -34,11 +42,11 @@ interface IndexState {
 }
 
 export class CodeIndex {
-	private readonly sql: SqlStorage;
+	private readonly sql: Sql;
 	/** False where SQLite lacks FTS5; search then says it's unavailable. */
 	readonly available: boolean;
 
-	constructor(sql: SqlStorage) {
+	constructor(sql: Sql) {
 		this.sql = sql;
 		let available = true;
 		try {
