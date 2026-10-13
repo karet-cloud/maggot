@@ -7,7 +7,7 @@ import { fuzzyFilter, type FuzzyMatch } from "../lib/fuzzy.ts";
 import { Button, cx, ErrorNote, Modal, Spinner } from "./ui.tsx";
 
 /** "Go to file": a button, and `t` anywhere on the page, open a fuzzy finder over every path at `refName`. */
-export function GoToFile({ project, refName }: { project: string; refName?: string }) {
+export function GoToFile({ project, refName, commit }: { project: string; refName?: string; commit: string }) {
 	const [open, setOpen] = useState(false);
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
@@ -28,15 +28,16 @@ export function GoToFile({ project, refName }: { project: string; refName?: stri
 				<kbd className="ml-1 rounded border border-line px-1 font-mono text-[10px] text-faint">t</kbd>
 			</Button>
 			<Modal open={open} onClose={() => setOpen(false)} title="Go to file">
-				<Finder project={project} refName={refName} onClose={() => setOpen(false)} />
+				<Finder project={project} refName={refName} commit={commit} onClose={() => setOpen(false)} />
 			</Modal>
 		</>
 	);
 }
 
-function Finder({ project, refName, onClose }: { project: string; refName?: string; onClose: () => void }) {
+function Finder({ project, refName, commit, onClose }: { project: string; refName?: string; commit: string; onClose: () => void }) {
 	const navigate = useNavigate();
-	const files = useQuery({ queryKey: keys.paths(project, refName), queryFn: () => api.paths(project, refName), staleTime: 30_000 });
+	// By commit: a commit's files never change, so the list is cached for good, here and in the browser.
+	const files = useQuery({ queryKey: keys.paths(project, commit), queryFn: () => api.paths(project, commit), staleTime: Number.POSITIVE_INFINITY });
 	const [query, setQuery] = useState("");
 	const deferred = useDeferredValue(query);
 	const matches = useMemo(() => fuzzyFilter(deferred, files.data?.paths ?? []), [deferred, files.data]);

@@ -133,11 +133,11 @@ export const api = {
 	transfers: () => call<{ transfers: RepoTransfer[] }>("GET", "/transfers").then((r) => r.transfers),
 	acceptTransfer: (id: string, name?: string) => call<{ repo: RepoInfo }>("POST", `/transfers/${encodeURIComponent(id)}/accept`, name ? { name } : {}).then((r) => r.repo),
 	declineTransfer: (id: string) => call<{ deleted: true }>("POST", `/transfers/${encodeURIComponent(id)}/decline`, {}),
-	tags: (project: string) => call<{ tags: Tag[] }>("GET", `${p(project)}/tags`).then((r) => r.tags),
+	tags: (project: string, summaries = true) => call<{ tags: Tag[] }>("GET", `${p(project)}/tags${summaries ? "" : "?summary=0"}`).then((r) => r.tags),
 	createTag: (project: string, name: string, target?: string) => call<{ tag: Tag }>("POST", `${p(project)}/tags`, { name, target }).then((r) => r.tag),
 	deleteTag: (project: string, name: string) =>
 		call<{ deleted: true }>("DELETE", `${p(project)}/tags/${name.split("/").map(encodeURIComponent).join("/")}`),
-	releases: (project: string) => call<{ releases: Release[] }>("GET", `${p(project)}/releases`).then((r) => r.releases),
+	releases: (project: string, limit = 20) => call<{ releases: Release[]; more: boolean }>("GET", `${p(project)}/releases?limit=${limit}`),
 	createRelease: (project: string, input: { tag: string; target?: string; name?: string; notes?: string; prerelease?: boolean }) =>
 		call<{ release: Release }>("POST", `${p(project)}/releases`, input).then((r) => r.release),
 	updateRelease: (project: string, id: string, patch: { name?: string; notes?: string; prerelease?: boolean }) =>
@@ -152,13 +152,15 @@ export const api = {
 		call<{ rules: BranchRule[] }>("DELETE", `${p(project)}/protection?${new URLSearchParams({ pattern })}`).then((r) => r.rules),
 	issues: (project: string, filter: { state?: IssueState | "all"; q?: string; label?: string } = {}) =>
 		call<IssueList>("GET", `${p(project)}/issues?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`),
-	issue: (project: string, number: number) => call<{ issue: Issue; comments: IssueComment[] }>("GET", `${p(project)}/issues/${number}`),
+	issue: (project: string, number: number) => call<{ issue: Issue; comments: IssueComment[]; earlier: boolean }>("GET", `${p(project)}/issues/${number}`),
+	earlierComments: (project: string, number: number, before: string) =>
+		call<{ comments: IssueComment[]; earlier: boolean }>("GET", `${p(project)}/issues/${number}/comments?${new URLSearchParams({ before })}`),
 	createIssue: (project: string, input: { title: string; body: string; labels?: string[] }) =>
 		call<{ issue: Issue }>("POST", `${p(project)}/issues`, input).then((r) => r.issue),
 	updateIssue: (project: string, number: number, patch: { title?: string; body?: string; state?: IssueState; labels?: string[] }) =>
 		call<{ issue: Issue }>("PATCH", `${p(project)}/issues/${number}`, patch).then((r) => r.issue),
-	comment: (project: string, number: number, body: string) =>
-		call<{ comment: IssueComment }>("POST", `${p(project)}/issues/${number}/comments`, { body }).then((r) => r.comment),
+	comment: (project: string, number: number, body: string, state?: IssueState) =>
+		call<{ comment: IssueComment; issue: Issue }>("POST", `${p(project)}/issues/${number}/comments`, { body, state }),
 	editComment: (project: string, number: number, id: string, body: string) =>
 		call<{ comment: IssueComment }>("PATCH", `${p(project)}/issues/${number}/comments/${encodeURIComponent(id)}`, { body }).then((r) => r.comment),
 	deleteComment: (project: string, number: number, id: string) =>
@@ -264,6 +266,7 @@ export const keys = {
 	transfer: (project: string) => ["project", project, "transfer"] as const,
 	paths: (project: string, ref?: string) => ["project", project, "paths", ref ?? ""] as const,
 	tags: (project: string) => ["project", project, "tags"] as const,
+	tagNames: (project: string) => ["project", project, "tags", "names"] as const,
 	releases: (project: string) => ["project", project, "releases"] as const,
 	graph: (project: string) => ["project", project, "graph"] as const,
 	branchRules: (project: string) => ["project", project, "protection"] as const,

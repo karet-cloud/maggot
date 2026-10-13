@@ -306,17 +306,24 @@ export function topoOrder<C extends { hash: string; parents: string[]; committed
 	const newestFirst = (a: C, b: C) => b.committedAt - a.committedAt || a.hash.localeCompare(b.hash);
 	const ready = list.filter((c) => !children.get(c.hash)).sort(newestFirst);
 	const out: C[] = [];
-	while (ready.length > 0) {
-		const c = ready.shift() as C;
+	// Taken from the front by index rather than shift(), which would move every element each time.
+	for (let next = 0; next < ready.length; next++) {
+		const c = ready[next];
 		out.push(c);
 		for (const p of c.parents) {
 			const left = (children.get(p) ?? 0) - 1;
 			children.set(p, left);
 			const parent = byHash.get(p);
 			if (left === 0 && parent) {
-				// Insert keeping newest first.
-				const at = ready.findIndex((r) => newestFirst(parent, r) < 0);
-				ready.splice(at === -1 ? ready.length : at, 0, parent);
+				// Binary search for its place among those not taken yet, keeping newest first.
+				let lo = next + 1;
+				let hi = ready.length;
+				while (lo < hi) {
+					const mid = (lo + hi) >> 1;
+					if (newestFirst(ready[mid], parent) <= 0) lo = mid + 1;
+					else hi = mid;
+				}
+				ready.splice(lo, 0, parent);
 			}
 		}
 	}

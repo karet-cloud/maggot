@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Download, Package, Pencil, Plus, Tag as TagIcon, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -53,6 +53,7 @@ function Releases() {
 	);
 }
 
+/** Source downloads of a tag, by its full ref name so a branch with the same name can't be mistaken for it. */
 function Downloads({ project, refName }: { project: string; refName: string }) {
 	return (
 		<span className="flex flex-wrap items-center gap-3 text-xs">
@@ -67,9 +68,12 @@ function Downloads({ project, refName }: { project: string; refName: string }) {
 }
 
 function ReleaseList({ project, writable }: { project: string; writable: boolean }) {
-	const releases = useQuery({ queryKey: keys.releases(project), queryFn: () => api.releases(project) });
+	const [limit, setLimit] = useState(20);
+	const page = useQuery({ queryKey: [...keys.releases(project), limit], queryFn: () => api.releases(project, limit), placeholderData: keepPreviousData });
+	const releases = { ...page, data: page.data?.releases };
 	if (releases.isPending) return <Spinner />;
 	if (releases.error) return <ErrorNote error={releases.error} />;
+	if (!releases.data) return null;
 	if (releases.data.length === 0) {
 		return (
 			<Empty icon={<Package className="size-6" />} title="No releases yet">
@@ -77,14 +81,24 @@ function ReleaseList({ project, writable }: { project: string; writable: boolean
 			</Empty>
 		);
 	}
+	const latest = releases.data.findIndex((x) => !x.prerelease);
 	return (
-		<ol className="space-y-4">
-			{releases.data.map((r, i) => (
-				<li key={r.id}>
-					<ReleaseCard project={project} release={r} latest={i === releases.data.findIndex((x) => !x.prerelease)} writable={writable} />
-				</li>
-			))}
-		</ol>
+		<div className="space-y-4">
+			<ol className="space-y-4">
+				{releases.data.map((r, i) => (
+					<li key={r.id}>
+						<ReleaseCard project={project} release={r} latest={i === latest} writable={writable} />
+					</li>
+				))}
+			</ol>
+			{page.data?.more && (
+				<div className="text-center">
+					<Button busy={page.isFetching} onClick={() => setLimit((n) => Math.min(n + 20, 200))} disabled={limit >= 200}>
+						{limit >= 200 ? "Showing the newest 200" : "Show older releases"}
+					</Button>
+				</div>
+			)}
+		</div>
 	);
 }
 
@@ -120,7 +134,7 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 							{r.prerelease && <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] font-medium text-amber-300">Pre-release</span>}
 						</h2>
 						<p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
-							<Link to="/$owner/$repo" params={repoParams(project)} search={{ ref: r.tag }} className="flex items-center gap-1 font-mono text-dim hover:text-accent">
+							<Link to="/$owner/$repo" params={repoParams(project)} search={{ ref: `refs/tags/${r.tag}` }} className="flex items-center gap-1 font-mono text-dim hover:text-accent">
 								<TagIcon className="size-3" />
 								{r.tag}
 							</Link>
@@ -182,14 +196,14 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 						</div>
 					</form>
 				) : r.notes.trim() ? (
-					<Markdown source={r.notes} project={project} path="" refName={r.tag} />
+					<Markdown source={r.notes} project={project} path="" refName={`refs/tags/${r.tag}`} />
 				) : (
 					<p className="text-sm text-faint italic">No release notes.</p>
 				)}
 				<ErrorNote error={remove.error} />
 				{r.commit && (
 					<div className="border-t border-line pt-3">
-						<Downloads project={project} refName={r.tag} />
+						<Downloads project={project} refName={`refs/tags/${r.tag}`} />
 					</div>
 				)}
 			</div>
@@ -221,7 +235,7 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 					<li key={t.name} className="flex flex-wrap items-center gap-3 px-4 py-3">
 						<TagIcon className="size-4 text-faint" />
 						<div className="min-w-0 flex-1">
-							<Link to="/$owner/$repo" params={repoParams(project)} search={{ ref: t.name }} className="font-mono text-sm font-medium text-fg hover:text-accent">
+							<Link to="/$owner/$repo" params={repoParams(project)} search={{ ref: `refs/tags/${t.name}` }} className="font-mono text-sm font-medium text-fg hover:text-accent">
 								{t.name}
 							</Link>
 							<p className="mt-0.5 truncate text-xs text-faint">
@@ -237,7 +251,7 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 								{t.annotated && " · annotated"}
 							</p>
 						</div>
-						<Downloads project={project} refName={t.name} />
+						<Downloads project={project} refName={`refs/tags/${t.name}`} />
 						{writable && (
 							<Button
 								variant="ghost"

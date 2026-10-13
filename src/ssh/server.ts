@@ -55,6 +55,7 @@ const MAX_PACKET = 256 * 1024;
 const CHANNEL_WINDOW = 2 * 1024 * 1024;
 const CHANNEL_MAX_PACKET = 32 * 1024;
 const MAX_CHANNELS = 4;
+const MIN_CHANNEL_PACKET = 512;
 const MAX_AUTH_ATTEMPTS = 20;
 /** Unparsed input a client may have waiting: every channel's window and then some. */
 const MAX_UNPARSED = (MAX_CHANNELS + 2) * CHANNEL_WINDOW;
@@ -96,7 +97,6 @@ export class SshServer<U extends SshUser> {
 	/** Outgoing packets are encrypted in order. */
 	private sending: Promise<void> = Promise.resolve();
 	private recvSeq = 0;
-	private sendSeq = 0;
 	private recvCipher: Cipher | null = null;
 	private sendCipher: Cipher | null = null;
 	private sessionId: Uint8Array | null = null;
@@ -267,7 +267,6 @@ export class SshServer<U extends SshUser> {
 		} else {
 			packet = concat([header, body]);
 		}
-		this.sendSeq = (this.sendSeq + 1) >>> 0;
 		if (!this.closed || payload[0] === MSG.DISCONNECT) this.opts.send(packet);
 	}
 
@@ -397,7 +396,8 @@ export class SshServer<U extends SshUser> {
 		this.chosenCipher = cipherIn;
 		this.chosenKex = chosenKex;
 		// A guessed first key exchange packet that guessed wrong is skipped.
-		if (guessFollows && kex[0] !== chosenKex) this.ignoreNextPacket = true;
+		// A guessed first key exchange packet is skipped unless both guesses (key exchange and host key) were right (RFC 4253 §7).
+		if (guessFollows && (kex[0] !== chosenKex || hostKeys[0] !== hostKey)) this.ignoreNextPacket = true;
 	}
 
 	private async onKexEcdhInit(r: Reader) {
@@ -543,6 +543,8 @@ export class SshServer<U extends SshUser> {
 		const sender = r.uint32();
 		const window = r.uint32();
 		const maxPacket = r.uint32();
+		// Tiny packets would turn every write into thousands of messages; OpenSSH offers 32 KB.
+		if (maxPacket < MIN_CHANNEL_PACKET) throw new SshError("Channel packet size too small");
 		if (type !== "session" || this.channels.size >= MAX_CHANNELS) {
 			this.send(
 				new Writer()
@@ -600,6 +602,10 @@ export class SshServer<U extends SshUser> {
 	}
 
 	/** Used by sessions. */
+	protocolError(message: string) {
+		this.disconnect(DISCONNECT_REASON.PROTOCOL_ERROR, message);
+	}
+
 	sendChannelMessage(payload: Uint8Array) {
 		this.send(payload);
 	}
@@ -644,12 +650,12 @@ export class Session<U extends SshUser> {
 	// Input from the client.
 
 	received(data: Uint8Array) {
-		if (this.eof) return;
+		if (this.eof || data.length === 0) return;
 		this.chunks.push(data.slice());
 		this.buffered += data.length;
 		if (this.buffered > CHANNEL_WINDOW + CHANNEL_MAX_PACKET) {
-			// The client ignored the window it was given.
-			this.abort();
+			// The client ignored the window it was given: that's a protocol error, and it hears so.
+			this.server.protocolError("Channel window exceeded");
 			return;
 		}
 		this.notify();
@@ -683,14 +689,6 @@ export class Session<U extends SshUser> {
 			this.consumed = 0;
 		}
 		return chunk;
-	}
-
-	/** Puts back the unread end of a chunk. */
-	unread(chunk: Uint8Array) {
-		if (chunk.length === 0) return;
-		this.chunks.unshift(chunk);
-		this.buffered += chunk.length;
-		this.consumed -= chunk.length;
 	}
 
 	// Output to the client.

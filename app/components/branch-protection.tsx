@@ -39,7 +39,13 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 										key={o.id}
 										type="button"
 										title="Click to turn off"
-										onClick={() => save.mutate({ ...r, [o.id]: false })}
+										onClick={() => {
+											const next = { ...r, [o.id]: false };
+											// Turning off the last protection removes the rule.
+											if (!next.blockDeletions && !next.blockForcePushes && !next.requireMergeQueue) {
+												if (confirm(`Stop protecting ${r.pattern}?`)) remove.mutate(r.pattern);
+											} else save.mutate(next);
+										}}
 										className="rounded-full bg-raised px-2 py-0.5 text-[11px] text-dim hover:text-fg"
 									>
 										{o.label}

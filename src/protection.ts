@@ -4,38 +4,11 @@
 // are checked once they're stored, and put back if they rewrote history.
 import type { BranchRule } from "./api.ts";
 import type { ObjectReader } from "./git/diff.ts";
+import { protectionFor } from "./branch-rules.ts";
+
+export { patternMatches, protectionFor, validPattern } from "./branch-rules.ts";
 
 const ZERO = "0".repeat(40);
-
-/** Whether a branch name matches a rule's pattern: `*` stays within one path segment, `**` crosses them. */
-export function patternMatches(pattern: string, branch: string): boolean {
-	let re = "";
-	for (let i = 0; i < pattern.length; i++) {
-		const ch = pattern[i];
-		if (ch === "*" && pattern[i + 1] === "*") {
-			re += ".*";
-			i++;
-		} else if (ch === "*") re += "[^/]*";
-		else if (ch === "?") re += "[^/]";
-		else re += ch.replace(/[\\^$.|+()[\]{}]/g, "\\$&");
-	}
-	return new RegExp(`^${re}$`).test(branch);
-}
-
-export function validPattern(pattern: string): boolean {
-	return /^[A-Za-z0-9._/*?-]{1,200}$/.test(pattern) && !pattern.includes("..") && !pattern.startsWith("/") && !pattern.endsWith("/");
-}
-
-/** What applies to a branch: every rule whose pattern matches it, combined. */
-export function protectionFor(rules: BranchRule[], branch: string): Omit<BranchRule, "pattern" | "createdAt"> & { patterns: string[] } {
-	const matching = rules.filter((r) => patternMatches(r.pattern, branch));
-	return {
-		patterns: matching.map((r) => r.pattern),
-		blockDeletions: matching.some((r) => r.blockDeletions),
-		blockForcePushes: matching.some((r) => r.blockForcePushes),
-		requireMergeQueue: matching.some((r) => r.requireMergeQueue),
-	};
-}
 
 export interface RefCommand {
 	old: string;
@@ -47,7 +20,8 @@ export interface RefCommand {
 export function parseCommands(head: Uint8Array): { commands: RefCommand[]; capabilities: string[] } {
 	const commands: RefCommand[] = [];
 	let capabilities: string[] = [];
-	const decoder = new TextDecoder("latin1");
+	// UTF-8, as git's reports are read, so a ref named in both is the same string.
+	const decoder = new TextDecoder();
 	for (let i = 0; i + 4 <= head.length; ) {
 		const size = Number.parseInt(decoder.decode(head.subarray(i, i + 4)), 16);
 		if (!(size >= 4)) break;
@@ -71,6 +45,10 @@ export function checkPush(rules: BranchRule[], commands: RefCommand[]): { refuse
 	const fastForwardOnly: RefCommand[] = [];
 	for (const c of commands) {
 		if (!c.ref.startsWith("refs/heads/")) continue;
+		if (c.ref.startsWith(INCOMING)) {
+			refused.set(c.ref, "megit uses this branch name for pushes being checked");
+			continue;
+		}
 		const branch = c.ref.slice("refs/heads/".length);
 		const p = protectionFor(rules, branch);
 		if (p.patterns.length === 0) continue;
@@ -83,8 +61,7 @@ export function checkPush(rules: BranchRule[], commands: RefCommand[]): { refuse
 
 /**
  * Whether `ancestor` is in `descendant`'s history. The first-parent log answers the usual case (a
- * fast-forward) in one request; otherwise the walk follows every parent, not going past commits much
- * older than `ancestor` (they can't lead to it, clocks permitting). Null if it ran out of budget.
+ * fast-forward) in one request; otherwise the walk follows every parent. Null if it ran out of budget.
  */
 export async function isAncestor(
 	repo: ObjectReader & { log?(opts: { ref: string; limit: number }): Promise<{ hash: string }[]> },
@@ -97,10 +74,8 @@ export async function isAncestor(
 		const line = await repo.log({ ref: descendant, limit: 500 }).catch(() => []);
 		if (line.some((c) => c.hash === ancestor)) return true;
 	}
-	const target = await repo.readCommit(ancestor);
-	if (!target) return false;
-	// A day of slack for clocks that disagree.
-	const oldest = target.committedAt - 86400;
+	// Dates can't prune the walk (they lie), so it's bounded by the budget alone.
+	if (!(await repo.readCommit(ancestor))) return false;
 	const seen = new Set<string>([descendant]);
 	let frontier = [descendant];
 	let reads = 0;
@@ -112,7 +87,6 @@ export async function isAncestor(
 		for (const commit of commits) {
 			if (!commit) continue;
 			if (commit.parents.includes(ancestor)) return true;
-			if (commit.committedAt < oldest) continue;
 			for (const parent of commit.parents) {
 				if (seen.has(parent)) continue;
 				seen.add(parent);
@@ -196,12 +170,62 @@ export function readReport(response: Uint8Array): { lines: string[]; progress: U
 /** The response with the given refs turned from "ok" to "ng <reason>". */
 export function rewriteReport(response: Uint8Array, refused: Map<string, string>, capabilities: string[]): Uint8Array {
 	if (refused.size === 0) return response;
-	const { lines, progress } = readReport(response);
-	const rewritten = lines.map((line) => {
+	return mapReport(response, capabilities, (line) => {
 		const ref = line.startsWith("ok ") ? line.slice(3) : null;
 		return ref && refused.has(ref) ? `ng ${ref} ${refused.get(ref)}` : line;
 	});
-	return frame(rewritten, capabilities, progress);
+}
+
+/** The response with each report-status line passed through `map`; progress packets are kept. */
+export function mapReport(response: Uint8Array, capabilities: string[], map: (line: string) => string): Uint8Array {
+	const { lines, progress } = readReport(response);
+	if (lines.length === 0) return response;
+	return frame(lines.map(map), capabilities, progress);
+}
+
+// ── Quarantine ───────────────────────────────────────────────────────────────
+
+/** Where updates to fast-forward-only branches land first, to be checked before the branch moves. */
+export const INCOMING = "refs/heads/megit-incoming/";
+
+export interface Staged {
+	command: RefCommand;
+	/** The ref the push actually updates. */
+	temp: string;
+}
+
+/**
+ * Rewrites a push's commands so updates to fast-forward-only branches create a quarantine ref
+ * instead: the pack is stored, but the branch only moves once the new commits are checked. The
+ * rest of the push (other refs, capabilities, the pack) is unchanged.
+ */
+export function quarantine(head: Uint8Array, staged: RefCommand[]): { head: Uint8Array; staged: Staged[] } {
+	const id = crypto.randomUUID().slice(0, 8);
+	const out: Staged[] = [];
+	const parts: Uint8Array[] = [];
+	const decoder = new TextDecoder();
+	for (let i = 0; i + 4 <= head.length; ) {
+		const size = Number.parseInt(decoder.decode(head.subarray(i, i + 4)), 16);
+		if (!(size >= 4)) {
+			parts.push(head.subarray(i, i + 4));
+			i += 4;
+			continue;
+		}
+		const raw = head.subarray(i, i + size);
+		i += size;
+		const line = decoder.decode(raw.subarray(4)).replace(/\n$/, "");
+		const [command, caps] = line.split("\0");
+		const [oldOid, newOid, ref] = command.split(" ");
+		const match = staged.find((c) => c.ref === ref && c.old === oldOid && c.new === newOid);
+		if (!match) {
+			parts.push(raw);
+			continue;
+		}
+		const temp = `${INCOMING}${id}/${ref.slice("refs/heads/".length)}`;
+		out.push({ command: match, temp });
+		parts.push(pkt(`${ZERO} ${newOid} ${temp}${caps === undefined ? "" : `\0${caps}`}\n`));
+	}
+	return { head: join(parts), staged: out };
 }
 
 /** The refs a report says were updated. */

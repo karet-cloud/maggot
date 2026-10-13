@@ -13,7 +13,7 @@ const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
 ];
 
 /** A repository's webhooks: add, pause, test and inspect them. */
-export function Webhooks({ project }: { project: string }) {
+export function Webhooks({ project, archived = false }: { project: string; archived?: boolean }) {
 	const hooks = useQuery({ queryKey: keys.hooks(project), queryFn: () => api.hooks(project) });
 	return (
 		<Panel title="Webhooks" actions={<span className="text-[11px] text-faint">POSTed as JSON, signed with your secret</span>}>
@@ -37,7 +37,11 @@ export function Webhooks({ project }: { project: string }) {
 						))}
 					</ul>
 				)}
-				<AddHook project={project} />
+				{archived ? (
+					<p className="text-xs text-faint">The repository is archived: existing webhooks can be paused or removed, but not added or tested.</p>
+				) : (
+					<AddHook project={project} />
+				)}
 			</div>
 		</Panel>
 	);

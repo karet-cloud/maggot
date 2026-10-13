@@ -108,3 +108,9 @@ From the three-model review of 2026-10-13 (GPT-6.1-Sol, GPT-6-Astra, Claude Fabl
   shows for tag refs typed into the URL.
 - **UI nits**: sign-in doesn't return to the page you came from; compare allows head = base; a profile for
   a user who doesn't exist says they have no repositories.
+
+From the reviews of SSH, rename/transfer/archive, tags, the graph, branch protection and issues (2026-10-13; Claude Fable 5.1 and GPT-6-Astra; GPT-6.1-Sol's runs were refused by its provider), still open:
+- **Atomic pushes and protected branches**: an `--atomic` push that updates a fast-forward-only branch and other refs lands the others even if the protected branch is refused, since only that branch goes through the holding ref.
+- **SSH CPU budget**: a plain Worker holds the SSH WebSocket, so one session shares one request's CPU budget. Very large transfers may want the socket in a Durable Object, which gets a budget per message.
+- **SSH client keys**: Ed25519 is tested end to end; ECDSA and RSA signature checks are only exercised by unit-level parsing.
+- **Issue search** uses `LIKE` over title and body; it will want an FTS index as issues grow.

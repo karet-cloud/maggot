@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CircleCheck, CircleDot, Pencil, Tags, Trash2 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { IssueStateBadge, Label } from "../components/issues.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
@@ -29,10 +29,12 @@ function IssuePage() {
 		onSuccess: refresh,
 	});
 	const [reply, setReply] = useState("");
+	// One request either way, so a failure can't leave the comment posted and the state unchanged (and a retry post it twice).
 	const comment = useMutation({
-		mutationFn: async (close: boolean) => {
-			if (reply.trim()) await api.comment(project, number, reply);
-			if (close && data.data) await api.updateIssue(project, number, { state: data.data.issue.state === "open" ? "closed" : "open" });
+		mutationFn: async (toggle: boolean) => {
+			const state = toggle && data.data ? (data.data.issue.state === "open" ? "closed" : "open") : undefined;
+			if (reply.trim()) await api.comment(project, number, reply, state);
+			else if (state) await api.updateIssue(project, number, { state });
 		},
 		onSuccess: () => {
 			setReply("");
@@ -40,6 +42,24 @@ function IssuePage() {
 		},
 	});
 	const [editingTitle, setEditingTitle] = useState<string | null>(null);
+	// Comments before the newest page, loaded on request.
+	const [earlier, setEarlier] = useState<IssueComment[]>([]);
+	const [earlierMore, setEarlierMore] = useState(false);
+	// Another issue: start from its newest comments.
+	useEffect(() => {
+		setEarlier([]);
+		setEarlierMore(false);
+	}, [number]);
+	const loadEarlier = useMutation({
+		mutationFn: () => {
+			const first = earlier[0] ?? data.data?.comments[0];
+			return api.earlierComments(project, number, first?.id ?? "");
+		},
+		onSuccess: (page) => {
+			setEarlier((prev) => [...page.comments, ...prev]);
+			setEarlierMore(page.earlier);
+		},
+	});
 
 	if (data.isPending) return <Spinner />;
 	if (data.error) {
@@ -53,7 +73,9 @@ function IssuePage() {
 			<ErrorNote error={data.error} />
 		);
 	}
-	const { issue, comments } = data.data;
+	const { issue } = data.data;
+	const comments = [...earlier, ...data.data.comments];
+	const moreEarlier = earlier.length > 0 ? earlierMore : data.data.earlier;
 	const archived = Boolean(info.data?.repo.archivedAt);
 	const canPost = Boolean(viewer.data) && !archived;
 
@@ -115,6 +137,14 @@ function IssuePage() {
 			<div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px]">
 				<div className="min-w-0 space-y-4">
 					<Body project={project} issue={issue} archived={archived} />
+					{moreEarlier && (
+						<div className="text-center">
+							<Button className="text-xs" busy={loadEarlier.isPending} onClick={() => loadEarlier.mutate()}>
+								Load earlier comments
+							</Button>
+							<ErrorNote error={loadEarlier.error} />
+						</div>
+					)}
 					{comments.map((c) => (
 						<Comment key={c.id} project={project} number={number} comment={c} archived={archived} />
 					))}

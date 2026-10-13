@@ -5,8 +5,8 @@ import { canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
 import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts";
 import { toHttpError } from "./errors.ts";
 import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
-import { pushAccepted, setRef } from "./git/protocol.ts";
-import { acceptedRefs, checkPush, isAncestor, parseCommands, refusalReport, rewriteReport, type RefCommand } from "./protection.ts";
+import { listRefs, pushAccepted, RefUpdateRejected, setRef } from "./git/protocol.ts";
+import { checkPush, isAncestor, mapReport, parseCommands, quarantine, refusalReport, type Staged } from "./protection.ts";
 import { repoStore } from "./store.ts";
 import type { RemoteAccess } from "./git/workspace.ts";
 import type { ProjectCoordinator } from "./project.ts";
@@ -177,38 +177,44 @@ export async function discard(stream: ReadableStream<Uint8Array> | AsyncIterable
 }
 
 /**
- * After storage has accepted a push: any branch that may only fast-forward but was rewritten is put
- * back where it was, and the report the client sees says so for that branch.
+ * After a push whose fast-forward-only updates went to holding refs (see `quarantine`): each one that
+ * landed is checked, and its branch moves (compare-and-swap, from the value the client saw) only if
+ * the new commits descend from the old head. The holding refs are removed either way, and git's
+ * report names the real branches with the real outcome. Nothing depends on the client having asked
+ * for a report: what landed is read back from storage.
  */
-export async function enforceFastForward(
-	env: Env,
-	row: RepoRow,
-	upstream: RemoteAccess,
-	response: Uint8Array,
-	commands: RefCommand[],
-	capabilities: string[],
-): Promise<Uint8Array> {
-	if (commands.length === 0) return response;
-	const accepted = acceptedRefs(response);
-	const checks = commands.filter((c) => accepted.has(c.ref));
-	if (checks.length === 0) return response;
-	const refused = new Map<string, string>();
+export async function settleStaged(env: Env, row: RepoRow, upstream: RemoteAccess, response: Uint8Array, staged: Staged[], capabilities: string[]): Promise<Uint8Array> {
+	if (staged.length === 0) return response;
+	const { branches } = await listRefs(upstream, true);
+	const outcomes = new Map<string, string>();
 	using repo = await repoStore(env).get(row.id);
-	for (const c of checks) {
-		const fastForward = await isAncestor(repo, c.old, c.new).catch(() => null);
-		if (fastForward === true) continue;
-		try {
-			// Only if nobody has moved it since.
-			await setRef(upstream, c.ref, c.new, c.old);
-			refused.set(
-				c.ref,
-				fastForward === null ? "protected branch: too many new commits to confirm a fast-forward; push fewer at a time" : "protected branch: force pushes aren't allowed",
+	for (const { command, temp } of staged) {
+		const ref = command.ref;
+		if (branches.get(temp.slice("refs/heads/".length)) !== command.new) continue; // storage refused it; its report says why
+		const fastForward = await isAncestor(repo, command.old, command.new).catch(() => null);
+		if (fastForward === true) {
+			try {
+				await setRef(upstream, ref, command.old, command.new);
+				outcomes.set(temp, `ok ${ref}`);
+			} catch (err) {
+				outcomes.set(temp, err instanceof RefUpdateRejected ? `ng ${ref} fetch first: the branch moved while you were pushing` : `ng ${ref} couldn't update the branch; try again`);
+			}
+		} else {
+			outcomes.set(
+				temp,
+				`ng ${ref} ${fastForward === null ? "protected branch: too many new commits to confirm a fast-forward; push fewer at a time" : "protected branch: force pushes aren't allowed"}`,
 			);
-		} catch (err) {
-			console.error("putting back a force push failed", err);
 		}
+		await setRef(upstream, temp, command.new, null).catch((err) => console.error("removing a holding ref failed", err));
 	}
-	return rewriteReport(response, refused, capabilities);
+	const real = new Map(staged.map((s) => [s.temp, s.command.ref]));
+	return mapReport(response, capabilities, (line) => {
+		const [status, ref] = line.split(" ", 2);
+		if ((status === "ok" || status === "ng") && real.has(ref)) return outcomes.get(ref) ?? line.replace(ref, real.get(ref) as string);
+		// report-status-v2 option lines name refs too.
+		for (const [temp, name] of real) if (line.includes(temp)) return line.replace(temp, name);
+		return line;
+	});
 }
 
 const RESULT_HEADERS = { "content-type": "application/x-git-receive-pack-result", "cache-control": "no-cache" };
@@ -244,15 +250,14 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 	}
 
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(row.id);
-	const upstream = await coordinator.gitRemote(pushing ? "write" : "read");
+	const { remote: upstream, rules: branchRules } = pushing ? await coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
 	const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
 	const receiving = pushing && route.endpoint === "git-receive-pack";
 	let requestBody = request.body;
 	// Protected branches: refuse what the commands alone show is not allowed, and note the branches
 	// that may only fast-forward, to check once the push is stored.
-	let protect: { commands: RefCommand[]; capabilities: string[] } | null = null;
+	let protect: { staged: Staged[]; capabilities: string[] } | null = null;
 	if (receiving && requestBody) {
-		const branchRules = await coordinator.getBranchRules();
 		if (branchRules.length > 0) {
 			if (headers["content-encoding"] === "gzip") {
 				requestBody = requestBody.pipeThrough(new DecompressionStream("gzip") as ReadableWritablePair<Uint8Array, Uint8Array>);
@@ -265,8 +270,9 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 				await discard(rest, maxPush);
 				return new Response(refusalReport(commands, refused, capabilities), { headers: RESULT_HEADERS });
 			}
-			protect = { commands: fastForwardOnly, capabilities };
-			requestBody = concatStreams(head, rest);
+			const held = quarantine(head, fastForwardOnly);
+			protect = { staged: held.staged, capabilities };
+			requestBody = concatStreams(held.head, rest);
 		}
 	}
 	// Counts what a push sends, for the repository's size, and stops one that runs past the limit.
@@ -302,9 +308,9 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 	}
 	if (res.status === 401 || res.status === 403) return deny(502, "The storage backend refused the request.");
 	if (receiving && res.ok && res.body) {
-		if (protect && protect.commands.length > 0) {
-			// The report is small; hold it until any rewritten protected branch has been put back.
-			const report = await enforceFastForward(env, row, upstream, new Uint8Array(await res.arrayBuffer()), protect.commands, protect.capabilities);
+		if (protect && protect.staged.length > 0) {
+			// The report is small; hold it until the protected branches have been checked and moved.
+			const report = await settleStaged(env, row, upstream, new Uint8Array(await res.arrayBuffer()), protect.staged, protect.capabilities);
 			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent), { status: res.status, headers: out });
 		}
 		return new Response(watchPush(env, ctx, row, res.body, () => sent), { status: res.status, headers: out });
