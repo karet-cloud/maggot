@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Archive, Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
-import { RepoCommands } from "../components/repo-access.tsx";
-import { ForkedFrom, VisibilityBadge } from "../components/repos.tsx";
-import { Button, CopyField, cx, Empty, ErrorNote, Field, Input, Modal, Oid, Panel, Spinner } from "../components/ui.tsx";
+import { CloneUrl, RepoCommands } from "../components/repo-access.tsx";
+import { ArchivedBadge, ForkedFrom, VisibilityBadge } from "../components/repos.tsx";
+import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type RepoInfo, type Task } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 import { useProjectTasks } from "../lib/queries.ts";
@@ -30,6 +30,19 @@ function ProjectLayout() {
 	const [connecting, setConnecting] = useState(false);
 	const [forking, setForking] = useState(false);
 	const p = info.data;
+	const navigate = useNavigate();
+	const location = useRouterState({ select: (s) => s.location });
+	// An old name (the repository was renamed or transferred) or a different spelling: show the current one.
+	const canonical = p?.repo.fullName;
+	useEffect(() => {
+		if (!canonical || canonical === project) return;
+		// The URL's own first two segments, not the params, which can lag a navigation behind.
+		const [, urlOwner = "", urlRepo = "", ...rest] = location.pathname.split("/");
+		if (`${decodeURIComponent(urlOwner)}/${decodeURIComponent(urlRepo)}` !== project) return;
+		const [newOwner, newRepo] = canonical.split("/").map(encodeURIComponent);
+		const path = ["", newOwner, newRepo, ...rest].join("/");
+		void navigate({ href: `${path}${location.searchStr}${location.hash ? `#${location.hash}` : ""}`, replace: true });
+	}, [canonical, project, location, navigate]);
 
 	if (info.error) {
 		const missing = info.error instanceof ApiError && info.error.status === 404;
@@ -42,6 +55,7 @@ function ProjectLayout() {
 		);
 	}
 	const canWrite = p?.repo.canWrite ?? false;
+	const archived = Boolean(p?.repo.archivedAt);
 
 	return (
 		<LiveContext.Provider value={live}>
@@ -52,6 +66,7 @@ function ProjectLayout() {
 							<div className="flex items-center gap-3">
 								<h1 className="min-w-0 break-all font-mono text-xl font-semibold tracking-tight">{project}</h1>
 								{p && <VisibilityBadge visibility={p.repo.visibility} />}
+								{archived && <ArchivedBadge />}
 								<LiveDot status={live.status} />
 							</div>
 							{p?.repo.forkOf && <ForkedFrom source={p.repo.forkOf} className="mt-1" />}
@@ -80,7 +95,12 @@ function ProjectLayout() {
 								Clone / push
 							</Button>
 							{canWrite && (
-								<Button variant="primary" onClick={() => setCreating(true)} disabled={p !== undefined && !p.head} title={p && !p.head ? "Push a first commit before creating tasks" : "Give an agent its own fork to work in"}>
+								<Button
+									variant="primary"
+									onClick={() => setCreating(true)}
+									disabled={(p !== undefined && !p.head) || archived}
+									title={archived ? "Archived repositories are read-only" : p && !p.head ? "Push a first commit before creating tasks" : "Give an agent its own fork to work in"}
+								>
 									<Plus className="size-4" />
 									New agent task
 								</Button>
@@ -110,10 +130,18 @@ function ProjectLayout() {
 									<span className="text-faint">attention</span> <b className="font-medium text-rose-300">{p.stats.conflict + p.stats.failed}</b>
 								</span>
 							)}
-							<div className="w-full min-w-0 max-w-md sm:ml-auto sm:w-auto sm:min-w-80">
-								<CopyField value={p.repo.cloneUrl} />
+							<div className="w-full min-w-0 max-w-md sm:ml-auto sm:w-auto sm:min-w-96">
+								<CloneUrl repo={p.repo} />
 							</div>
 						</div>
+					)}
+					{p?.repo.archivedAt && (
+						<p className="mt-4 flex items-center gap-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
+							<Archive className="size-4 shrink-0 text-amber-300" />
+							<span>
+								This repository was archived <TimeAgo at={p.repo.archivedAt} />. It's read-only: you can clone, fork and star it, but nobody can push to it.
+							</span>
+						</p>
 					)}
 					<nav className="-mx-5 mt-4 flex gap-1 overflow-x-auto px-5">
 						<Tab to="/$owner/$repo" project={project} icon={<FolderCode className="size-3.5" />} label="Code" exact />

@@ -260,13 +260,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 */
 	async repoAccess(scope: "read" | "write" = "write"): Promise<GitCredentials> {
 		const meta = this.meta();
+		if (scope === "write") this.assertWritable();
 		return this.credentials(meta.name, meta.defaultBranch, scope, REPO_TOKEN_TTL);
 	}
 
 	/** Where the Git proxy sends a user's clone or push, with a cached short-lived Artifacts token. */
 	async gitRemote(scope: "read" | "write"): Promise<RemoteAccess> {
 		const meta = this.meta();
-		if (scope === "write") return this.baseAccess(meta);
+		if (scope === "write") {
+			this.assertWritable();
+			return this.baseAccess(meta);
+		}
 		if (!this.readToken || this.readToken.expires < Date.now() + 120_000) {
 			const creds = await this.credentials(meta.name, meta.defaultBranch, "read", INTERNAL_TOKEN_TTL);
 			this.readToken = { token: creds.token, expires: Date.parse(creds.expiresAt) };
@@ -611,6 +615,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async deleteBranch(name: string): Promise<void> {
 		const meta = this.meta();
+		this.assertWritable();
 		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
 		const access = await this.baseAccess(meta);
 		const head = (await listBranches(access)).get(name);
@@ -627,6 +632,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 */
 	async commitFiles(input: CommitFilesInput): Promise<{ commit: string; branch: string; packBytes: number }> {
 		const meta = this.meta();
+		this.assertWritable();
 		const access = await this.baseAccess(meta);
 		const refs = await listBranches(access);
 		const head = refs.get(input.branch) ?? null;
@@ -710,6 +716,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 */
 	async createTask(input: CreateTaskInput, waitMs = FORK_WAIT_MS): Promise<TaskAccess> {
 		const meta = this.meta();
+		this.assertWritable();
 		const title = input.title?.trim();
 		if (!title) throw new HttpError(400, "INVALID_INPUT", "title is required");
 		const paths = [...new Set((input.paths ?? []).map(normalizeClaim))];
@@ -770,6 +777,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Fresh credentials for an agent: write access to its fork, read access to the project. */
 	async access(id: string): Promise<TaskAccess> {
 		const meta = this.meta();
+		this.assertWritable();
 		const row = this.row(id);
 		if (row.status === "merged" || row.status === "abandoned") {
 			throw new HttpError(409, "TASK_CLOSED", `Task ${id} is ${row.status}`);
@@ -789,6 +797,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async submit(id: string): Promise<Task> {
 		const row = this.row(id);
+		this.assertWritable();
 		if (!["open", "conflict", "failed"].includes(row.status)) {
 			throw new HttpError(409, "INVALID_STATE", `Task ${id} is ${row.status} and cannot be submitted`);
 		}
@@ -1110,6 +1119,33 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private fail(id: string, code: string, message: string) {
 		this.sql.exec("UPDATE tasks SET status = 'failed', error = ?, updated_at = ? WHERE id = ?", message, new Date().toISOString(), id);
 		this.emit("task.failed", id, { code, message });
+	}
+
+	// ── Archiving ────────────────────────────────────────────────────────────
+
+	/**
+	 * An archived repository is read-only: no pushes, web commits, branch deletions or agent tasks.
+	 * It can't be archived while agent tasks are still active, so nothing is left half merged.
+	 */
+	async setArchived(archived: boolean): Promise<void> {
+		this.meta();
+		if (!archived) {
+			this.sql.exec("DELETE FROM meta WHERE key = 'archived'");
+			return;
+		}
+		const active = this.sql
+			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(", ")})`, ...ACTIVE_STATUSES)
+			.one().n;
+		if (active > 0) {
+			throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before archiving`);
+		}
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('archived', '1')");
+	}
+
+	private assertWritable() {
+		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'archived'").toArray().length > 0) {
+			throw new HttpError(403, "ARCHIVED", "This repository is archived, so it's read-only. Its owner can unarchive it in Settings.");
+		}
 	}
 
 	// ── Helpers ──────────────────────────────────────────────────────────────

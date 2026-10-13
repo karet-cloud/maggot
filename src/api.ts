@@ -237,6 +237,52 @@ export interface RepoInfo {
 	forkOf: { owner: string; name: string } | null;
 	/** Bytes pushed to it so far, which the size limit is checked against. */
 	sizeBytes: number;
+	/** SSH clone URL (`git@host:owner/name.git`); needs the WebSocket ProxyCommand from the SSH keys page. */
+	sshUrl: string;
+	/** When it was archived (made read-only); null if it's live. */
+	archivedAt: string | null;
+}
+
+/** A pending offer to hand a repository to another user, who has to accept it. */
+export interface RepoTransfer {
+	/** The repository's internal id; accept or decline with it. */
+	id: string;
+	repo: string;
+	from: string;
+	to: string;
+	description: string | null;
+	visibility: Visibility;
+	createdAt: string;
+	expiresAt: string;
+}
+
+/** Every file path in a commit, for the file finder. */
+export interface FileList {
+	commit: string | null;
+	paths: string[];
+	/** The repository has more files than the finder lists. */
+	truncated: boolean;
+}
+
+export interface SshKey {
+	id: string;
+	name: string;
+	/** ssh-ed25519, ecdsa-sha2-nistp256, ssh-rsa, ... */
+	type: string;
+	/** SHA256:..., as `ssh-keygen -lf` prints it. */
+	fingerprint: string;
+	createdAt: string;
+	lastUsedAt: string | null;
+}
+
+/** How to reach megit over SSH. */
+export interface SshInfo {
+	/** The host key, in known_hosts form (`ssh-ed25519 AAAA...`). */
+	hostKey: string;
+	fingerprint: string;
+	/** WebSocket URL the ProxyCommand connects to. */
+	url: string;
+	host: string;
 }
 
 export interface Viewer {
@@ -295,7 +341,7 @@ export interface WebhookDelivery {
 	nextAt: string | null;
 }
 
-export type NotificationKind = "star" | "fork" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
+export type NotificationKind = "star" | "fork" | "transfer" | "task.merged" | "task.failed" | "task.conflict" | "webhook.failing";
 
 export interface Notification {
 	id: string;

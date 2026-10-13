@@ -6,7 +6,8 @@ Git hosting for people, and for many agents working on the same codebase at once
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/), Workers, Durable Objects and D1.
 
 Sign up, create a public or private repository, and `git push` / `git clone` it over HTTPS at
-`https://<host>/<owner>/<repo>.git` with a personal access token. Browse it on the web: code, history,
+`https://<host>/<owner>/<repo>.git` with a personal access token, or over SSH at
+`git@<host>:<owner>/<repo>.git` with an SSH key. Browse it on the web: code, history,
 branches, diffs, archives. On top of that sits the agent layer: an HTTP + WebSocket API, a merge-queue
 coordinator, an agent CLI, and a live board. The UI is a plain client of the public API (types in [`src/api.ts`](src/api.ts)),
 so anything it shows can be built against directly.
@@ -47,7 +48,7 @@ deleted.
 
 ## Web UI
 
-One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI everywhere else.
+One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api`, and the UI everywhere else.
 
 - **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
   in D1). Usernames are the first part of every repository URL, so they can't be changed.
@@ -71,12 +72,31 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   before any lookup. Auth endpoints take JSON only, so every limit sees the fields it keys on.
 - **Repositories**: `/<owner>/<repo>`, public (anyone can browse and clone; only the owner pushes) or
   private (only the owner sees it; to anyone else it doesn't exist). Create one empty, with a README, or by
-  importing a public Git URL. Settings change the description and visibility, or delete it.
+  importing a public Git URL. Settings change the name, description and visibility, archive it, hand it
+  to another user, or delete it.
+- **Rename and transfer**: a rename keeps the old name as a redirect (the web, the API and git all
+  follow it) until another repository takes that name. A transfer is an offer: the new owner gets a
+  notification and accepts or declines on `/transfers` within a week, picking another name if they
+  already have one like it; accepting checks their quotas, moves the repository (stars, forks and
+  webhooks included) and leaves the old address redirecting.
+- **Archive**: an archived repository is read-only. Pushes (HTTPS and SSH), web edits, branch deletes,
+  agent tasks and settings changes are refused until it's unarchived; cloning, forking and starring
+  still work. It can't be archived while agent tasks are active, so nothing is left half merged.
 - **Git over HTTPS**: `git clone https://<host>/<owner>/<repo>.git`. Pushing, and cloning private
   repositories, needs the username plus a **personal access token** as the password (Tokens page, or
   "Add a token" in a repository's Clone / push dialog, which puts it straight into the commands). The
   Worker checks access, then streams Git's smart-HTTP exchange to Artifacts with a short-lived internal
   token, so people only ever hold megit credentials. Each push emits a `repo.pushed` event.
+- **Git over SSH**: `git clone git@<host>:<owner>/<repo>.git` with a key added under Settings → SSH
+  keys (Ed25519, ECDSA or RSA). Workers can't listen on port 22, so ssh connects through a
+  `ProxyCommand` that carries the SSH byte stream over a WebSocket to `/_ssh`
+  ([`/ssh-proxy.mjs`](src/ssh/proxy-script.ts), Node.js 22+; the SSH keys page has the one-time
+  `~/.ssh/config` entry). The Worker is the SSH server ([`src/ssh/`](src/ssh)): ML-KEM-768 + X25519
+  (post-quantum, what OpenSSH 10 prefers) or curve25519 key exchange, AES-GCM, and an Ed25519 host key
+  derived from `MEGIT_API_KEY` (or `MEGIT_SSH_HOST_KEY_SEED`), so every isolate presents the same one.
+  Fetches use Git protocol v2, whose requests are stateless and map one-to-one onto smart-HTTP requests
+  to Artifacts; pushes stream the commands and pack as one receive-pack request. The same permission,
+  verification, archive, quota and rate-limit checks apply as over HTTPS.
 - **Push an existing project**: an empty repository shows GitHub-style quick-setup commands
   (`git remote add megit <url>`, `git branch -M <branch>`, `git push -u megit <branch>`, plus `--all` and
   `--tags`). The default branch is chosen at creation (`master` unless you change it).
@@ -90,6 +110,8 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   number (shift-click for a range) to link to `#L10-L20`, and "Permalink" copies that link pinned to the
   commit. Markdown renders (relative links and images resolve inside the repo), images preview, and
   every file has Raw and Download. "Download" on the tree gets the whole ref as `.zip` or `.tar.gz`.
+  "Go to file" (or `t`) fuzzy-finds any path at the current ref, ranking file names, word starts and
+  runs first.
 - **Stars and forks**: star any repository you can see (counts on every list; a profile's Stars tab
   lists them). Fork copies a repository with every branch and tag into your account (a fork of a
   private repository stays private, and starts out counting its source's size against your quota);
@@ -221,7 +243,13 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
 | POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, readme? }` | `{ repo, project }` (signed-in users) |
 | GET | `/repos/:owner/:repo` | | `{ project, repo }` |
-| PATCH | `/repos/:owner/:repo` | `{ visibility?, description? }` | `{ repo }` (owner) |
+| PATCH | `/repos/:owner/:repo` | `{ visibility?, description?, name?, archived? }` | `{ repo }` (owner); a new `name` leaves the old one redirecting |
+| GET / POST / DELETE | `/repos/:owner/:repo/transfer` | `{ to }` | the pending offer; offer the repository to user `to`; cancel the offer (owner) |
+| GET | `/transfers` | | `{ transfers: RepoTransfer[] }`: offers made to you |
+| POST | `/transfers/:id/accept`, `/transfers/:id/decline` | `{ name? }` | take the repository (under `name` if given) → `{ repo }`, or turn it down |
+| GET | `/repos/:owner/:repo/paths` | `?ref=` | `FileList`: every file path at `ref` (up to 20,000), for the file finder |
+| GET | `/ssh` | | `SshInfo`: the host key, its fingerprint and the WebSocket URL |
+| GET / POST / DELETE | `/ssh/keys`, `/ssh/keys/:id` | `{ key, name? }` | list, add (an authorized_keys line) or remove your SSH keys |
 | DELETE | `/repos/:owner/:repo` | | deletes it, its agent forks and state (owner) |
 | PUT / DELETE | `/repos/:owner/:repo/star` | | star or unstar (signed in, read access) → `{ starred, stars }` |
 | GET / POST | `/repos/:owner/:repo/forks` | `{ name? }` | list public forks; fork into your account (read access) |
@@ -296,6 +324,7 @@ src/auth.ts           Better Auth, personal access tokens, who-may-do-what
 src/policy.ts         Rate limits (Limiter DO), quotas, email verification policy
 src/db.ts             D1 schema (created on first use), repositories, tokens
 src/git-http.ts       git clone/fetch/push at /<owner>/<repo>.git, proxied to Artifacts
+src/ssh/              SSH server over a WebSocket (transport, keys, git bridge) and the client proxy script
 src/project.ts        ProjectCoordinator DO (tasks, fork + merge queues, events, WebSocket) + Registry DO
 src/git/workspace.ts  In-memory git workspace: fetch, 3-way merge, changed files, push
 src/git/diff.ts       Tree diffs and merge-base walks over the Artifacts object reads
@@ -342,7 +371,8 @@ npm run typecheck
   needs a verified email and a repository under its size limit).
 - Live sockets are checked when they connect; a visibility change disconnects them all, but revoking
   a token doesn't close a socket it opened.
-- SSH remotes and Git LFS: HTTPS with personal access tokens only.
+- Git LFS. SSH needs the ProxyCommand: Workers can't take raw TCP on port 22 (Spectrum could, on
+  Enterprise plans), and SSH fetches need Git protocol v2 (git 2.26 and newer use it by default).
 - Pull requests and reviews for people (agents already land work through the merge queue).
 - Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).
 - Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's

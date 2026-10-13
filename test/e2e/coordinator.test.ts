@@ -704,3 +704,147 @@ test("code search, webhooks and notifications", async () => {
 	await as(ada)("/notifications/read", { method: "POST", body: JSON.stringify({}) });
 	assert.equal(((await (await as(ada)("/notifications?unread")).json()) as { unread: number }).unread, 0);
 });
+
+test("repositories can be renamed, archived and transferred with the recipient's consent; old names redirect", async () => {
+	const ada = await newUser("rena");
+	const bob = await newUser("renb");
+	const carol = await newUser("renc");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "orig", visibility: "public", readme: true }) })).status, 201);
+
+	// Renaming keeps the old name working, on the web and for git.
+	assert.equal((await as(ada)(`/repos/${ada.username}/orig`, { method: "PATCH", body: JSON.stringify({ name: "bad/name" }) })).status, 400);
+	const renamed = await as(ada)(`/repos/${ada.username}/orig`, { method: "PATCH", body: JSON.stringify({ name: "renamed" }) });
+	assert.equal(renamed.status, 200, await renamed.clone().text());
+	const viaOld = (await (await as(null)(`/repos/${ada.username}/orig`)).json()) as { repo: { fullName: string } };
+	assert.equal(viaOld.repo.fullName, `${ada.username}/renamed`);
+	const exec = promisify(execFile);
+	await exec("git", ["clone", "-q", `${api}/${ada.username}/orig.git`, join(root, "renamed-clone")]);
+
+	// The file finder lists every path.
+	const paths = (await (await as(null)(`/repos/${ada.username}/renamed/paths`)).json()) as { paths: string[]; truncated: boolean };
+	assert.deepEqual([paths.paths, paths.truncated], [["README.md"], false]);
+
+	// Archived: read-only for git, the web editor and settings, but still starrable; unarchiving undoes it.
+	const repo = `/repos/${ada.username}/renamed`;
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: true }) })).status, 200);
+	const head = ((await (await as(ada)(repo)).json()) as { project: { head: string }; repo: { archivedAt: string | null } });
+	assert.ok(head.repo.archivedAt);
+	const edit = () =>
+		as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", message: "m", files: [{ path: "x.txt", content: "x" }] }) });
+	assert.equal((await edit()).status, 403);
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ description: "nope" }) })).status, 403);
+	assert.equal((await as(bob)(`${repo}/star`, { method: "PUT" })).status, 200);
+	const push = join(root, "renamed-clone");
+	await exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "late"], { cwd: push });
+	const authed = new URL(`${api}/${ada.username}/renamed.git`);
+	authed.username = ada.username;
+	authed.password = ada.token;
+	await assert.rejects(exec("git", ["push", "-q", authed.toString(), "master"], { cwd: push }), /archived/);
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: false }) })).status, 200);
+	assert.equal((await edit()).status, 201);
+
+	// Transfers wait for the recipient; nobody else can take them.
+	assert.equal((await as(ada)(`${repo}/transfer`, { method: "POST", body: JSON.stringify({ to: "no-such-user-x" }) })).status, 404);
+	assert.equal((await as(bob)(`${repo}/transfer`, { method: "POST", body: JSON.stringify({ to: carol.username }) })).status, 403);
+	const offered = await as(ada)(`${repo}/transfer`, { method: "POST", body: JSON.stringify({ to: bob.username }) });
+	assert.equal(offered.status, 201, await offered.clone().text());
+	const { transfer } = (await offered.json()) as { transfer: { id: string; to: string } };
+	assert.equal(transfer.to, bob.username);
+	assert.equal((await as(carol)(`/transfers/${transfer.id}/accept`, { method: "POST", body: "{}" })).status, 404);
+	const incoming = (await (await as(bob)("/transfers")).json()) as { transfers: { id: string; repo: string; from: string }[] };
+	assert.deepEqual(incoming.transfers.map((t) => [t.repo, t.from]), [[`${ada.username}/renamed`, ada.username]]);
+	const accepted = await as(bob)(`/transfers/${transfer.id}/accept`, { method: "POST", body: "{}" });
+	assert.equal(accepted.status, 200, await accepted.clone().text());
+	assert.equal(((await accepted.json()) as { repo: { fullName: string } }).repo.fullName, `${bob.username}/renamed`);
+	// Both old names lead to the new home, and the old owner can't change it any more.
+	for (const old of [`/repos/${ada.username}/orig`, repo]) {
+		assert.equal(((await (await as(null)(old)).json()) as { repo: { fullName: string } }).repo.fullName, `${bob.username}/renamed`);
+	}
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ description: "mine?" }) })).status, 403);
+	assert.equal((await as(bob)(`/repos/${bob.username}/renamed`, { method: "PATCH", body: JSON.stringify({ description: "mine" }) })).status, 200);
+	assert.equal(((await (await as(bob)("/transfers")).json()) as { transfers: unknown[] }).transfers.length, 0);
+});
+
+test("git over SSH: keys, clone, push, permissions and archived repositories", async () => {
+	const ada = await newUser("ssha");
+	const bob = await newUser("sshb");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	const exec = promisify(execFile);
+	const dir = join(root, "ssh");
+	await exec("mkdir", ["-p", dir]);
+	const { PROXY_SCRIPT } = await import("../../src/ssh/proxy-script.ts");
+	await writeFile(join(dir, "proxy.mjs"), PROXY_SCRIPT);
+	const keyFor = async (who: string) => {
+		await exec("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", who, "-f", join(dir, who)]);
+		const { readFile } = await import("node:fs/promises");
+		return readFile(join(dir, `${who}.pub`), "utf8");
+	};
+	const adaKey = await keyFor("ada");
+	const bobKey = await keyFor("bob");
+	assert.equal((await as(ada)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: "ssh-ed25519 notbase64!!" }) })).status, 400);
+	const added = await as(ada)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: adaKey }) });
+	assert.equal(added.status, 201, await added.clone().text());
+	assert.equal((await as(bob)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: adaKey }) })).status, 409, "a key belongs to one account");
+	assert.equal((await as(bob)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: bobKey }) })).status, 201);
+	const info = (await (await fetch(`${api}/api/ssh`)).json()) as { hostKey: string; url: string };
+	await writeFile(join(dir, "known_hosts"), `megit-test ${info.hostKey}\n`);
+
+	const ssh = (who: string) =>
+		[
+			"ssh -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes",
+			`-o UserKnownHostsFile=${join(dir, "known_hosts")} -i ${join(dir, who)}`,
+			`-o "ProxyCommand=node ${join(dir, "proxy.mjs")} ${info.url}"`,
+		].join(" ");
+	const git = (who: string, args: string[], cwd?: string) =>
+		exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env: { ...process.env, GIT_SSH_COMMAND: ssh(who), GIT_TERMINAL_PROMPT: "0" } });
+
+	// A key that isn't on any account gets nowhere; a known one is greeted by name.
+	await keyFor("stranger");
+	await assert.rejects(exec("sh", ["-c", `${ssh("stranger")} -T git@megit-test`]), /Permission denied/);
+	await assert.rejects(exec("sh", ["-c", `${ssh("ada")} -T git@megit-test`]), (err: { stderr: string }) => err.stderr.includes(`Hi ${ada.username}!`));
+
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "over-ssh", visibility: "private", readme: true }) })).status, 201);
+	const remote = `git@megit-test:${ada.username}/over-ssh.git`;
+	await git("ada", ["clone", "-q", remote, join(dir, "clone")]);
+	await writeFile(join(dir, "clone", "big.bin"), Buffer.alloc(150_000, 7));
+	await git("ada", ["add", "-A"], join(dir, "clone"));
+	await git("ada", ["commit", "-q", "-m", "over ssh"], join(dir, "clone"));
+	await git("ada", ["push", "-q", "origin", "master"], join(dir, "clone"));
+	const head = (await git("ada", ["rev-parse", "HEAD"], join(dir, "clone"))).stdout.trim();
+	const view = (await (await as(ada)(`/repos/${ada.username}/over-ssh`)).json()) as { project: { head: string }; repo: { sizeBytes: number; sshUrl: string } };
+	assert.equal(view.project.head, head);
+	assert.ok(view.repo.sizeBytes > 0, "the push counts towards the size quota");
+	assert.equal(view.repo.sshUrl, `git@127.0.0.1:${ada.username}/over-ssh.git`);
+	await git("ada", ["push", "-q", "origin", "master:topic"], join(dir, "clone"));
+	await git("ada", ["push", "-q", "origin", "--delete", "topic"], join(dir, "clone"));
+	await git("ada", ["fetch", "-q", "origin"], join(dir, "clone"));
+
+	// Someone else's private repository doesn't exist for them.
+	await assert.rejects(git("bob", ["clone", "-q", remote, join(dir, "bob-clone")]), /not found/);
+
+	// Archived repositories refuse pushes over SSH too.
+	assert.equal((await as(ada)(`/repos/${ada.username}/over-ssh`, { method: "PATCH", body: JSON.stringify({ archived: true }) })).status, 200);
+	await git("ada", ["commit", "-q", "--allow-empty", "-m", "late"], join(dir, "clone"));
+	await assert.rejects(git("ada", ["push", "-q", "origin", "master"], join(dir, "clone")), /archived/);
+	assert.equal((await as(ada)(`/repos/${ada.username}/over-ssh`, { method: "PATCH", body: JSON.stringify({ archived: false }) })).status, 200);
+
+	// Once a repository is full, further pushes are refused with the reason.
+	await writeFile(join(dir, "clone", "bigger.bin"), Buffer.from(Array.from({ length: 300_000 }, () => Math.floor(Math.random() * 256))));
+	await git("ada", ["add", "-A"], join(dir, "clone"));
+	await git("ada", ["commit", "-q", "-m", "fills it up"], join(dir, "clone"));
+	await git("ada", ["push", "-q", "origin", "master"], join(dir, "clone"));
+	await git("ada", ["commit", "-q", "--allow-empty", "-m", "one more"], join(dir, "clone"));
+	await assert.rejects(git("ada", ["push", "-q", "origin", "master"], join(dir, "clone")), /size limit/);
+
+	// Removing the key locks it out.
+	const { keys } = (await (await as(ada)("/ssh/keys")).json()) as { keys: { id: string; fingerprint: string }[] };
+	assert.equal(keys.length, 1);
+	assert.equal((await as(ada)(`/ssh/keys/${keys[0].id}`, { method: "DELETE" })).status, 200);
+	await assert.rejects(git("ada", ["fetch", "-q", "origin"], join(dir, "clone")), /Permission denied/);
+});
