@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, Link2, Pencil, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
+import { BlameView } from "../components/blame.tsx";
 import { GoToFile } from "../components/file-finder.tsx";
 import { BranchSelect } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
@@ -93,6 +94,17 @@ function Code() {
 							>
 								<FilePlus2 className="size-3.5" />
 								Add file
+							</Link>
+						)}
+						{writable && onBranch && (
+							<Link
+								to="/$owner/$repo/upload"
+								params={repoParams(project)}
+								search={{ ref, dir: path || undefined }}
+								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+							>
+								<Upload className="size-3.5" />
+								Upload
 							</Link>
 						)}
 						<ArchiveMenu project={project} refName={ref} />
@@ -210,6 +222,7 @@ function FileView({
 		enabled: !image,
 	});
 	const [mode, setMode] = useState<"preview" | "code">("preview");
+	const [blaming, setBlaming] = useState(false);
 	const navigate = useNavigate({ from: Route.fullPath });
 	const hash = useRouterState({ select: (s) => s.location.hash });
 	const selected = parseLines(hash);
@@ -225,7 +238,7 @@ function FileView({
 			file.data === undefined || binary || file.data.length > MAX_HIGHLIGHT_BYTES ? null : highlightLines(lines.slice(0, MAX_LINES).join("\n"), languageFor(path)),
 		[file.data, binary, lines, path],
 	);
-	const showCode = !image && !binary && !(markdown && mode === "preview");
+	const showCode = !image && !binary && !(markdown && mode === "preview") && !blaming;
 
 	// Bring linked lines into view once the file has rendered.
 	const scrolled = useRef("");
@@ -266,6 +279,27 @@ function FileView({
 							))}
 						</div>
 					)}
+					{!binary && !image && (
+						<button
+							type="button"
+							onClick={() => setBlaming((b) => !b)}
+							aria-pressed={blaming}
+							title="Who last changed each line"
+							className={cx("flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] hover:bg-raised hover:text-fg", blaming ? "bg-raised text-fg" : "text-dim")}
+						>
+							<UserRoundSearch className="size-3.5" />
+							Blame
+						</button>
+					)}
+					<Link
+						to="/$owner/$repo/history"
+						params={repoParams(project)}
+						search={{ ref: refName, path }}
+						className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-raised hover:text-fg"
+					>
+						<History className="size-3.5" />
+						History
+					</Link>
 					{editable && !binary && !image && (
 						<Link
 							to="/$owner/$repo/edit"
@@ -317,7 +351,8 @@ function FileView({
 				</div>
 			)}
 			{binary && <p className="p-4 text-xs text-faint">Binary file. Use Download to get it.</p>}
-			{markdown && mode === "preview" && file.data !== undefined && (
+			{blaming && !binary && !image && <BlameView project={project} path={path} refName={refName} />}
+			{markdown && mode === "preview" && !blaming && file.data !== undefined && (
 				<div className="p-6">
 					<Markdown source={file.data} project={project} path={path} refName={refName} />
 				</div>

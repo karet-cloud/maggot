@@ -6,6 +6,7 @@ import {
 	GitBranchPlus,
 	GitCommitHorizontal,
 	GitMerge,
+	GitPullRequest,
 	Inbox,
 	Loader,
 	MessageSquare,
@@ -42,6 +43,9 @@ const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"issue.closed": { icon: <CircleCheck className="size-3.5" />, tone: "text-violet-300" },
 	"issue.reopened": { icon: <CircleDot className="size-3.5" />, tone: "text-emerald-300" },
 	"issue.commented": { icon: <MessageSquare className="size-3.5" />, tone: "text-sky-300" },
+	"pull.opened": { icon: <GitPullRequest className="size-3.5" />, tone: "text-emerald-300" },
+	"pull.reviewed": { icon: <MessageSquare className="size-3.5" />, tone: "text-amber-300" },
+	"pull.merged": { icon: <GitMerge className="size-3.5" />, tone: "text-violet-300" },
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -95,6 +99,22 @@ export function describe(e: ProjectEvent): string {
 			if (e.type === "issue.closed" && d.commit) return `Commit ${shortOid(d.commit as string)} closed #${issue?.number ?? "?"} ${issue?.title ?? ""}`.trim();
 			const verb = { "issue.opened": "opened", "issue.closed": "closed", "issue.reopened": "reopened", "issue.commented": "commented on" }[e.type];
 			return `${String(d.sender ?? "Someone")} ${verb} #${issue?.number ?? "?"} ${issue?.title ?? ""}`.trim();
+		}
+		case "pull.opened":
+		case "pull.reviewed":
+		case "pull.merged": {
+			const pull = d.pull as { number: number; title: string } | undefined;
+			const verb =
+				e.type === "pull.opened"
+					? "opened pull request"
+					: e.type === "pull.merged"
+						? "merged pull request"
+						: d.state === "approved"
+							? "approved"
+							: d.state === "changes_requested"
+								? "requested changes on"
+								: "reviewed";
+			return `${String(d.sender ?? "Someone")} ${verb} #${pull?.number ?? "?"} ${pull?.title ?? ""}`.trim();
 		}
 	}
 }

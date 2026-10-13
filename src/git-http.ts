@@ -54,7 +54,7 @@ export type GitAccess =
 /** The checks git over HTTP and over SSH share: visibility, ownership, archiving, email verification and quotas. */
 export async function authorizeGit(env: Env, principal: Principal, owner: string, name: string, pushing: boolean, origin: string): Promise<GitAccess> {
 	await ensureSchema(db(env));
-	const row = await findRepo(db(env), owner, name);
+	const row = await findRepo(db(env), owner, name, principal.kind === "user" ? principal.id : null);
 	// Like GitHub, a repository the caller can't see asks for credentials rather than confirming it exists.
 	if (!row || !canRead(principal, row)) {
 		return principal.kind === "anonymous"

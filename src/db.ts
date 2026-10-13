@@ -1,6 +1,24 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
 // The schema is created idempotently on first use in each isolate, so deploys need no migration step.
-import type { Issue, IssueComment, IssueList, IssueState, IssueSummary, Notification, NotificationKind, RepoInfo, RepoTransfer, SshKey, Visibility } from "./api.ts";
+import type {
+	Issue,
+	IssueComment,
+	IssueList,
+	IssueState,
+	IssueSummary,
+	Notification,
+	NotificationKind,
+	Pull,
+	PullList,
+	PullSummary,
+	RepoInfo,
+	RepoTransfer,
+	Review,
+	ReviewComment,
+	ReviewState,
+	SshKey,
+	Visibility,
+} from "./api.ts";
 import { HttpError } from "./errors.ts";
 
 // Generated from Better Auth 1.7 (email/password + username plugin) with getMigrations().compileMigrations().
@@ -39,6 +57,23 @@ const APP_SCHEMA = [
 	`create index if not exists "issue_repo_state_idx" on "issue" ("repoId", "state", "number")`,
 	`create table if not exists "issue_comment" ("id" text not null primary key, "issueId" text not null references "issue" ("id") on delete cascade, "authorId" text references "user" ("id") on delete set null, "body" text not null, "createdAt" text not null, "updatedAt" text not null)`,
 	`create index if not exists "issue_comment_issue_idx" on "issue_comment" ("issueId", "createdAt")`,
+	// A pull request is an issue (same numbers, comments, labels) with a base and a head branch.
+	`create table if not exists "pull" ("issueId" text not null primary key references "issue" ("id") on delete cascade, "repoId" text not null references "repo" ("id") on delete cascade, "headRepoId" text references "repo" ("id") on delete set null, "headBranch" text not null, "baseBranch" text not null, "mergedAt" text, "mergedById" text references "user" ("id") on delete set null, "mergeCommit" text)`,
+	`create table if not exists "review" ("id" text not null primary key, "issueId" text not null references "issue" ("id") on delete cascade, "authorId" text references "user" ("id") on delete set null, "state" text not null check ("state" in ('approved', 'changes_requested', 'commented')), "body" text not null, "commitSha" text, "createdAt" text not null)`,
+	`create index if not exists "review_issue_idx" on "review" ("issueId", "createdAt")`,
+	`create table if not exists "review_comment" ("id" text not null primary key, "issueId" text not null references "issue" ("id") on delete cascade, "reviewId" text not null references "review" ("id") on delete cascade, "authorId" text references "user" ("id") on delete set null, "path" text not null, "line" integer not null, "side" text not null check ("side" in ('new', 'old')), "body" text not null, "commitSha" text, "createdAt" text not null)`,
+	`create index if not exists "review_comment_issue_idx" on "review_comment" ("issueId", "path")`,
+	// Organizations are rows in "user" (kind 'org') so repositories, quotas and URLs work the same; nobody signs in as one.
+	`create table if not exists "org_member" ("orgId" text not null references "user" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "role" text not null check ("role" in ('owner', 'member')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("orgId", "userId"))`,
+	`create index if not exists "org_member_user_idx" on "org_member" ("userId")`,
+	`create table if not exists "team" ("id" text not null primary key, "orgId" text not null references "user" ("id") on delete cascade, "name" text not null collate nocase, "createdAt" text not null, unique ("orgId", "name"))`,
+	`create table if not exists "team_member" ("teamId" text not null references "team" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, primary key ("teamId", "userId"))`,
+	`create index if not exists "team_member_user_idx" on "team_member" ("userId")`,
+	`create table if not exists "team_repo" ("teamId" text not null references "team" ("id") on delete cascade, "repoId" text not null references "repo" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), primary key ("teamId", "repoId"))`,
+	`create index if not exists "team_repo_repo_idx" on "team_repo" ("repoId")`,
+	// People a repository's admins invited to it, with read, write or admin access.
+	`create table if not exists "repo_collaborator" ("repoId" text not null references "repo" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("repoId", "userId"))`,
+	`create index if not exists "repo_collaborator_user_idx" on "repo_collaborator" ("userId")`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -50,6 +85,10 @@ const COLUMNS = [
 	`alter table "repo" add column "archivedAt" text`,
 	// The commit whose "fixes #n" closed the issue, when one did.
 	`alter table "issue" add column "closedByCommit" text`,
+	// Pull requests share the issue table (and its numbers).
+	`alter table "issue" add column "isPull" integer not null default 0`,
+	// 'user' or 'org'.
+	`alter table "user" add column "kind" text not null default 'user'`,
 ];
 
 /** Indexes on added columns, created once the columns exist. */
@@ -101,6 +140,11 @@ export interface RepoRow {
 	forkOf: string | null;
 	/** When it was archived (made read-only), or null. */
 	archivedAt: string | null;
+	/**
+	 * The viewer's access, when the row was read for one: 0 none, 1 read, 2 write, 3 admin (public
+	 * visibility aside). See `accessLevel`.
+	 */
+	level?: number;
 }
 
 /** A repository with what lists and its page show: star and fork counts, and the fork's source. */
@@ -113,7 +157,9 @@ export interface RepoListing extends RepoRow {
 	parentName: string | null;
 	parentVisibility: Visibility | null;
 	parentOwnerId: string | null;
+	parentLevel: number;
 	openIssues: number;
+	openPulls: number;
 }
 
 /** GitHub's rule: letters, digits, '.', '-', '_'; not "." or "..", and not ending in ".git". */
@@ -130,16 +176,32 @@ export function assertRepoName(name: string): string {
  * A repository by owner and name, following the redirect a rename or transfer left behind when no
  * repository has that name now.
  */
-export async function findRepo(database: D1Database, owner: string, name: string): Promise<RepoRow | null> {
+/**
+ * A viewer's access to the repository aliased `r` in a query, from ownership, organization membership
+ * (owners administer every repository, members read them all), teams and collaborator grants:
+ * 0 none, 1 read, 2 write, 3 admin. Public visibility is separate.
+ */
+export const accessLevel = (r: string, viewer: string) => `max(
+	case when ${r}."ownerId" = ${viewer} then 3 else 0 end,
+	coalesce((select case m."role" when 'owner' then 3 else 1 end from "org_member" m where m."orgId" = ${r}."ownerId" and m."userId" = ${viewer} and m."state" = 'active'), 0),
+	coalesce((select max(case tr."permission" when 'admin' then 3 when 'write' then 2 else 1 end) from "team_repo" tr join "team_member" tm on tm."teamId" = tr."teamId" where tr."repoId" = ${r}."id" and tm."userId" = ${viewer}), 0),
+	coalesce((select case k."permission" when 'admin' then 3 when 'write' then 2 else 1 end from "repo_collaborator" k where k."repoId" = ${r}."id" and k."userId" = ${viewer} and k."state" = 'active'), 0)
+)`;
+
+/**
+ * A repository by owner and name, following the redirect a rename or transfer left behind when no
+ * repository has that name now. With `viewerId`, the row carries that viewer's access `level`.
+ */
+export async function findRepo(database: D1Database, owner: string, name: string, viewerId: string | null = null): Promise<RepoRow | null> {
 	const row = await database
 		.prepare(
-			`select * from (
+			`select *, ${accessLevel("x", "?3")} as "level" from (
 				select r.*, 0 as "redirected" from "repo" r where r."owner" = ?1 and r."name" = ?2
 				union all
 				select r.*, 1 as "redirected" from "repo_redirect" d join "repo" r on r."id" = d."repoId" where d."owner" = ?1 and d."name" = ?2
-			) order by "redirected" limit 1`,
+			) x order by "redirected" limit 1`,
 		)
-		.bind(owner.toLowerCase(), name)
+		.bind(owner.toLowerCase(), name, viewerId ?? "")
 		.first<RepoRow & { redirected?: number }>();
 	if (row) delete row.redirected;
 	return row;
@@ -206,7 +268,10 @@ export async function getTransfer(database: D1Database, repoId: string): Promise
 /** Live offers made to a user. */
 export async function incomingTransfers(database: D1Database, userId: string): Promise<RepoTransfer[]> {
 	const { results } = await database
-		.prepare(`${TRANSFER} where t."toUserId" = ? and t."createdAt" > ? order by t."createdAt" desc`)
+		.prepare(
+			`${TRANSFER} where (t."toUserId" = ?1 or t."toUserId" in (select "orgId" from "org_member" where "userId" = ?1 and "role" = 'owner' and "state" = 'active'))
+			 and t."createdAt" > ?2 order by t."createdAt" desc`,
+		)
 		.bind(userId, transferLive())
 		.all<TransferRow>();
 	return results.map(toTransfer);
@@ -322,12 +387,14 @@ export async function deleteRepo(database: D1Database, id: string): Promise<void
 }
 
 /** Repository columns plus counts; the one placeholder is the viewer's user id (for `starred`). */
-const LISTING = `select r.*,
+const LISTING = `select r.*, ${accessLevel("r", "?1")} as "level",
 	(select count(*) from "star" s where s."repoId" = r."id") as "stars",
-	(select count(*) from "repo" f where f."forkOf" = r."id" and (f."visibility" = 'public' or f."ownerId" = ?1)) as "forks",
+	(select count(*) from "repo" f where f."forkOf" = r."id" and (f."visibility" = 'public' or ${accessLevel("f", "?1")} > 0)) as "forks",
 	exists (select 1 from "star" s where s."repoId" = r."id" and s."userId" = ?1) as "starred",
-	(select count(*) from "issue" i where i."repoId" = r."id" and i."state" = 'open') as "openIssues",
-	p."owner" as "parentOwner", p."name" as "parentName", p."visibility" as "parentVisibility", p."ownerId" as "parentOwnerId"
+	(select count(*) from "issue" i where i."repoId" = r."id" and i."state" = 'open' and i."isPull" = 0) as "openIssues",
+	(select count(*) from "issue" i where i."repoId" = r."id" and i."state" = 'open' and i."isPull" = 1) as "openPulls",
+	p."owner" as "parentOwner", p."name" as "parentName", p."visibility" as "parentVisibility", p."ownerId" as "parentOwnerId",
+	case when p."id" is null then 0 else ${accessLevel("p", "?1")} end as "parentLevel"
 	from "repo" r left join "repo" p on p."id" = r."forkOf"`;
 
 export async function getListing(database: D1Database, id: string, viewerId: string | null): Promise<RepoListing | null> {
@@ -368,8 +435,7 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 		where.push(`(r."owner" || '/' || r."name" || ' ' || coalesce(r."description", '')) like ? escape '\\'`);
 		args.push(`%${opts.query.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
 	}
-	where.push(`(r."visibility" = 'public' or r."ownerId" = ?)`);
-	args.push(opts.viewerId ?? "");
+	where.push(`(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
 	const order = opts.starredBy ? `mine."createdAt" desc` : opts.sort === "stars" ? `"stars" desc, r."createdAt" desc` : `r."createdAt" desc`;
 	const listing = LISTING.replace(`left join "repo" p`, `${join} left join "repo" p`);
 	const { results } = await database
@@ -387,9 +453,9 @@ export async function setStar(database: D1Database, userId: string, repoId: stri
 	return result.meta.changes > 0;
 }
 
-export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, canWrite: boolean, viewerId: string | null = null): RepoInfo {
+export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, canWrite: boolean, viewerId: string | null = null, canAdmin = false): RepoInfo {
 	// Where a fork came from is shown only to people who can see the source.
-	const parentVisible = row.parentOwner && (row.parentVisibility === "public" || row.parentOwnerId === viewerId);
+	const parentVisible = row.parentOwner && (row.parentVisibility === "public" || (row.parentLevel ?? 0) > 0 || row.parentOwnerId === viewerId);
 	return {
 		owner: row.owner,
 		name: row.name,
@@ -400,6 +466,7 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		createdAt: row.createdAt,
 		cloneUrl: `${origin}/${row.owner}/${row.name}.git`,
 		canWrite,
+		canAdmin,
 		stars: row.stars ?? 0,
 		forks: row.forks ?? 0,
 		starred: Boolean(row.starred),
@@ -408,6 +475,7 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		sshUrl: `git@${new URL(origin).hostname}:${row.owner}/${row.name}.git`,
 		archivedAt: row.archivedAt ?? null,
 		openIssues: row.openIssues ?? 0,
+		openPulls: row.openPulls ?? 0,
 	};
 }
 
@@ -421,6 +489,13 @@ export async function notifyUser(
 	database: D1Database,
 	n: { userId: string; kind: NotificationKind; repoId: string | null; title: string; url: string; actor: string | null },
 ): Promise<void> {
+	// Nobody reads an organization's notifications: its owners get them.
+	const org = await database.prepare(`select 1 from "user" where "id" = ? and "kind" = 'org'`).bind(n.userId).first();
+	if (org) {
+		const { results } = await database.prepare(`select "userId" from "org_member" where "orgId" = ? and "role" = 'owner' and "state" = 'active' limit 20`).bind(n.userId).all<{ userId: string }>();
+		await Promise.all(results.map((r) => notifyUser(database, { ...n, userId: r.userId })));
+		return;
+	}
 	await database.batch([
 		database
 			.prepare(`insert into "notification" ("id", "userId", "kind", "repoId", "title", "url", "actor", "createdAt") values (?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -651,19 +726,34 @@ export function cleanLabels(labels: unknown): string[] {
 }
 
 /** Opens an issue with the repository's next number. */
-export async function createIssue(database: D1Database, repoId: string, authorId: string, title: string, body: string, labels: string[]): Promise<IssueRow> {
+export async function createIssue(
+	database: D1Database,
+	repoId: string,
+	authorId: string,
+	title: string,
+	body: string,
+	labels: string[],
+	pull?: { headRepoId: string | null; headBranch: string; baseBranch: string },
+): Promise<IssueRow> {
 	const now = new Date().toISOString();
 	// Two issues opened at once can pick the same number; the unique index refuses one, which tries again.
 	for (let attempt = 0; ; attempt++) {
 		const id = crypto.randomUUID();
 		try {
-			await database
+			const insert = database
 				.prepare(
-					`insert into "issue" ("id", "repoId", "number", "title", "body", "state", "labels", "authorId", "createdAt", "updatedAt")
-					 select ?1, ?2, coalesce(max("number"), 0) + 1, ?3, ?4, 'open', ?5, ?6, ?7, ?7 from "issue" where "repoId" = ?2`,
+					`insert into "issue" ("id", "repoId", "number", "title", "body", "state", "labels", "authorId", "createdAt", "updatedAt", "isPull")
+					 select ?1, ?2, coalesce(max("number"), 0) + 1, ?3, ?4, 'open', ?5, ?6, ?7, ?7, ?8 from "issue" where "repoId" = ?2`,
 				)
-				.bind(id, repoId, title, body, JSON.stringify(labels), authorId, now)
-				.run();
+				.bind(id, repoId, title, body, JSON.stringify(labels), authorId, now, pull ? 1 : 0);
+			if (pull) {
+				await database.batch([
+					insert,
+					database
+						.prepare(`insert into "pull" ("issueId", "repoId", "headRepoId", "headBranch", "baseBranch") values (?, ?, ?, ?, ?)`)
+						.bind(id, repoId, pull.headRepoId, pull.headBranch, pull.baseBranch),
+				]);
+			} else await insert.run();
 			return (await database.prepare(`${ISSUE} where i."id" = ?`).bind(id).first<IssueRow>()) as IssueRow;
 		} catch (err) {
 			if (attempt < 4 && /unique/i.test(String(err))) continue;
@@ -682,7 +772,7 @@ export async function listIssues(
 	repoId: string,
 	opts: { state?: IssueState | "all"; query?: string; label?: string; limit?: number },
 ): Promise<IssueList> {
-	const where = [`i."repoId" = ?`];
+	const where = [`i."repoId" = ?`, `i."isPull" = 0`];
 	const args: unknown[] = [repoId];
 	if (opts.query) {
 		where.push(`(i."title" || ' ' || i."body") like ? escape '\\'`);
@@ -841,4 +931,136 @@ export async function closeIssuesByCommits(
 		),
 	);
 	return results.flatMap((r, i) => r.results.map((row) => ({ ...row, commit: refs[i][1], ...repo })));
+}
+
+// ── Pull requests and reviews ────────────────────────────────────────────────
+
+export interface PullRow extends IssueRow {
+	headRepoId: string | null;
+	headBranch: string;
+	baseBranch: string;
+	mergedAt: string | null;
+	mergedById: string | null;
+	mergeCommit: string | null;
+	mergedBy: string | null;
+	headOwner: string | null;
+	headName: string | null;
+	decision: "approved" | "changes_requested" | null;
+}
+
+/**
+ * Each reviewer's latest approval or request for changes counts, from people who could merge (write
+ * access or more). Changes requested by anyone counting outweighs approvals.
+ */
+const DECISION = `(select case
+		when exists (select 1 from "review" v where v."issueId" = i."id" and v."state" = 'changes_requested' and ${accessLevel("r", 'v."authorId"')} >= 2
+			and not exists (select 1 from "review" w where w."issueId" = i."id" and w."authorId" = v."authorId" and w."state" <> 'commented' and w."createdAt" > v."createdAt")) then 'changes_requested'
+		when exists (select 1 from "review" v where v."issueId" = i."id" and v."state" = 'approved' and ${accessLevel("r", 'v."authorId"')} >= 2
+			and not exists (select 1 from "review" w where w."issueId" = i."id" and w."authorId" = v."authorId" and w."state" <> 'commented' and w."createdAt" > v."createdAt")) then 'approved'
+	end)`;
+
+const PULL = `select i.*, a."username" as "author", c."username" as "closedBy", p."headRepoId", p."headBranch", p."baseBranch", p."mergedAt", p."mergedById", p."mergeCommit",
+	m."username" as "mergedBy", h."owner" as "headOwner", h."name" as "headName", ${DECISION} as "decision"
+	from "issue" i join "pull" p on p."issueId" = i."id" join "repo" r on r."id" = i."repoId"
+	left join "user" a on a."id" = i."authorId" left join "user" c on c."id" = i."closedById" left join "user" m on m."id" = p."mergedById"
+	left join "repo" h on h."id" = p."headRepoId"`;
+
+export function toPullSummary(row: PullRow): PullSummary {
+	return {
+		...toIssueSummary(row),
+		pullState: row.mergedAt ? "merged" : row.state,
+		base: row.baseBranch,
+		head: row.headBranch,
+		headRepo: row.headRepoId !== row.repoId ? (row.headOwner ? `${row.headOwner}/${row.headName}` : "(deleted fork)") : null,
+		decision: row.decision,
+	};
+}
+
+export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge: boolean }, reviewRequired: boolean): Pull {
+	return {
+		...toPullSummary(row),
+		body: row.body,
+		closedBy: row.closedBy,
+		mergedAt: row.mergedAt,
+		mergedBy: row.mergedBy,
+		mergeCommit: row.mergeCommit,
+		canEdit: can.edit,
+		canLabel: can.label,
+		canMerge: can.merge,
+		reviewRequired,
+	};
+}
+
+export async function getPull(database: D1Database, repoId: string, number: number): Promise<PullRow | null> {
+	return database.prepare(`${PULL} where i."repoId" = ? and i."number" = ?`).bind(repoId, number).first<PullRow>();
+}
+
+/** Pull requests newest first: open, closed (merged or not) or all, with the counts. */
+export async function listPulls(database: D1Database, repoId: string, opts: { state?: "open" | "closed" | "all"; query?: string; limit?: number }): Promise<PullList> {
+	const where = [`i."repoId" = ?`];
+	const args: unknown[] = [repoId];
+	if (opts.query) {
+		where.push(`(i."title" || ' ' || i."body") like ? escape '\\'`);
+		args.push(`%${opts.query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
+	}
+	const filter = where.join(" and ");
+	const state = opts.state === "closed" || opts.state === "all" ? opts.state : "open";
+	const [list, counts] = await database.batch<Record<string, unknown>>([
+		database.prepare(`${PULL} where ${filter}${state === "all" ? "" : ` and i."state" = '${state}'`} order by i."number" desc limit ?`).bind(...args, opts.limit ?? 50),
+		database.prepare(`select i."state", count(*) as "n" from "issue" i where ${filter} and i."isPull" = 1 group by i."state"`).bind(...args),
+	]);
+	const count = (s: IssueState) => Number((counts.results as { state: string; n: number }[]).find((r) => r.state === s)?.n ?? 0);
+	return { pulls: (list.results as unknown as PullRow[]).map(toPullSummary), open: count("open"), closed: count("closed") };
+}
+
+/** Records a merge: the pull request is closed and marked merged by `userId` at `commit`. */
+export async function markPullMerged(database: D1Database, pull: PullRow, userId: string, commit: string): Promise<void> {
+	const now = new Date().toISOString();
+	await database.batch([
+		database
+			.prepare(`update "issue" set "state" = 'closed', "closedAt" = ?, "closedById" = ?, "updatedAt" = ? where "id" = ?`)
+			.bind(now, userId, now, pull.id),
+		database.prepare(`update "pull" set "mergedAt" = ?, "mergedById" = ?, "mergeCommit" = ? where "issueId" = ?`).bind(now, userId, commit, pull.id),
+	]);
+}
+
+export const MAX_REVIEW_COMMENTS = 100;
+
+export async function addReview(
+	database: D1Database,
+	pull: PullRow,
+	authorId: string,
+	review: { state: ReviewState; body: string; commit: string | null; comments: { path: string; line: number; side: "new" | "old"; body: string }[] },
+): Promise<string> {
+	const id = crypto.randomUUID();
+	const now = new Date().toISOString();
+	await database.batch([
+		database
+			.prepare(`insert into "review" ("id", "issueId", "authorId", "state", "body", "commitSha", "createdAt") values (?, ?, ?, ?, ?, ?, ?)`)
+			.bind(id, pull.id, authorId, review.state, review.body, review.commit, now),
+		...review.comments.map((c) =>
+			database
+				.prepare(
+					`insert into "review_comment" ("id", "issueId", "reviewId", "authorId", "path", "line", "side", "body", "commitSha", "createdAt") values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.bind(crypto.randomUUID(), pull.id, id, authorId, c.path, c.line, c.side, c.body, review.commit, now),
+		),
+		database.prepare(`update "issue" set "updatedAt" = ? where "id" = ?`).bind(now, pull.id),
+	]);
+	return id;
+}
+
+export async function listReviews(database: D1Database, issueId: string): Promise<{ reviews: Review[]; comments: ReviewComment[] }> {
+	const [reviews, comments] = await database.batch<Record<string, unknown>>([
+		database
+			.prepare(`select v."id", u."username" as "author", v."state", v."body", v."commitSha" as "commit", v."createdAt" from "review" v left join "user" u on u."id" = v."authorId" where v."issueId" = ? order by v."createdAt" limit 500`)
+			.bind(issueId),
+		database
+			.prepare(
+				`select k."id", k."reviewId", u."username" as "author", k."path", k."line", k."side", k."body", k."commitSha" as "commit", k."createdAt"
+				 from "review_comment" k left join "user" u on u."id" = k."authorId" where k."issueId" = ? order by k."createdAt" limit 2000`,
+			)
+			.bind(issueId),
+	]);
+	return { reviews: reviews.results as unknown as Review[], comments: comments.results as unknown as ReviewComment[] };
 }

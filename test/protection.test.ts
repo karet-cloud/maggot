@@ -13,6 +13,7 @@ const rule = (pattern: string, flags: Partial<BranchRule>): BranchRule => ({
 	blockDeletions: false,
 	blockForcePushes: false,
 	requireMergeQueue: false,
+	requireReview: false,
 	createdAt: "",
 	...flags,
 });

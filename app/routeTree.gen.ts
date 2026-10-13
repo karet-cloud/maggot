@@ -22,6 +22,7 @@ import { Route as TransfersRouteImport } from './routes/transfers'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as OwnerIndexRouteImport } from './routes/$owner.index'
 import { Route as OwnerRepoRouteImport } from './routes/$owner.$repo'
+import { Route as OrgsNewRouteImport } from './routes/orgs.new'
 import { Route as SettingsPasswordRouteImport } from './routes/settings.password'
 import { Route as SettingsSshRouteImport } from './routes/settings.ssh'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
@@ -35,10 +36,14 @@ import { Route as OwnerRepoHistoryRouteImport } from './routes/$owner.$repo.hist
 import { Route as OwnerRepoReleasesRouteImport } from './routes/$owner.$repo.releases'
 import { Route as OwnerRepoSearchRouteImport } from './routes/$owner.$repo.search'
 import { Route as OwnerRepoSettingsRouteImport } from './routes/$owner.$repo.settings'
+import { Route as OwnerRepoUploadRouteImport } from './routes/$owner.$repo.upload'
 import { Route as OwnerRepoCommitHashRouteImport } from './routes/$owner.$repo.commit.$hash'
 import { Route as OwnerRepoIssuesIndexRouteImport } from './routes/$owner.$repo.issues.index'
 import { Route as OwnerRepoIssuesNumberRouteImport } from './routes/$owner.$repo.issues.$number'
 import { Route as OwnerRepoIssuesNewRouteImport } from './routes/$owner.$repo.issues.new'
+import { Route as OwnerRepoPullNumberRouteImport } from './routes/$owner.$repo.pull.$number'
+import { Route as OwnerRepoPullsIndexRouteImport } from './routes/$owner.$repo.pulls.index'
+import { Route as OwnerRepoPullsNewRouteImport } from './routes/$owner.$repo.pulls.new'
 import { Route as OwnerRepoTTaskRouteImport } from './routes/$owner.$repo.t.$task'
 
 const IndexRoute = IndexRouteImport.update({
@@ -106,6 +111,11 @@ const OwnerRepoRoute = OwnerRepoRouteImport.update({
   path: '/$owner/$repo',
   getParentRoute: () => rootRouteImport,
 } as any)
+const OrgsNewRoute = OrgsNewRouteImport.update({
+  id: '/orgs/new',
+  path: '/orgs/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsPasswordRoute = SettingsPasswordRouteImport.update({
   id: '/settings/password',
   path: '/settings/password',
@@ -171,6 +181,11 @@ const OwnerRepoSettingsRoute = OwnerRepoSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
+const OwnerRepoUploadRoute = OwnerRepoUploadRouteImport.update({
+  id: '/upload',
+  path: '/upload',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
 const OwnerRepoCommitHashRoute = OwnerRepoCommitHashRouteImport.update({
   id: '/commit/$hash',
   path: '/commit/$hash',
@@ -189,6 +204,21 @@ const OwnerRepoIssuesNumberRoute = OwnerRepoIssuesNumberRouteImport.update({
 const OwnerRepoIssuesNewRoute = OwnerRepoIssuesNewRouteImport.update({
   id: '/issues/new',
   path: '/issues/new',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoPullNumberRoute = OwnerRepoPullNumberRouteImport.update({
+  id: '/pull/$number',
+  path: '/pull/$number',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoPullsIndexRoute = OwnerRepoPullsIndexRouteImport.update({
+  id: '/pulls/',
+  path: '/pulls/',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoPullsNewRoute = OwnerRepoPullsNewRouteImport.update({
+  id: '/pulls/new',
+  path: '/pulls/new',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
 const OwnerRepoTTaskRoute = OwnerRepoTTaskRouteImport.update({
@@ -210,6 +240,7 @@ export interface FileRoutesByFullPath {
   '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
+  '/orgs/new': typeof OrgsNewRoute
   '/settings/password': typeof SettingsPasswordRoute
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -223,12 +254,16 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo/upload': typeof OwnerRepoUploadRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
   '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
   '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
+  '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
+  '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
   '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
+  '/$owner/$repo/pulls/': typeof OwnerRepoPullsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -242,6 +277,7 @@ export interface FileRoutesByTo {
   '/signup': typeof SignupRoute
   '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
+  '/orgs/new': typeof OrgsNewRoute
   '/settings/password': typeof SettingsPasswordRoute
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -255,12 +291,16 @@ export interface FileRoutesByTo {
   '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo/upload': typeof OwnerRepoUploadRoute
   '/$owner/$repo': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
   '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
   '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
+  '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
+  '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
   '/$owner/$repo/issues': typeof OwnerRepoIssuesIndexRoute
+  '/$owner/$repo/pulls': typeof OwnerRepoPullsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -276,6 +316,7 @@ export interface FileRoutesById {
   '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
+  '/orgs/new': typeof OrgsNewRoute
   '/settings/password': typeof SettingsPasswordRoute
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
@@ -289,12 +330,16 @@ export interface FileRoutesById {
   '/$owner/$repo/releases': typeof OwnerRepoReleasesRoute
   '/$owner/$repo/search': typeof OwnerRepoSearchRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo/upload': typeof OwnerRepoUploadRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
   '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
   '/$owner/$repo/issues/$number': typeof OwnerRepoIssuesNumberRoute
   '/$owner/$repo/issues/new': typeof OwnerRepoIssuesNewRoute
+  '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
+  '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
   '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
+  '/$owner/$repo/pulls/': typeof OwnerRepoPullsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -311,6 +356,7 @@ export interface FileRouteTypes {
     | '/transfers'
     | '/verify-email'
     | '/$owner/$repo'
+    | '/orgs/new'
     | '/settings/password'
     | '/settings/ssh'
     | '/settings/tokens'
@@ -324,12 +370,16 @@ export interface FileRouteTypes {
     | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
+    | '/$owner/$repo/upload'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
     | '/$owner/$repo/issues/$number'
     | '/$owner/$repo/issues/new'
+    | '/$owner/$repo/pull/$number'
+    | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
     | '/$owner/$repo/issues/'
+    | '/$owner/$repo/pulls/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -343,6 +393,7 @@ export interface FileRouteTypes {
     | '/signup'
     | '/transfers'
     | '/verify-email'
+    | '/orgs/new'
     | '/settings/password'
     | '/settings/ssh'
     | '/settings/tokens'
@@ -356,12 +407,16 @@ export interface FileRouteTypes {
     | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
+    | '/$owner/$repo/upload'
     | '/$owner/$repo'
     | '/$owner/$repo/commit/$hash'
     | '/$owner/$repo/issues/$number'
     | '/$owner/$repo/issues/new'
+    | '/$owner/$repo/pull/$number'
+    | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
     | '/$owner/$repo/issues'
+    | '/$owner/$repo/pulls'
   id:
     | '__root__'
     | '/'
@@ -376,6 +431,7 @@ export interface FileRouteTypes {
     | '/transfers'
     | '/verify-email'
     | '/$owner/$repo'
+    | '/orgs/new'
     | '/settings/password'
     | '/settings/ssh'
     | '/settings/tokens'
@@ -389,12 +445,16 @@ export interface FileRouteTypes {
     | '/$owner/$repo/releases'
     | '/$owner/$repo/search'
     | '/$owner/$repo/settings'
+    | '/$owner/$repo/upload'
     | '/$owner/$repo/'
     | '/$owner/$repo/commit/$hash'
     | '/$owner/$repo/issues/$number'
     | '/$owner/$repo/issues/new'
+    | '/$owner/$repo/pull/$number'
+    | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
     | '/$owner/$repo/issues/'
+    | '/$owner/$repo/pulls/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -410,6 +470,7 @@ export interface RootRouteChildren {
   TransfersRoute: typeof TransfersRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
   OwnerRepoRoute: typeof OwnerRepoRouteWithChildren
+  OrgsNewRoute: typeof OrgsNewRoute
   SettingsPasswordRoute: typeof SettingsPasswordRoute
   SettingsSshRoute: typeof SettingsSshRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
@@ -509,6 +570,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/orgs/new': {
+      id: '/orgs/new'
+      path: '/orgs/new'
+      fullPath: '/orgs/new'
+      preLoaderRoute: typeof OrgsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/password': {
       id: '/settings/password'
       path: '/settings/password'
@@ -600,6 +668,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoSettingsRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/upload': {
+      id: '/$owner/$repo/upload'
+      path: '/upload'
+      fullPath: '/$owner/$repo/upload'
+      preLoaderRoute: typeof OwnerRepoUploadRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/commit/$hash': {
       id: '/$owner/$repo/commit/$hash'
       path: '/commit/$hash'
@@ -628,6 +703,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoIssuesNewRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/pull/$number': {
+      id: '/$owner/$repo/pull/$number'
+      path: '/pull/$number'
+      fullPath: '/$owner/$repo/pull/$number'
+      preLoaderRoute: typeof OwnerRepoPullNumberRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/pulls/': {
+      id: '/$owner/$repo/pulls/'
+      path: '/pulls'
+      fullPath: '/$owner/$repo/pulls/'
+      preLoaderRoute: typeof OwnerRepoPullsIndexRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/pulls/new': {
+      id: '/$owner/$repo/pulls/new'
+      path: '/pulls/new'
+      fullPath: '/$owner/$repo/pulls/new'
+      preLoaderRoute: typeof OwnerRepoPullsNewRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/t/$task': {
       id: '/$owner/$repo/t/$task'
       path: '/t/$task'
@@ -648,12 +744,16 @@ interface OwnerRepoRouteChildren {
   OwnerRepoReleasesRoute: typeof OwnerRepoReleasesRoute
   OwnerRepoSearchRoute: typeof OwnerRepoSearchRoute
   OwnerRepoSettingsRoute: typeof OwnerRepoSettingsRoute
+  OwnerRepoUploadRoute: typeof OwnerRepoUploadRoute
   OwnerRepoIndexRoute: typeof OwnerRepoIndexRoute
   OwnerRepoCommitHashRoute: typeof OwnerRepoCommitHashRoute
   OwnerRepoIssuesNumberRoute: typeof OwnerRepoIssuesNumberRoute
   OwnerRepoIssuesNewRoute: typeof OwnerRepoIssuesNewRoute
+  OwnerRepoPullNumberRoute: typeof OwnerRepoPullNumberRoute
+  OwnerRepoPullsNewRoute: typeof OwnerRepoPullsNewRoute
   OwnerRepoTTaskRoute: typeof OwnerRepoTTaskRoute
   OwnerRepoIssuesIndexRoute: typeof OwnerRepoIssuesIndexRoute
+  OwnerRepoPullsIndexRoute: typeof OwnerRepoPullsIndexRoute
 }
 
 const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
@@ -666,12 +766,16 @@ const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
   OwnerRepoReleasesRoute: OwnerRepoReleasesRoute,
   OwnerRepoSearchRoute: OwnerRepoSearchRoute,
   OwnerRepoSettingsRoute: OwnerRepoSettingsRoute,
+  OwnerRepoUploadRoute: OwnerRepoUploadRoute,
   OwnerRepoIndexRoute: OwnerRepoIndexRoute,
   OwnerRepoCommitHashRoute: OwnerRepoCommitHashRoute,
   OwnerRepoIssuesNumberRoute: OwnerRepoIssuesNumberRoute,
   OwnerRepoIssuesNewRoute: OwnerRepoIssuesNewRoute,
+  OwnerRepoPullNumberRoute: OwnerRepoPullNumberRoute,
+  OwnerRepoPullsNewRoute: OwnerRepoPullsNewRoute,
   OwnerRepoTTaskRoute: OwnerRepoTTaskRoute,
   OwnerRepoIssuesIndexRoute: OwnerRepoIssuesIndexRoute,
+  OwnerRepoPullsIndexRoute: OwnerRepoPullsIndexRoute,
 }
 
 const OwnerRepoRouteWithChildren = OwnerRepoRoute._addFileChildren(
@@ -691,6 +795,7 @@ const rootRouteChildren: RootRouteChildren = {
   TransfersRoute: TransfersRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   OwnerRepoRoute: OwnerRepoRouteWithChildren,
+  OrgsNewRoute: OrgsNewRoute,
   SettingsPasswordRoute: SettingsPasswordRoute,
   SettingsSshRoute: SettingsSshRoute,
   SettingsTokensRoute: SettingsTokensRoute,

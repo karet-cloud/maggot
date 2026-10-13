@@ -17,7 +17,7 @@ export type Principal =
 const RESERVED = new Set([
 	"api", "assets", "login", "signup", "logout", "new", "settings", "explore", "p", "admin", "about", "help",
 	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "megit", "forgot-password", "reset-password",
-	"verify-email", "search", "notifications", "stars", "dashboard", "parity", "transfers", "ssh",
+	"verify-email", "search", "notifications", "stars", "dashboard", "parity", "transfers", "ssh", "orgs", "invitations", "organizations",
 ]);
 const USERNAME = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 
@@ -154,12 +154,28 @@ function safeAtob(value: string): string | null {
 }
 
 
+/**
+ * The caller's access to a repository: 3 admin (settings, transfer, delete, webhooks), 2 write (push,
+ * merge, label), 1 read, 0 none. Rows read for the caller carry it (`level`, from organizations,
+ * teams and collaborators); otherwise only the owner has any.
+ */
+export function accessTo(p: Principal, repo: RepoRow): number {
+	if (p.kind === "admin") return 3;
+	if (p.kind !== "user") return 0;
+	if (p.id === repo.ownerId) return 3;
+	return repo.level ?? 0;
+}
+
 export function canRead(p: Principal, repo: RepoRow): boolean {
-	return repo.visibility === "public" || canWrite(p, repo);
+	return repo.visibility === "public" || accessTo(p, repo) >= 1;
 }
 
 export function canWrite(p: Principal, repo: RepoRow): boolean {
-	return p.kind === "admin" || (p.kind === "user" && p.id === repo.ownerId);
+	return accessTo(p, repo) >= 2;
+}
+
+export function canAdmin(p: Principal, repo: RepoRow): boolean {
+	return accessTo(p, repo) >= 3;
 }
 
 /** Throws unless the user has verified their email address (when this server requires it). */
