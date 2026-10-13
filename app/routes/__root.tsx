@@ -189,6 +189,9 @@ function TopBar() {
 					</nav>
 				)}
 				<div className="ml-auto flex shrink-0 items-center gap-1">
+					<Link to="/parity" className="hidden rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg lg:block">
+						GitHub parity
+					</Link>
 					<SearchBox />
 					<Link to="/search" className="rounded-md px-2 py-1.5 text-dim hover:bg-raised hover:text-fg md:hidden" title="Search repositories">
 						<Search className="size-4" />

@@ -14,6 +14,7 @@ import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as NewRouteImport } from './routes/new'
 import { Route as NotificationsRouteImport } from './routes/notifications'
+import { Route as ParityRouteImport } from './routes/parity'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as SignupRouteImport } from './routes/signup'
@@ -57,6 +58,11 @@ const NewRoute = NewRouteImport.update({
 const NotificationsRoute = NotificationsRouteImport.update({
   id: '/notifications',
   path: '/notifications',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ParityRoute = ParityRouteImport.update({
+  id: '/parity',
+  path: '/parity',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ResetPasswordRoute = ResetPasswordRouteImport.update({
@@ -161,6 +167,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
   '/notifications': typeof NotificationsRoute
+  '/parity': typeof ParityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
@@ -187,6 +194,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
   '/notifications': typeof NotificationsRoute
+  '/parity': typeof ParityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
@@ -213,6 +221,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
   '/notifications': typeof NotificationsRoute
+  '/parity': typeof ParityRoute
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
@@ -241,6 +250,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/new'
     | '/notifications'
+    | '/parity'
     | '/reset-password'
     | '/search'
     | '/signup'
@@ -267,6 +277,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/new'
     | '/notifications'
+    | '/parity'
     | '/reset-password'
     | '/search'
     | '/signup'
@@ -292,6 +303,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/new'
     | '/notifications'
+    | '/parity'
     | '/reset-password'
     | '/search'
     | '/signup'
@@ -319,6 +331,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   NewRoute: typeof NewRoute
   NotificationsRoute: typeof NotificationsRoute
+  ParityRoute: typeof ParityRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   SearchRoute: typeof SearchRoute
   SignupRoute: typeof SignupRoute
@@ -364,6 +377,13 @@ declare module '@tanstack/react-router' {
       path: '/notifications'
       fullPath: '/notifications'
       preLoaderRoute: typeof NotificationsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/parity': {
+      id: '/parity'
+      path: '/parity'
+      fullPath: '/parity'
+      preLoaderRoute: typeof ParityRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/reset-password': {
@@ -540,6 +560,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   NewRoute: NewRoute,
   NotificationsRoute: NotificationsRoute,
+  ParityRoute: ParityRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   SearchRoute: SearchRoute,
   SignupRoute: SignupRoute,

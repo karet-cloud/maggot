@@ -65,6 +65,14 @@ function Home() {
 				</section>
 			)}
 
+			<Link to="/parity" className="flex items-center justify-between rounded-lg border border-line bg-panel px-4 py-3 text-sm hover:border-line-strong">
+				<span>
+					<span className="font-medium text-fg">How close is megit to GitHub?</span>
+					<span className="ml-2 text-dim">The feature checklist, kept up to date.</span>
+				</span>
+				<span className="text-accent">See the checklist →</span>
+			</Link>
+
 			<section className="space-y-3">
 				<h2 className="text-sm font-semibold text-dim">Explore public repositories</h2>
 				{explore.isPending ? <Spinner /> : <ErrorNote error={explore.error} />}
