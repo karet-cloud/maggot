@@ -65,7 +65,7 @@ export function useProjectLive(project: string): Live {
 				invalidate(keys.tasks(project));
 				invalidate(keys.queue(project));
 				invalidate(keys.projects);
-				if (event.type === "main.advanced") {
+				if (event.type === "main.advanced" || event.type === "repo.pushed") {
 					invalidate(["project", project, "log"]);
 					invalidate(keys.code(project));
 					invalidate(keys.branches(project));

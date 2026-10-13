@@ -1,5 +1,6 @@
 // Streams a tree as a .tar.gz or .zip, reading blobs a few at a time so memory stays bounded.
-import { mapLimit, type ObjectReader, type TreeEntry } from "./git/diff.ts";
+import { HttpError } from "./errors.ts";
+import { mapLimit, TreeCache, type ObjectReader } from "./git/diff.ts";
 
 export type ArchiveFormat = "tar.gz" | "zip";
 
@@ -18,16 +19,36 @@ interface ArchiveEntry {
 	type: "blob" | "exec" | "symlink";
 }
 
-/** Lists every file under a root tree; submodules are skipped, as `git archive` does. */
-export async function listFiles(repo: ObjectReader, tree: string, prefix = "", out: ArchiveEntry[] = []): Promise<ArchiveEntry[]> {
-	const entries = (await repo.readTree(tree)) ?? [];
-	const dirs: TreeEntry[] = [];
-	for (const e of entries) {
-		if (e.type === "tree") dirs.push(e);
-		else if (e.type !== "gitlink") out.push({ path: prefix + e.name, hash: e.hash, type: e.type });
-		if (out.length > MAX_FILES) throw new Error(`More than ${MAX_FILES} files; clone the repository instead`);
+/** Directories one archive may expand (shared subtrees count each time they appear). */
+const MAX_DIRS = 20_000;
+/** Distinct tree objects one archive may read. */
+const MAX_TREE_READS = 5_000;
+const READ_CONCURRENCY = 8;
+
+/**
+ * Lists every file under a root tree; submodules are skipped, as `git archive` does. Walks breadth
+ * first with one concurrency limit for the whole walk, reading each distinct tree once, and gives up
+ * past MAX_FILES files or MAX_DIRS directories.
+ */
+export async function listFiles(repo: ObjectReader, tree: string): Promise<ArchiveEntry[]> {
+	const out: ArchiveEntry[] = [];
+	const trees = new TreeCache(repo, MAX_TREE_READS);
+	let level = [{ hash: tree, prefix: "" }];
+	let dirs = 0;
+	while (level.length > 0) {
+		dirs += level.length;
+		if (dirs > MAX_DIRS) throw new HttpError(413, "TOO_LARGE", `More than ${MAX_DIRS} directories; clone the repository instead`);
+		const next: typeof level = [];
+		const listings = await mapLimit(level, READ_CONCURRENCY, (d) => trees.read(d.hash).then((entries) => ({ ...d, entries })));
+		for (const { prefix, entries } of listings) {
+			for (const e of entries) {
+				if (e.type === "tree") next.push({ hash: e.hash, prefix: `${prefix}${e.name}/` });
+				else if (e.type !== "gitlink") out.push({ path: prefix + e.name, hash: e.hash, type: e.type });
+			}
+			if (out.length > MAX_FILES) throw new HttpError(413, "TOO_LARGE", `More than ${MAX_FILES} files; clone the repository instead`);
+		}
+		level = next;
 	}
-	await mapLimit(dirs, 4, (d) => listFiles(repo, d.hash, `${prefix}${d.name}/`, out));
 	return out;
 }
 

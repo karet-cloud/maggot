@@ -76,7 +76,8 @@ function createAuth(env: Env, origin: string, secret: string) {
 		},
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
 		advanced: { cookiePrefix: "megit" },
-		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername })],
+		// Repository URLs start with the username, so it can't change (renames would have to move them all).
+		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername, immutableUsername: true })],
 	});
 }
 
@@ -85,6 +86,8 @@ export async function auth(env: Env, request: Request) {
 	const origin = new URL(request.url).origin;
 	let instance = instances.get(origin);
 	if (!instance) {
+		// Keyed by origin, which follows the Host header; keep the map from growing without bound.
+		if (instances.size >= 8) instances.clear();
 		instance = createAuth(env, origin, await authSecret(env));
 		instances.set(origin, instance);
 	}

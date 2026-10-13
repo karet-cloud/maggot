@@ -50,7 +50,7 @@ deleted.
 One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI everywhere else.
 
 - **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
-  in D1). Usernames are the first part of every repository URL.
+  in D1). Usernames are the first part of every repository URL, so they can't be changed.
 - **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
   works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
   Emails go out through Cloudflare Email Sending when the deploy sets `MEGIT_EMAIL_FROM` (a sender on a
@@ -62,11 +62,13 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   can't create repositories or push (a banner offers to resend it). Without email, an admin issues the
   link: `POST /api/admin/verify-email {"username": "…"}`.
 - **Abuse limits**: sign-ups, sign-ins (per address and per account), reset and verification emails,
-  API calls and Git requests are rate limited (429 with `Retry-After`; counters live in a `Limiter`
+  API writes, signed-out API reads, and Git requests are rate limited (429 with `Retry-After`; counters live in a `Limiter`
   Durable Object per address, user or account). Each account has a repository count and storage quota,
-  each repository a size limit, and each push a size limit; pushes are counted as they stream through,
-  and once a repository is full git prints why. Defaults are in [`src/policy.ts`](src/policy.ts); set
+  each repository a size limit, and each push a size limit; a push is measured as it streams through and
+  counted once the backend reports it accepted, and once a repository is full git prints why. Defaults are in [`src/policy.ts`](src/policy.ts); set
   `MEGIT_POLICY` (JSON, a repository variable in CI) to change them. The admin key isn't limited.
+  Wrong tokens count against the address that sent them, and an address past its budget is refused
+  before any lookup. Auth endpoints take JSON only, so every limit sees the fields it keys on.
 - **Repositories**: `/<owner>/<repo>`, public (anyone can browse and clone; only the owner pushes) or
   private (only the owner sees it; to anyone else it doesn't exist). Create one empty, with a README, or by
   importing a public Git URL. Settings change the description and visibility, or delete it.
@@ -213,7 +215,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | POST | `/projects/:p/tasks/:id/access` | | `TaskAccess` with fresh tokens (`fork: null` while provisioning) |
 | POST | `/projects/:p/tasks/:id/submit` | | `{ task }`, enqueues for merge (202) |
 | POST | `/projects/:p/tasks/:id/abandon` | | `{ task }`, deletes the fork |
-| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days |
+| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days (admin key only: pushes with them skip megit's limits) |
 | GET | `/projects/:p/queue` | | `{ queue: QueueEntry[] }` |
 | GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }`: from `after` forward, or the newest `limit` without it |
 | WS | `/projects/:p/live` | `?key=&after=<seq>` | stream of `ProjectEvent` JSON; replays from `after`; send `ping` → `pong` |
@@ -296,8 +298,13 @@ npm run typecheck
 
 - Collaborators and organizations: a repository has one owner, who is the only one who can push.
 - Password reset and verification emails need a sending domain (see Passwords above).
-- Repository sizes are the bytes pushed (packs as sent), not what Artifacts stores after packing, and
-  imports aren't counted.
+- Repository sizes are the bytes of accepted pushes (packs as sent, so force pushes add up), not what
+  Artifacts stores after packing, and
+  imports are measured once, as the pack a full clone downloads. Agent task forks get Artifacts
+  credentials directly, so what lands through the merge queue isn't counted (task creation still
+  needs a verified email and a repository under its size limit).
+- Live sockets are checked when they connect; a visibility change disconnects them all, but revoking
+  a token doesn't close a socket it opened.
 - SSH remotes and Git LFS: HTTPS with personal access tokens only.
 - Pull requests and reviews for people (agents already land work through the merge queue).
 - Checks before merge (run tests on a Workers Preview / Sandbox and gate the merge on them).

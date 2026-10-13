@@ -123,15 +123,15 @@ function TopBar() {
 	const me = viewer.data;
 	return (
 		<header className="sticky top-0 z-30 border-b border-line bg-bg/85 backdrop-blur">
-			<div className="mx-auto flex h-12 max-w-[1600px] items-center gap-3 px-5">
-				<Link to="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+			<div className="mx-auto flex h-12 max-w-[1600px] items-center gap-3 px-3 sm:px-5">
+				<Link to="/" className="flex shrink-0 items-center gap-2 text-sm font-semibold tracking-tight">
 					<img src="/favicon.svg" alt="" className="size-6" />
 					megit
 				</Link>
 				{params.owner && (
 					<nav className="flex min-w-0 items-center gap-1.5 font-mono text-sm">
 						<span className="text-faint">/</span>
-						<Link to="/$owner" params={{ owner: params.owner }} className="text-dim hover:text-fg">
+						<Link to="/$owner" params={{ owner: params.owner }} className="truncate text-dim hover:text-fg">
 							{params.owner}
 						</Link>
 						{params.repo && (
@@ -144,18 +144,18 @@ function TopBar() {
 						)}
 					</nav>
 				)}
-				<div className="ml-auto flex items-center gap-1">
+				<div className="ml-auto flex shrink-0 items-center gap-1">
 					{viewer.isPending ? null : me ? (
 						<>
 							<Link to="/new" className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
 								<Plus className="size-3.5" />
-								New repository
+								<span className="hidden sm:inline">New repository</span>
 							</Link>
 							<Link to="/settings/tokens" className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
 								<KeyRound className="size-3.5" />
-								Settings
+								<span className="hidden sm:inline">Settings</span>
 							</Link>
-							<Link to="/$owner" params={{ owner: me.username }} className="rounded-md px-2.5 py-1.5 font-mono text-xs text-fg hover:bg-raised">
+							<Link to="/$owner" params={{ owner: me.username }} className="max-w-28 truncate rounded-md px-2.5 py-1.5 font-mono text-xs text-fg hover:bg-raised">
 								{me.username}
 							</Link>
 							<Button variant="ghost" onClick={() => signOut.mutate()} className="text-xs" title="Sign out">

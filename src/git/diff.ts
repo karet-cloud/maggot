@@ -39,6 +39,11 @@ const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
  */
 const MAX_EDIT_LENGTH = 1_000;
 const READ_CONCURRENCY = 8;
+/**
+ * Tree reads one diff may make. Trees can share subtrees (a small repository can describe a huge
+ * directory structure), so the walk is bounded by reads and directories, not just by changed files.
+ */
+const MAX_TREE_READS = 2_000;
 
 interface Change {
 	path: string;
@@ -74,12 +79,15 @@ export async function diffTrees(repo: ObjectReader, base: string | null, head: s
  */
 async function collect(repo: ObjectReader, base: string | null, head: string): Promise<{ changes: Change[]; truncated: boolean }> {
 	const changes: Change[] = [];
+	const trees = new TreeCache(repo, MAX_TREE_READS);
 	let level: { before: string | null; after: string | null; prefix: string }[] = [{ before: base, after: head, prefix: "" }];
 	while (level.length > 0 && changes.length <= MAX_FILES) {
+		// Each directory pair costs up to two reads; stop before a level could overrun the budget.
+		if (level.length > MAX_TREE_READS || !trees.hasRoomFor(level.length * 2)) break;
 		const next: typeof level = [];
 		await mapLimit(level, READ_CONCURRENCY, async ({ before, after, prefix }) => {
 			if (before === after || changes.length > MAX_FILES) return;
-			const [a, b] = await Promise.all([before ? readTree(repo, before) : [], after ? readTree(repo, after) : []]);
+			const [a, b] = await Promise.all([before ? trees.read(before) : [], after ? trees.read(after) : []]);
 			const left = new Map(a.map((e) => [e.name, e]));
 			const right = new Map(b.map((e) => [e.name, e]));
 			for (const name of new Set([...left.keys(), ...right.keys()])) {
@@ -102,10 +110,37 @@ async function collect(repo: ObjectReader, base: string | null, head: string): P
 	return { changes: changes.slice(0, MAX_FILES), truncated };
 }
 
-async function readTree(repo: ObjectReader, hash: string): Promise<TreeEntry[]> {
-	const tree = await repo.readTree(hash);
-	if (!tree) throw new Error(`Tree ${hash} is missing`);
-	return tree;
+/**
+ * Reads trees at most once each, and at most `budget` reads in all. Callers check `hasRoomFor`
+ * before a batch; a read past the budget is an error rather than silently skipped.
+ */
+export class TreeCache {
+	private readonly cache = new Map<string, Promise<TreeEntry[]>>();
+	private readonly repo: ObjectReader;
+	private remaining: number;
+
+	constructor(repo: ObjectReader, budget: number) {
+		this.repo = repo;
+		this.remaining = budget;
+	}
+
+	hasRoomFor(reads: number): boolean {
+		return this.remaining >= reads;
+	}
+
+	read(hash: string): Promise<TreeEntry[]> {
+		let tree = this.cache.get(hash);
+		if (!tree) {
+			if (this.remaining <= 0) throw new Error("Too many directories to read");
+			this.remaining--;
+			tree = this.repo.readTree(hash).then((t) => {
+				if (!t) throw new Error(`Tree ${hash} is missing`);
+				return t;
+			});
+			this.cache.set(hash, tree);
+		}
+		return tree;
+	}
 }
 
 async function fileDiff(repo: ObjectReader, { path, before, after }: Change, budget: Budget): Promise<FileDiff> {

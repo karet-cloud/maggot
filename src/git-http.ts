@@ -4,7 +4,8 @@
 import { canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
 import { addRepoBytes, db, ensureSchema, findRepo } from "./db.ts";
 import { toHttpError } from "./errors.ts";
-import { clientIp, formatBytes, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
+import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
+import { pushAccepted } from "./git/protocol.ts";
 import type { ProjectCoordinator } from "./project.ts";
 
 const GIT_PATH = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/;
@@ -50,7 +51,7 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 
 	let principal: Principal;
 	try {
-		principal = await resolvePrincipal(env, request);
+		principal = await guardCredentials(env, request, () => resolvePrincipal(env, request));
 		if (principal.kind !== "admin") {
 			const subject = principal.kind === "user" ? `user:${principal.id}` : `ip:${clientIp(request)}`;
 			await limit(env, subject, rules.git(policy(env)), "Too many git requests");
@@ -124,18 +125,21 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		if (value) out.set(name, value);
 	}
 	if (res.status === 401 || res.status === 403) return deny(502, "The storage backend refused the request.");
-	// After a push finishes streaming, record it so the web UI and its live feed update.
+	// Once the backend has answered a push, record it: the size counts if the push was accepted, and
+	// the web UI and its live feed update. A second copy of the response is read in the background, so
+	// this happens even if git hangs up first.
 	if (pushing && route.endpoint === "git-receive-pack" && res.ok && res.body) {
-		const done = new TransformStream<Uint8Array, Uint8Array>({
-			flush() {
-				ctx.waitUntil(
-					Promise.all([coordinator.pushed(), sent > 0 ? addRepoBytes(db(env), row.id, sent) : null]).catch((err) =>
-						console.error("recording push failed", err),
-					),
-				);
-			},
-		});
-		return new Response(res.body.pipeThrough(done), { status: res.status, headers: out });
+		const [client, watcher] = res.body.tee();
+		ctx.waitUntil(
+			new Response(watcher)
+				.arrayBuffer()
+				.then(async (report) => {
+					if (!pushAccepted(new Uint8Array(report))) return;
+					await Promise.all([coordinator.pushed(), sent > 0 ? addRepoBytes(db(env), row.id, sent) : null]);
+				})
+				.catch((err) => console.error("recording push failed", err)),
+		);
+		return new Response(client, { status: res.status, headers: out });
 	}
 	return new Response(res.body, { status: res.status, headers: out });
 }

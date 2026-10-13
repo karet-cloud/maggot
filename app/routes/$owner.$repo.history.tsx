@@ -17,7 +17,7 @@ function HistoryPage() {
 	if (log.data.length === 0) return <Empty icon={<GitCommitHorizontal className="size-6" />} title="No commits yet" />;
 
 	return (
-		<Panel title={`Default branch · ${log.data.length} most recent commits`}>
+		<Panel title={`Default branch · ${log.data.length === 1 ? "1 commit" : `${log.data.length} most recent commits`}`}>
 			<CommitList commits={log.data} project={project} />
 		</Panel>
 	);

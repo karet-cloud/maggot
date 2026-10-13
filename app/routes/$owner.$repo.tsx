@@ -48,13 +48,13 @@ function ProjectLayout() {
 					<div className="flex flex-wrap items-start justify-between gap-4">
 						<div className="min-w-0">
 							<div className="flex items-center gap-3">
-								<h1 className="font-mono text-xl font-semibold tracking-tight">{project}</h1>
+								<h1 className="min-w-0 break-all font-mono text-xl font-semibold tracking-tight">{project}</h1>
 								{p && <VisibilityBadge visibility={p.repo.visibility} />}
 								<LiveDot status={live.status} />
 							</div>
 							<p className="mt-1 text-sm text-dim">{p ? p.description || "No description" : <Spinner className="inline" />}</p>
 						</div>
-						<div className="flex items-center gap-2">
+						<div className="flex flex-wrap items-center gap-2">
 							<Button onClick={() => setConnecting(true)}>
 								<Terminal className="size-4" />
 								Clone / push
@@ -90,12 +90,12 @@ function ProjectLayout() {
 									<span className="text-faint">attention</span> <b className="font-medium text-rose-300">{p.stats.conflict + p.stats.failed}</b>
 								</span>
 							)}
-							<div className="w-full max-w-md sm:ml-auto sm:w-auto sm:min-w-80">
+							<div className="w-full min-w-0 max-w-md sm:ml-auto sm:w-auto sm:min-w-80">
 								<CopyField value={p.repo.cloneUrl} />
 							</div>
 						</div>
 					)}
-					<nav className="mt-4 flex gap-1">
+					<nav className="-mx-5 mt-4 flex gap-1 overflow-x-auto px-5">
 						<Tab to="/$owner/$repo" project={project} icon={<FolderCode className="size-3.5" />} label="Code" exact />
 						<Tab to="/$owner/$repo/history" project={project} icon={<History className="size-3.5" />} label="History" />
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
@@ -140,7 +140,7 @@ function Tab({ to, project, icon, label, exact }: { to: TabTarget; project: stri
 			to={to}
 			params={repoParams(project)}
 			activeOptions={{ exact, includeSearch: false }}
-			className="-mb-px flex items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-fg data-[status=active]:border-accent data-[status=active]:text-fg"
+			className="-mb-px flex shrink-0 items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-fg data-[status=active]:border-accent data-[status=active]:text-fg"
 		>
 			{icon}
 			{label}

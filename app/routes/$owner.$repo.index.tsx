@@ -6,7 +6,7 @@ import { Markdown } from "../components/markdown.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
 import { BranchSelect } from "../components/refs.tsx";
 import { cx, Empty, ErrorNote, Panel, Spinner, useCopy } from "../components/ui.tsx";
-import { api, keys, type TreeEntry, repoParams } from "../lib/api.ts";
+import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
 
 type Search = { ref?: string; path?: string; file?: string };
@@ -21,6 +21,8 @@ export const Route = createFileRoute("/$owner/$repo/")({
 });
 
 const MAX_LINES = 5000;
+/** Past this, files are shown plain: highlighting runs on the main thread. */
+const MAX_HIGHLIGHT_BYTES = 256 * 1024;
 
 function Code() {
 	const { owner, repo } = Route.useParams();
@@ -31,6 +33,14 @@ function Code() {
 	const tree = useQuery({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
 	const readme = !file ? tree.data?.entries.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name)) : undefined;
 	const shown = file ?? readme?.path;
+
+	// Links from READMEs guess whether a path is a file or a directory; correct the guess either way.
+	const listedAsDir = file !== undefined && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
+	const notADirectory = !file && path !== "" && tree.error instanceof ApiError && tree.error.status === 404 && /not a directory/.test(tree.error.message);
+	useEffect(() => {
+		if (listedAsDir) void navigate({ search: { ref, path: file }, replace: true });
+		else if (notADirectory) void navigate({ search: { ref, path: path.split("/").slice(0, -1).join("/") || undefined, file: path }, replace: true });
+	}, [listedAsDir, notADirectory, navigate, ref, file, path]);
 
 	if (tree.data && !tree.data.commit && !ref && info.data) {
 		return (
@@ -164,7 +174,8 @@ function FileView({ project, refName, path, commit }: { project: string; refName
 		return all;
 	}, [file.data]);
 	const html = useMemo(
-		() => (file.data === undefined || binary ? null : highlightLines(lines.slice(0, MAX_LINES).join("\n"), languageFor(path))),
+		() =>
+			file.data === undefined || binary || file.data.length > MAX_HIGHLIGHT_BYTES ? null : highlightLines(lines.slice(0, MAX_LINES).join("\n"), languageFor(path)),
 		[file.data, binary, lines, path],
 	);
 	const showCode = !image && !binary && !(markdown && mode === "preview");

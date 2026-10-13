@@ -22,6 +22,8 @@ export interface Policy {
 	repoCreatesPerHour: number;
 	/** Git requests (clone, fetch, push) per user or IP address per minute. A clone is two or three. */
 	gitPerMinute: number;
+	/** Requests with a wrong token or password per IP address per 5 minutes, before the address is refused. */
+	authFailuresPerIp: number;
 	reposPerUser: number;
 	/** Bytes one push may send. */
 	pushBytes: number;
@@ -44,6 +46,7 @@ export const DEFAULT_POLICY: Policy = {
 	writesPerMinute: 60,
 	repoCreatesPerHour: 20,
 	gitPerMinute: 120,
+	authFailuresPerIp: 30,
 	reposPerUser: 50,
 	pushBytes: 100 * MB,
 	repoBytes: 1024 * MB,
@@ -97,6 +100,27 @@ export async function limit(env: Env, subject: string, rules: Rule[], message = 
 	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
 }
 
+/**
+ * Resolves credentials without letting one address guess tokens cheaply: an address that has sent too
+ * many wrong ones is refused before the lookup, and each wrong one counts.
+ */
+export async function guardCredentials<T>(env: Env, request: Request, resolve: () => Promise<T>): Promise<T> {
+	const header = request.headers.get("authorization");
+	const presented = Boolean(header) || new URL(request.url).searchParams.has("key");
+	if (!presented) return resolve();
+	const subject = `ip:${clientIp(request)}`;
+	const failures = rules.authFailure(policy(env));
+	const limiter = (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject);
+	const verdict = await limiter.peek(failures);
+	if (!verdict.ok) throw new RateLimited(`Too many wrong credentials from your network; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
+	try {
+		return await resolve();
+	} catch (err) {
+		if (err instanceof HttpError && err.status === 401) await limiter.take(failures);
+		throw err;
+	}
+}
+
 export class RateLimited extends HttpError {
 	readonly retryAfter: number;
 	constructor(message: string, retryAfter: number) {
@@ -122,20 +146,39 @@ export class Limiter extends DurableObject<Env> {
 	constructor(ctx: DurableObjectState, env: Env) {
 		super(ctx, env);
 		this.sql = ctx.storage.sql;
+		this.createTable();
+	}
+
+	private createTable() {
 		this.sql.exec("CREATE TABLE IF NOT EXISTS hits (bucket TEXT PRIMARY KEY, window_end INTEGER NOT NULL, count INTEGER NOT NULL)");
 	}
 
-	async take(rules: Rule[]): Promise<Verdict> {
-		const now = Date.now();
-		const windows = rules.map((r) => {
+	/** Whether `rules` have room left, without counting this call. */
+	async peek(rules: Rule[]): Promise<Verdict> {
+		return this.check(Date.now(), this.windows(rules, Date.now()));
+	}
+
+	private windows(rules: Rule[], now: number) {
+		return rules.map((r) => {
 			const ms = r.windowSeconds * 1000;
 			return { rule: r, end: (Math.floor(now / ms) + 1) * ms };
 		});
+	}
+
+	private check(now: number, windows: { rule: Rule; end: number }[]): Verdict {
 		for (const { rule, end } of windows) {
 			const row = this.sql.exec<{ window_end: number; count: number }>("SELECT window_end, count FROM hits WHERE bucket = ?", rule.name).toArray()[0];
 			const count = row && row.window_end === end ? row.count : 0;
 			if (count >= rule.limit) return { ok: false, rule: rule.name, retryAfter: Math.max(1, Math.ceil((end - now) / 1000)) };
 		}
+		return { ok: true };
+	}
+
+	async take(rules: Rule[]): Promise<Verdict> {
+		const now = Date.now();
+		const windows = this.windows(rules, now);
+		const verdict = this.check(now, windows);
+		if (!verdict.ok) return verdict;
 		for (const { rule, end } of windows) {
 			this.sql.exec(
 				`INSERT INTO hits (bucket, window_end, count) VALUES (?, ?, 1)
@@ -153,8 +196,11 @@ export class Limiter extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		this.sql.exec("DELETE FROM hits WHERE window_end <= ?", Date.now());
 		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(window_end) AS end FROM hits").one().end;
-		if (left === null) await this.ctx.storage.deleteAll();
-		else await this.ctx.storage.setAlarm(left);
+		if (left === null) {
+			// Frees the instance's storage; this instance may still be asked again, so the table comes back.
+			await this.ctx.storage.deleteAll();
+			this.createTable();
+		} else await this.ctx.storage.setAlarm(left);
 	}
 }
 
@@ -174,6 +220,7 @@ export const rules = {
 	],
 	repoCreate: (p: Policy): Rule[] => [{ name: "repo-create", limit: p.repoCreatesPerHour, windowSeconds: HOUR }],
 	git: (p: Policy): Rule[] => [{ name: "git", limit: p.gitPerMinute, windowSeconds: MINUTE }],
+	authFailure: (p: Policy): Rule[] => [{ name: "auth-failure", limit: p.authFailuresPerIp, windowSeconds: 5 * MINUTE }],
 };
 
 // ── Quotas ───────────────────────────────────────────────────────────────────

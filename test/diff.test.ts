@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { archiveStream } from "../src/archive.ts";
+import { archiveStream, listFiles } from "../src/archive.ts";
 import { diffTrees, walkToMainline, type CommitObject, type ObjectReader, type TreeEntry } from "../src/git/diff.ts";
 import { deleteBranch } from "../src/git/protocol.ts";
 
@@ -163,4 +163,25 @@ test("branch deletion needs an explicit ok from the server", async () => {
 	} finally {
 		globalThis.fetch = real;
 	}
+});
+
+test("trees that share subtrees can't blow up a diff or an archive listing", async () => {
+	// Eight tiny trees, each holding its child four times over: 4^8 directories (65,536) on paper.
+	const store = new Store();
+	let child = store.tree({ "leaf.txt": "x" });
+	for (let depth = 0; depth < 8; depth++) {
+		const entries: TreeEntry[] = ["a", "b", "c", "d"].map((name) => ({ name, mode: "40000", type: "tree", hash: child }));
+		child = `t${depth}`;
+		store.trees.set(child, entries);
+	}
+	const diff = await diffTrees(store, null, child);
+	assert.ok(diff.truncated);
+	assert.ok(store.treeReads <= 2_000, `${store.treeReads} tree reads`);
+	assert.ok(store.maxConcurrentTreeReads <= 8);
+
+	store.treeReads = 0;
+	store.maxConcurrentTreeReads = 0;
+	await assert.rejects(listFiles(store, child), /More than/);
+	assert.ok(store.treeReads <= 9, `each distinct tree is read once, not ${store.treeReads} times`);
+	assert.ok(store.maxConcurrentTreeReads <= 8);
 });
