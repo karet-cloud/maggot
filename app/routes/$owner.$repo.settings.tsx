@@ -3,6 +3,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
+import { Webhooks } from "../components/webhooks.tsx";
 import { Button, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, type Visibility } from "../lib/api.ts";
 
@@ -37,7 +38,7 @@ function RepoSettings() {
 	const current = info.data.repo;
 	const other: Visibility = current.visibility === "public" ? "private" : "public";
 	return (
-		<div className="max-w-2xl space-y-4">
+		<div className="max-w-3xl space-y-4">
 			<Panel title="General">
 				<form
 					onSubmit={(e) => {
@@ -69,6 +70,7 @@ function RepoSettings() {
 				</div>
 			</Panel>
 			<ErrorNote error={update.error} />
+			<Webhooks project={project} />
 			<Panel title="Danger zone" className="border-red-500/30">
 				<div className="flex flex-wrap items-center justify-between gap-3 p-4 text-sm">
 					<p className="text-dim">Delete the repository, its history, every agent fork, and all task records. This can't be undone.</p>

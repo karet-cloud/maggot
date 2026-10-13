@@ -1,8 +1,8 @@
 /// <reference types="vite/client" />
 import { QueryClientProvider, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useNavigate, useParams } from "@tanstack/react-router";
-import { KeyRound, LogOut, MailWarning, Plus } from "lucide-react";
-import type { ReactNode } from "react";
+import { Bell, KeyRound, LogOut, MailWarning, Plus, Search } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { Button } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
 import css from "../styles.css?url";
@@ -108,6 +108,50 @@ function VerifyBanner() {
 	);
 }
 
+/** Searches repositories from anywhere; the results page refines it. */
+function SearchBox() {
+	const navigate = useNavigate();
+	const [q, setQ] = useState("");
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				void navigate({ to: "/search", search: { q: q.trim() || undefined } });
+				setQ("");
+			}}
+			className="relative mr-1 hidden md:block"
+		>
+			<Search className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-faint" />
+			<input
+				value={q}
+				onChange={(e) => setQ(e.target.value)}
+				placeholder="Search repositories"
+				aria-label="Search repositories"
+				className="h-8 w-56 rounded-md border border-line bg-panel pr-2 pl-8 text-xs text-fg outline-none placeholder:text-faint focus:border-accent"
+			/>
+		</form>
+	);
+}
+
+function NotificationBell() {
+	const unread = useQuery({ queryKey: [...keys.notifications, "unread"], queryFn: () => api.notifications(true), refetchInterval: 60_000 });
+	const count = unread.data?.unread ?? 0;
+	return (
+		<Link
+			to="/notifications"
+			className="relative flex items-center rounded-md px-2 py-1.5 text-dim hover:bg-raised hover:text-fg"
+			title={count ? `${count} unread notifications` : "Notifications"}
+		>
+			<Bell className="size-4" />
+			{count > 0 && (
+				<span className="absolute -top-0.5 -right-0.5 min-w-4 rounded-full bg-accent px-1 text-center text-[10px] leading-4 font-semibold text-white">
+					{count > 99 ? "99+" : count}
+				</span>
+			)}
+		</Link>
+	);
+}
+
 function TopBar() {
 	const params = useParams({ strict: false }) as { owner?: string; repo?: string };
 	const queryClient = useQueryClient();
@@ -145,8 +189,10 @@ function TopBar() {
 					</nav>
 				)}
 				<div className="ml-auto flex shrink-0 items-center gap-1">
+					<SearchBox />
 					{viewer.isPending ? null : me ? (
 						<>
+							<NotificationBell />
 							<Link to="/new" className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
 								<Plus className="size-3.5" />
 								<span className="hidden sm:inline">New repository</span>

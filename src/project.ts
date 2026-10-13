@@ -3,6 +3,7 @@ import {
 	ACTIVE_STATUSES,
 	TASK_STATUSES,
 	type Branches,
+	type CodeSearch,
 	type Commit,
 	type CommitDetail,
 	type Comparison,
@@ -17,13 +18,19 @@ import {
 	type TaskAccess,
 	type TaskStatus,
 	type Tree,
+	type Webhook,
+	type WebhookDelivery,
+	type WebhookEvent,
 } from "./api.ts";
+import { notify } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
 import { deleteBranch, listBranches, RefUpdateRejected } from "./git/protocol.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
+import { Webhooks, type RepositoryRef } from "./hooks.ts";
+import { CodeIndex } from "./search.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 
 const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
@@ -124,6 +131,8 @@ type Meta = { name: string; description: string | null; defaultBranch: string; r
 export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly sql: SqlStorage;
 	private readonly store: RepoStore;
+	private readonly code: CodeIndex;
+	private readonly hooks: Webhooks;
 	private workspace: Workspace | undefined;
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
@@ -178,6 +187,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			// Already migrated.
 		}
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+		this.code = new CodeIndex(this.sql);
+		this.hooks = new Webhooks(this.sql);
 	}
 
 	// ── Project ──────────────────────────────────────────────────────────────
@@ -259,13 +270,135 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Called after a push through the Git proxy: records the new head so live views refresh. */
 	async pushed(): Promise<void> {
 		const meta = this.meta();
+		// The proxy can't see which refs a push touched, so compare every branch with what was seen last.
+		const now = Object.fromEntries(await listBranches(await this.baseAccess(meta)));
+		const before = this.knownRefs(meta);
+		const refs = [...new Set([...Object.keys(before), ...Object.keys(now)])]
+			.filter((branch) => before[branch] !== now[branch])
+			.map((branch) => ({ branch, from: before[branch] ?? null, to: now[branch] ?? null }));
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(now));
+		const head = now[meta.defaultBranch] ?? null;
+		if (head) this.hasCommits = true;
+		const main = refs.find((r) => r.branch === meta.defaultBranch);
+		this.emit("repo.pushed", null, { branch: meta.defaultBranch, from: main ? main.from : head, to: head, moved: Boolean(main), refs });
+		if (main) await this.requestIndex();
+	}
+
+	/** Branch heads as last seen (by a push or a merge). Older coordinators only kept the default branch's. */
+	private knownRefs(meta: Meta): Record<string, string> {
+		const rows = this.sql.exec<{ key: string; value: string }>("SELECT key, value FROM meta WHERE key IN ('refs', 'pushedHead')").toArray();
+		const refs = rows.find((r) => r.key === "refs");
+		if (refs) return JSON.parse(refs.value);
+		const head = rows.find((r) => r.key === "pushedHead")?.value;
+		return head ? { [meta.defaultBranch]: head } : {};
+	}
+
+	private recordRef(meta: Meta, branch: string, oid: string) {
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify({ ...this.knownRefs(meta), [branch]: oid }));
+	}
+
+	// ── Code search ──────────────────────────────────────────────────────────
+
+	/** Asks the alarm to bring the code index up to the default branch. */
+	private async requestIndex(): Promise<void> {
+		if (!this.code.available) return;
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('indexWanted', '1')");
+		await this.scheduleAlarm(Date.now());
+	}
+
+	private async indexIfWanted(): Promise<void> {
+		const wanted = this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0;
+		if (!wanted) return;
+		this.sql.exec("DELETE FROM meta WHERE key = 'indexWanted'");
+		const meta = this.meta();
+		try {
+			using repo = await this.store.get(meta.name);
+			const [head] = await repo.log({ ref: meta.defaultBranch, limit: 1 });
+			if (head) await this.code.update(repo, head.hash, head.treeHash);
+		} catch (err) {
+			console.error("indexing failed", err);
+		}
+	}
+
+	/** Searches the default branch. Starts indexing if the index is behind; results may then be older. */
+	async searchCode(query: string): Promise<CodeSearch> {
+		const meta = this.meta();
+		if (!this.code.available) return { commit: null, partial: false, files: 0, indexing: false, results: [] };
 		using repo = await this.store.get(meta.name);
 		const head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
-		const previous = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'pushedHead'").toArray()[0]?.value ?? null;
-		if (head) this.hasCommits = true;
-		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pushedHead', ?)", head ?? "");
-		// The proxy can't see which refs a push touched; report whether the default branch moved.
-		this.emit("repo.pushed", null, { branch: meta.defaultBranch, from: previous || null, to: head, moved: head !== (previous || null) });
+		const behind = head !== null && this.code.state()?.commit !== head;
+		if (behind) await this.requestIndex();
+		return { ...this.code.search(query), indexing: behind };
+	}
+
+	// ── Webhooks ─────────────────────────────────────────────────────────────
+
+	/** How payloads name this repository; set by the API when a user repository is created. */
+	async setRepository(ref: RepositoryRef): Promise<void> {
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('repository', ?)", JSON.stringify(ref));
+	}
+
+	private repository(): RepositoryRef {
+		const meta = this.meta();
+		const row = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'repository'").toArray()[0];
+		return row ? JSON.parse(row.value) : { fullName: meta.name, url: "", cloneUrl: "", defaultBranch: meta.defaultBranch };
+	}
+
+	async listHooks(): Promise<Webhook[]> {
+		this.meta();
+		return this.hooks.list();
+	}
+
+	async createHook(input: { url: string; secret: string; events: WebhookEvent[] }): Promise<Webhook> {
+		this.meta();
+		const hook = this.hooks.create(input);
+		this.hooks.ping(hook.id, this.repository());
+		await this.scheduleAlarm(Date.now());
+		return this.hooks.get(hook.id);
+	}
+
+	async updateHook(id: string, patch: { url?: string; secret?: string; events?: WebhookEvent[]; active?: boolean }): Promise<Webhook> {
+		this.meta();
+		return this.hooks.update(id, patch);
+	}
+
+	async deleteHook(id: string): Promise<void> {
+		this.meta();
+		this.hooks.remove(id);
+	}
+
+	async hookDeliveries(id: string): Promise<WebhookDelivery[]> {
+		this.meta();
+		return this.hooks.deliveries(id);
+	}
+
+	async pingHook(id: string): Promise<WebhookDelivery> {
+		this.meta();
+		const delivery = this.hooks.ping(id, this.repository());
+		await this.scheduleAlarm(Date.now());
+		return delivery;
+	}
+
+	async redeliverHook(id: string, deliveryId: string): Promise<WebhookDelivery> {
+		this.meta();
+		const delivery = this.hooks.redeliver(id, deliveryId);
+		await this.scheduleAlarm(Date.now());
+		return delivery;
+	}
+
+	private async deliverHooks(): Promise<void> {
+		const failed = await this.hooks.deliverDue();
+		for (const f of failed) {
+			this.notifyOwner("webhook.failing", `A webhook to ${new URL(f.url).host} keeps failing: ${f.error.slice(0, 120)}`, "settings");
+		}
+	}
+
+	/** Tells the repository's owner (people's repositories only) about something that happened. */
+	private notifyOwner(kind: "task.merged" | "task.failed" | "task.conflict" | "webhook.failing", title: string, path: string) {
+		const id = this.meta().name;
+		this.ctx.waitUntil(
+			notify(this.env, id, { kind, title, path }).catch((err) => console.error("notification failed", err)),
+		);
 	}
 
 	async getProject(): Promise<Project> {
@@ -754,11 +887,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * whose request went away. Fork cleanup runs only when no merge is waiting.
 	 */
 	async alarm(): Promise<void> {
-		await Promise.all([this.drainMerges(), this.resumeProvisioning()]);
+		await Promise.all([this.drainMerges(), this.resumeProvisioning(), this.deliverHooks()]);
+		await this.indexIfWanted();
 		const pending = this.sql.exec<{ n: number }>(
 			"SELECT (SELECT COUNT(*) FROM tasks WHERE status = 'provisioning') + (SELECT COUNT(*) FROM cleanup) AS n",
 		).one().n;
 		if (pending > 0) await this.scheduleAlarm(Date.now() + 5_000);
+		const due = this.hooks.nextDue();
+		if (due !== null) await this.scheduleAlarm(Math.max(due, Date.now() + 1_000));
+		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0) await this.scheduleAlarm(Date.now() + 1_000);
 	}
 
 	private async drainMerges(): Promise<void> {
@@ -922,7 +1059,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				if (await ws.push(base)) {
 					this.markMerged(id, outcome.oid, outcome.changedFiles);
 					// The next push's "from" is this merge, not whatever was pushed before it.
-					this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pushedHead', ?)", outcome.oid);
+					this.recordRef(meta, meta.defaultBranch, outcome.oid);
+					await this.requestIndex();
 					this.emit("main.advanced", id, {
 						from: baseHead,
 						to: outcome.oid,
@@ -1084,6 +1222,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			} catch {
 				// Socket already closed; the runtime cleans it up.
 			}
+		}
+		if (this.hooks.enqueue(type, taskId, data, this.repository()) > 0) void this.scheduleAlarm(Date.now());
+		if (taskId && (type === "task.merged" || type === "task.failed" || type === "task.conflict")) {
+			const task = this.sql.exec<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId).toArray()[0];
+			const outcome = { "task.merged": "was merged", "task.failed": "failed", "task.conflict": "has conflicts" }[type];
+			this.notifyOwner(type, `Task “${task?.title ?? taskId}” ${outcome}`, `t/${taskId}`);
 		}
 	}
 }

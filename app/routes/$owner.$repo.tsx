@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Settings, Star, Terminal } from "lucide-react";
+import { Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Search, Settings, Star, Terminal } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
@@ -120,6 +120,7 @@ function ProjectLayout() {
 						<Tab to="/$owner/$repo/history" project={project} icon={<History className="size-3.5" />} label="History" />
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
+						<Tab to="/$owner/$repo/search" project={project} icon={<Search className="size-3.5" />} label="Search code" />
 						{canWrite && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
 					</nav>
 				</div>
@@ -244,7 +245,13 @@ function ForkDialog({ project, repo, onClose }: { project: string; repo: RepoInf
 	);
 }
 
-type TabTarget = "/$owner/$repo" | "/$owner/$repo/agents" | "/$owner/$repo/history" | "/$owner/$repo/branches" | "/$owner/$repo/settings";
+type TabTarget =
+	| "/$owner/$repo"
+	| "/$owner/$repo/agents"
+	| "/$owner/$repo/history"
+	| "/$owner/$repo/branches"
+	| "/$owner/$repo/search"
+	| "/$owner/$repo/settings";
 
 function Tab({ to, project, icon, label, exact }: { to: TabTarget; project: string; icon: ReactNode; label: string; exact?: boolean }) {
 	return (

@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { createHmac } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -620,4 +622,74 @@ test("only the exact star and fork routes skip the owner check; web commits keep
 	assert.equal(renamed.status, 201, await renamed.clone().text());
 	await exec("git", ["pull", "-q", "origin", "master"], { cwd: dir });
 	assert.match((await exec("git", ["ls-tree", "HEAD", "bin/run.sh"], { cwd: dir })).stdout, /^100755 /);
+});
+
+test("code search, webhooks and notifications", async () => {
+	const ada = await newUser("hooks-a");
+	const bob = await newUser("hooks-b");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "app", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/app`;
+
+	// A receiver that checks each delivery's signature.
+	const received: { event: string; valid: boolean; body: { ref?: string; after?: string; event: string } }[] = [];
+	const receiver = createHttpServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			const expected = `sha256=${createHmac("sha256", "hush").update(body).digest("hex")}`;
+			received.push({ event: String(req.headers["x-megit-event"]), valid: req.headers["x-megit-signature-256"] === expected, body: JSON.parse(body) });
+			res.writeHead(200).end("ok");
+		});
+	});
+	await new Promise<void>((ok) => receiver.listen(0, "127.0.0.1", ok));
+	const hookUrl = `http://127.0.0.1:${(receiver.address() as { port: number }).port}/hook`;
+	try {
+		// Only the owner sees or adds webhooks; URLs are checked.
+		assert.equal((await as(null)(`${repo}/hooks`)).status, 404);
+		assert.equal((await as(bob)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, events: ["push"] }) })).status, 403);
+		assert.equal((await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: "ftp://example.com", events: ["push"] }) })).status, 400);
+		const created = await as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: hookUrl, secret: "hush", events: ["push"] }) });
+		assert.equal(created.status, 201, await created.clone().text());
+		const { hook } = (await created.json()) as { hook: { id: string } };
+
+		// A web commit is a push: the hook hears about it, signed, and the code index follows it.
+		const head = ((await (await as(ada)(repo)).json()) as { project: { head: string } }).project.head;
+		const commit = await as(ada)(`${repo}/contents`, {
+			method: "POST",
+			body: JSON.stringify({ branch: "master", baseCommit: head, message: "Add search target", files: [{ path: "src/needle.ts", content: "export const findTheHaystackNeedle = 42;\n" }] }),
+		});
+		assert.equal(commit.status, 201);
+		const { commit: after } = (await commit.json()) as { commit: string };
+		const push = await until(async () => received.find((r) => r.event === "push"));
+		assert.ok(push.valid, "signed with the secret");
+		assert.deepEqual([push.body.ref, push.body.after], ["refs/heads/master", after]);
+		assert.ok(received.some((r) => r.event === "ping" && r.valid), "a new hook is pinged");
+		const deliveries = (await (await as(ada)(`${repo}/hooks/${hook.id}/deliveries`)).json()) as { deliveries: { status: string }[] };
+		assert.ok(deliveries.deliveries.some((d) => d.status === "delivered"));
+
+		const search = await until(async () => {
+			const result = (await (await as(null)(`${repo}/search?q=haystackneedle`)).json()) as { indexing: boolean; results: { path: string; lines: { line: number }[] }[] };
+			return result.indexing ? undefined : result;
+		});
+		assert.deepEqual(search.results.map((r) => [r.path, r.lines[0]?.line]), [["src/needle.ts", 1]]);
+		const byName = (await (await as(null)(`${repo}/search?q=ne`)).json()) as { results: { path: string }[] };
+		assert.ok(byName.results.some((r) => r.path === "src/needle.ts"), "short queries match file names");
+	} finally {
+		receiver.close();
+	}
+
+	// Starring someone else's repository tells its owner; reading clears it.
+	await as(bob)(`${repo}/star`, { method: "PUT" });
+	const inbox = await until(async () => {
+		const n = (await (await as(ada)("/notifications?unread")).json()) as { unread: number; notifications: { id: string; kind: string; url: string }[] };
+		return n.unread > 0 ? n : undefined;
+	});
+	assert.equal(inbox.notifications[0].kind, "star");
+	assert.equal(inbox.notifications[0].url, `/${ada.username}/app`);
+	assert.equal((await as(bob)("/notifications")).status, 200);
+	assert.equal(((await (await as(bob)("/notifications")).json()) as { unread: number }).unread, 0, "nobody else sees them");
+	await as(ada)("/notifications/read", { method: "POST", body: JSON.stringify({}) });
+	assert.equal(((await (await as(ada)("/notifications?unread")).json()) as { unread: number }).unread, 0);
 });

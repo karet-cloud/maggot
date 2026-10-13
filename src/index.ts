@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, Project, RepoInfo, TaskStatus, Visibility } from "./api.ts";
+import type { ApiError, Project, RepoInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
 import {
@@ -15,6 +15,9 @@ import {
 	listRepos,
 	listTokens,
 	addRepoBytes,
+	listNotifications,
+	markRead,
+	notifyUser,
 	revokeToken,
 	setRepoBytes,
 	setStar,
@@ -27,6 +30,7 @@ import { HttpError, toHttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
 import { assertProjectName } from "./names.ts";
 import { measureRepository } from "./git/protocol.ts";
+import { validateHookUrl } from "./hooks.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
@@ -248,6 +252,25 @@ app.delete("/api/tokens/:id", async (c) => {
 	return c.json({ deleted: true });
 });
 
+// ── Notifications ────────────────────────────────────────────────────────────
+
+app.get("/api/notifications", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	return c.json(await listNotifications(db(c.env), user.id, c.req.query("unread") !== undefined));
+});
+
+// Marks the given notifications read, or all of them without `ids`.
+app.post("/api/notifications/read", async (c) => {
+	const user = requireUser(c);
+	const { ids } = (await c.req.json().catch(() => ({}))) as { ids?: unknown };
+	if (ids !== undefined && (!Array.isArray(ids) || ids.length > 100 || ids.some((id) => typeof id !== "string"))) {
+		throw new HttpError(400, "INVALID_INPUT", "ids is a list of up to 100 notification ids");
+	}
+	await markRead(db(c.env), user.id, ids as string[] | undefined);
+	return c.json({ ok: true });
+});
+
 // ── Repositories ─────────────────────────────────────────────────────────────
 
 const viewerId = (p: Principal) => (p.kind === "user" ? p.id : null);
@@ -362,8 +385,28 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		await db(c.env).prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(created.defaultBranch, row.id).run();
 		row.defaultBranch = created.defaultBranch;
 	}
+	await projects(c.env)
+		.getByName(row.id)
+		.setRepository(repositoryRef(c, row));
+	if (source && source.ownerId !== user.id) {
+		c.executionCtx.waitUntil(
+			notifyUser(db(c.env), {
+				userId: source.ownerId,
+				kind: "fork",
+				repoId: source.id,
+				title: `${user.username} forked ${source.owner}/${source.name} to ${row.owner}/${row.name}`,
+				url: `/${row.owner}/${row.name}`,
+				actor: user.username,
+			}),
+		);
+	}
 	const listing = await getListing(db(c.env), row.id, user.id);
 	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id), project: created }, 201);
+}
+
+/** How webhook payloads name a repository. */
+function repositoryRef(c: Context<App>, row: RepoRow) {
+	return { fullName: `${row.owner}/${row.name}`, url: `${origin(c)}/${row.owner}/${row.name}`, cloneUrl: `${origin(c)}/${row.owner}/${row.name}.git`, defaultBranch: row.defaultBranch };
 }
 
 app.post("/api/repos", async (c) => createRepo(c, await body<NewRepo>(c)));
@@ -461,7 +504,12 @@ for (const [method, starred] of [["put", true], ["delete", false]] as const) {
 	repo[method]("/star", async (c) => {
 		const user = requireUser(c);
 		const row = userRepo(c);
-		await setStar(db(c.env), user.id, row.id, starred);
+		const changed = await setStar(db(c.env), user.id, row.id, starred);
+		if (changed && starred && user.id !== row.ownerId) {
+			c.executionCtx.waitUntil(
+				notifyUser(db(c.env), { userId: row.ownerId, kind: "star", repoId: row.id, title: `${user.username} starred ${row.owner}/${row.name}`, url: `/${row.owner}/${row.name}`, actor: user.username }),
+			);
+		}
 		const listing = (await getListing(db(c.env), row.id, user.id)) as RepoListing;
 		return c.json({ starred, stars: listing.stars });
 	});
@@ -679,6 +727,62 @@ function isDotGit(part: string): boolean {
 		.replace(/[. ]+$/, "");
 	return name === ".git" || /^git~\d+$/.test(name);
 }
+
+// ── Code search ──────────────────────────────────────────────────────────────
+
+repo.get("/search", async (c) => {
+	const q = c.req.query("q")?.slice(0, 200) ?? "";
+	return c.json(await project(c).searchCode(q));
+});
+
+// ── Webhooks (owner only, reads included: they show URLs and payloads) ─────────
+
+repo.use("/hooks/*", async (c, next) => {
+	if (c.var.repo && !canWrite(c.var.principal, c.var.repo)) throw new HttpError(404, "NOT_FOUND", "Not found");
+	return next();
+});
+repo.use("/hooks", async (c, next) => {
+	if (c.var.repo && !canWrite(c.var.principal, c.var.repo)) throw new HttpError(404, "NOT_FOUND", "Not found");
+	return next();
+});
+
+/** Local development may point webhooks at http://localhost; production needs https to a public host. */
+const allowHttpHooks = (env: Env) => Boolean((env as { LOCAL_ARTIFACTS_URL?: string }).LOCAL_ARTIFACTS_URL);
+
+function hookInput(c: Context<App>, input: { url?: string; secret?: string; events?: WebhookEvent[]; active?: boolean }, creating: boolean) {
+	if (creating && !input.url) throw new HttpError(400, "INVALID_INPUT", "url is required");
+	if (input.secret !== undefined && (typeof input.secret !== "string" || input.secret.length > 200)) throw new HttpError(400, "INVALID_INPUT", "The secret is up to 200 characters");
+	return {
+		url: input.url === undefined ? undefined : validateHookUrl(input.url, allowHttpHooks(c.env)),
+		secret: input.secret,
+		events: input.events === undefined ? undefined : Array.isArray(input.events) ? input.events : [],
+		active: input.active === undefined ? undefined : Boolean(input.active),
+	};
+}
+
+repo.get("/hooks", async (c) => c.json({ hooks: await project(c).listHooks() }));
+
+repo.post("/hooks", async (c) => {
+	const input = hookInput(c, await body(c), true);
+	if (c.var.repo) await project(c).setRepository(repositoryRef(c, c.var.repo));
+	const hook = await project(c).createHook({ url: input.url as string, secret: input.secret ?? "", events: input.events ?? ["push"] });
+	return c.json({ hook }, 201);
+});
+
+repo.patch("/hooks/:id", async (c) => c.json({ hook: await project(c).updateHook(c.req.param("id"), hookInput(c, await body(c), false)) }));
+
+repo.delete("/hooks/:id", async (c) => {
+	await project(c).deleteHook(c.req.param("id"));
+	return c.json({ deleted: true });
+});
+
+repo.get("/hooks/:id/deliveries", async (c) => c.json({ deliveries: await project(c).hookDeliveries(c.req.param("id")) }));
+
+repo.post("/hooks/:id/ping", async (c) => c.json({ delivery: await project(c).pingHook(c.req.param("id")) }, 202));
+
+repo.post("/hooks/:id/deliveries/:delivery/redeliver", async (c) =>
+	c.json({ delivery: await project(c).redeliverHook(c.req.param("id"), c.req.param("delivery")) }, 202),
+);
 
 // ── Tasks ────────────────────────────────────────────────────────────────────
 

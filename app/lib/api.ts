@@ -1,6 +1,7 @@
 // Browser client for the megit API. Same origin; the session cookie set at login authenticates it.
 import type {
 	Branches,
+	CodeSearch,
 	Commit,
 	CommitDetail,
 	Comparison,
@@ -15,6 +16,10 @@ import type {
 	Tree,
 	Viewer,
 	Visibility,
+	Webhook,
+	WebhookDelivery,
+	WebhookEvent,
+	Notification,
 } from "../../src/api.ts";
 
 export type * from "../../src/api.ts";
@@ -108,6 +113,20 @@ export const api = {
 	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
+	searchCode: (project: string, q: string) => call<CodeSearch>("GET", `${p(project)}/search?${new URLSearchParams({ q })}`),
+	hooks: (project: string) => call<{ hooks: Webhook[] }>("GET", `${p(project)}/hooks`).then((r) => r.hooks),
+	createHook: (project: string, input: { url: string; secret: string; events: WebhookEvent[] }) =>
+		call<{ hook: Webhook }>("POST", `${p(project)}/hooks`, input).then((r) => r.hook),
+	updateHook: (project: string, id: string, patch: { active?: boolean; events?: WebhookEvent[] }) =>
+		call<{ hook: Webhook }>("PATCH", `${p(project)}/hooks/${id}`, patch).then((r) => r.hook),
+	deleteHook: (project: string, id: string) => call<{ deleted: true }>("DELETE", `${p(project)}/hooks/${id}`),
+	deliveries: (project: string, id: string) => call<{ deliveries: WebhookDelivery[] }>("GET", `${p(project)}/hooks/${id}/deliveries`).then((r) => r.deliveries),
+	pingHook: (project: string, id: string) => call<{ delivery: WebhookDelivery }>("POST", `${p(project)}/hooks/${id}/ping`),
+	redeliver: (project: string, id: string, delivery: string) =>
+		call<{ delivery: WebhookDelivery }>("POST", `${p(project)}/hooks/${id}/deliveries/${delivery}/redeliver`),
+	notifications: (unread = false) => call<{ notifications: Notification[]; unread: number }>("GET", `/notifications${unread ? "?unread" : ""}`),
+	markRead: (ids?: string[]) => call<{ ok: true }>("POST", "/notifications/read", ids ? { ids } : {}),
+
 	/** Commits files from the web editor; `content: null` deletes a file. */
 	commitFiles: (
 		project: string,
@@ -180,6 +199,10 @@ export const keys = {
 	config: ["config"] as const,
 	repos: (filter: string | RepoFilter = "") => ["repos", filter] as const,
 	forks: (project: string) => ["project", project, "forks"] as const,
+	hooks: (project: string) => ["project", project, "hooks"] as const,
+	deliveries: (project: string, id: string) => ["project", project, "hooks", id] as const,
+	search: (project: string, q: string) => ["project", project, "search", q] as const,
+	notifications: ["notifications"] as const,
 	tokens: ["tokens"] as const,
 	projects: ["projects"] as const,
 	project: (project: string) => ["project", project] as const,

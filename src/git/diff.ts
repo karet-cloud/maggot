@@ -45,7 +45,7 @@ const READ_CONCURRENCY = 8;
  */
 const MAX_TREE_READS = 2_000;
 
-interface Change {
+export interface Change {
 	path: string;
 	before: TreeEntry | null;
 	after: TreeEntry | null;
@@ -77,16 +77,27 @@ export async function diffTrees(repo: ObjectReader, base: string | null, head: s
  * Walks both trees breadth-first with bounded concurrency, skipping identical subtrees, and stops
  * once more than MAX_FILES changed files are found.
  */
-async function collect(repo: ObjectReader, base: string | null, head: string): Promise<{ changes: Change[]; truncated: boolean }> {
+/** Paths that differ between two root trees (`base` null: everything in `head`), up to `maxFiles`. */
+export async function changedFiles(repo: ObjectReader, base: string | null, head: string, maxFiles: number, maxTreeReads = MAX_TREE_READS) {
+	return collect(repo, base, head, maxFiles, maxTreeReads);
+}
+
+async function collect(
+	repo: ObjectReader,
+	base: string | null,
+	head: string,
+	maxFiles = MAX_FILES,
+	maxTreeReads = MAX_TREE_READS,
+): Promise<{ changes: Change[]; truncated: boolean }> {
 	const changes: Change[] = [];
-	const trees = new TreeCache(repo, MAX_TREE_READS);
+	const trees = new TreeCache(repo, maxTreeReads);
 	let level: { before: string | null; after: string | null; prefix: string }[] = [{ before: base, after: head, prefix: "" }];
-	while (level.length > 0 && changes.length <= MAX_FILES) {
+	while (level.length > 0 && changes.length <= maxFiles) {
 		// Each directory pair costs up to two reads; stop before a level could overrun the budget.
-		if (level.length > MAX_TREE_READS || !trees.hasRoomFor(level.length * 2)) break;
+		if (level.length > maxTreeReads || !trees.hasRoomFor(level.length * 2)) break;
 		const next: typeof level = [];
 		await mapLimit(level, READ_CONCURRENCY, async ({ before, after, prefix }) => {
-			if (before === after || changes.length > MAX_FILES) return;
+			if (before === after || changes.length > maxFiles) return;
 			const [a, b] = await Promise.all([before ? trees.read(before) : [], after ? trees.read(after) : []]);
 			const left = new Map(a.map((e) => [e.name, e]));
 			const right = new Map(b.map((e) => [e.name, e]));
@@ -106,8 +117,8 @@ async function collect(repo: ObjectReader, base: string | null, head: string): P
 		});
 		level = next;
 	}
-	const truncated = changes.length > MAX_FILES || level.length > 0;
-	return { changes: changes.slice(0, MAX_FILES), truncated };
+	const truncated = changes.length > maxFiles || level.length > 0;
+	return { changes: changes.slice(0, maxFiles), truncated };
 }
 
 /**
