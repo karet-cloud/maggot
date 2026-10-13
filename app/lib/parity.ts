@@ -59,7 +59,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Branches page", status: "done", comment: "Ahead and behind counts, and delete." },
 			{ feature: "Tags and releases", status: "done", comment: "Tags from git or the web; releases with Markdown notes, pre-releases and source downloads. No uploaded release files yet." },
 			{ feature: "Commit graph", status: "done", comment: "History → Graph: recent commits across every branch in lanes, with branch and tag labels." },
-			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, or only the merge queue. Enforced for HTTPS, SSH and the web. No required checks or reviews yet; those features don't exist." },
+			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, only the merge queue, or only reviewed pull requests (an approval of the head commit). Enforced for HTTPS, SSH and the web. No required status checks; there are no checks to require." },
 			{ feature: "Verified (signed) commit badges", status: "missing", comment: "" },
 		],
 	},

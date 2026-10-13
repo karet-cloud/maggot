@@ -238,8 +238,10 @@ export interface RepoInfo {
 	cloneUrl: string;
 	/** Whether the caller may push, change settings, and run tasks. */
 	canWrite: boolean;
-	/** Whether the caller may change settings, collaborators and webhooks, transfer, archive or delete it. */
+	/** Whether the caller may change settings, collaborators and webhooks, and archive it. */
 	canAdmin: boolean;
+	/** Whether the caller owns it (or owns the organization that does), so may transfer or delete it. */
+	isOwner: boolean;
 	stars: number;
 	/** Public forks. */
 	forks: number;

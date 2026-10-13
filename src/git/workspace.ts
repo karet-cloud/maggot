@@ -103,7 +103,12 @@ export class Workspace {
 			if (result.alreadyMerged || !result.oid || result.oid === ours) return { kind: "up-to-date", oid: ours };
 			if (method === "squash") {
 				// The merged tree, as one commit on top of ours.
-				const { commit } = await git.readCommit({ ...this.base, oid: result.oid });
+				const [{ commit }, { commit: base }] = await Promise.all([git.readCommit({ ...this.base, oid: result.oid }), git.readCommit({ ...this.base, oid: ours })]);
+				// Nothing new (say, the same pull request squashed twice): put the branch back and say so.
+				if (commit.tree === base.tree) {
+					await git.writeRef({ ...this.base, ref: `refs/heads/${this.branch}`, value: ours, force: true });
+					return { kind: "up-to-date", oid: ours };
+				}
 				const squashed = await git.writeCommit({
 					...this.base,
 					commit: {

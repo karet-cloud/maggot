@@ -34,25 +34,34 @@ async function blobAt(trees: TreeCache, tree: string, path: string): Promise<str
 	return null;
 }
 
+/** A version of a file: the commit that made it, its blob there, and its blob just before (null: it wasn't a file). */
+interface Version {
+	commit: CommitObject;
+	blob: string | null;
+	parentBlob: string | null;
+}
+
 /**
  * The commits from `start` back (first parents) in which `path` changed: added, edited or deleted.
- * Looks through `scan` commits; `next` is where to carry on from, if there's more history.
+ * Looks through `scan` commits; `next` is where to carry on from, if there's more history, and `last`
+ * is the oldest commit looked at, with the file's blob there.
  */
-async function changes(repo: HistoryReader, start: string, path: string, scan: number): Promise<{ versions: { commit: CommitObject; blob: string | null }[]; next: string | null }> {
+async function changes(repo: HistoryReader, start: string, path: string, scan: number): Promise<{ versions: Version[]; next: string | null; last: { commit: CommitObject; blob: string | null } | null }> {
 	const commits = await repo.log({ ref: start, limit: scan + 1 });
 	const more = commits.length > scan;
 	const window = commits.slice(0, scan + (more ? 1 : 0));
 	// Unchanged subtrees keep their hashes from one commit to the next, so most reads are shared.
 	const trees = new TreeCache(repo, window.length * Math.max(2, path.split("/").length) + 50);
 	const blobs = await mapLimit(window, READ_CONCURRENCY, (c) => blobAt(trees, c.treeHash, path));
-	const versions: { commit: CommitObject; blob: string | null }[] = [];
-	for (let i = 0; i < Math.min(window.length, scan); i++) {
+	const versions: Version[] = [];
+	const looked = Math.min(window.length, scan);
+	for (let i = 0; i < looked; i++) {
 		// The last commit of the window compares with the one after it; the root commit with nothing.
 		const parent = i + 1 < window.length ? blobs[i + 1] : null;
-		if (blobs[i] !== parent) versions.push({ commit: window[i], blob: blobs[i] });
+		if (blobs[i] !== parent) versions.push({ commit: window[i], blob: blobs[i], parentBlob: parent });
 	}
 	// The next page starts at the first commit not looked at yet.
-	return { versions, next: more ? window[scan].hash : null };
+	return { versions, next: more ? window[scan].hash : null, last: looked > 0 ? { commit: window[looked - 1], blob: blobs[looked - 1] } : null };
 }
 
 /** The commits that changed `path`, newest first, starting at commit `start`. */
@@ -81,12 +90,16 @@ async function lines(repo: ObjectReader, blob: string | null): Promise<string[] 
 
 /**
  * Who last changed each line of `path` at commit `start`. Walks the file's versions newest first,
- * diffing each with the one before: lines a version added belong to its commit, and lines it kept are
- * followed into the older version. Lines still unclaimed when the history (or the budget) runs out
- * belong to the oldest version seen, marked `boundary` if there was more history to look at.
+ * diffing each with the content just before it: lines a version added belong to its commit, and lines
+ * it kept are followed further back. Lines still unclaimed when the walk stops (the history looked at,
+ * or the budget, ran out first) are older than anything seen: they're shown at the oldest commit
+ * looked at, marked `boundary`.
  */
 export async function blame(repo: HistoryReader, start: string, path: string): Promise<Blame> {
-	const { versions, next } = await changes(repo, start, path, BLAME_SCAN);
+	const found = await changes(repo, start, path, BLAME_SCAN);
+	let versions = found.versions;
+	// Unchanged all through the commits looked at: every line is older than them.
+	if (versions.length === 0 && found.last?.blob) versions = [{ commit: found.last.commit, blob: found.last.blob, parentBlob: found.last.blob }];
 	if (versions.length === 0 || versions[0].blob === null) throw new Error(`${path} isn't a file at this commit`);
 	const current = await lines(repo, versions[0].blob);
 	if (current === null) return { path, lines: [], commits: {}, tooLarge: true };
@@ -97,12 +110,17 @@ export async function blame(repo: HistoryReader, start: string, path: string): P
 	let newer = current;
 	const used = versions.slice(0, BLAME_VERSIONS);
 	let oldest = 0;
+	let stopped = versions.length > used.length;
 	for (let k = 0; k < used.length; k++) {
 		oldest = k;
-		const older = k + 1 < used.length ? await lines(repo, used[k + 1].blob) : null;
-		if (k + 1 < used.length && older === null) break; // a binary or huge old version: stop here
-		const parts = diffArrays(older ?? [], newer);
-		const nextLive: number[] = (older ?? []).map(() => -1);
+		// What the file was just before this version (a version's parent content is the next version's).
+		const older = await lines(repo, used[k].parentBlob);
+		if (older === null) {
+			stopped = true; // a binary or huge old version: what's left is older than k
+			break;
+		}
+		const parts = diffArrays(older, newer);
+		const nextLive: number[] = older.map(() => -1);
 		let o = 0;
 		let n = 0;
 		for (const part of parts) {
@@ -115,18 +133,19 @@ export async function blame(repo: HistoryReader, start: string, path: string): P
 				for (let i = 0; i < count; i++, o++, n++) nextLive[o] = live[n];
 			}
 		}
-		if (k + 1 >= used.length) break;
 		live = nextLive;
-		newer = older ?? [];
+		newer = older;
 		if (live.every((l) => l < 0 || owner[l] !== null)) break;
 	}
-	const boundary = next !== null || versions.length > used.length;
-	const resolved = owner.map((o) => o ?? oldest);
+	// Lines older than the walk show the oldest commit it reached, as git blame's ^commit does: the last
+	// one looked at if every version was, or the oldest version compared if the walk stopped short.
+	const edge = stopped || !found.last ? used[oldest].commit : found.last.commit;
+	const commitOf = (i: number) => (owner[i] === null ? edge : used[owner[i] as number].commit);
 	const commits: Blame["commits"] = {};
-	for (const k of new Set(resolved)) commits[used[k].commit.hash] = summary(used[k].commit);
+	for (let i = 0; i < current.length; i++) commits[commitOf(i).hash] ??= summary(commitOf(i));
 	return {
 		path,
-		lines: current.map((text, i) => ({ text, commit: used[resolved[i]].commit.hash, boundary: owner[i] === null && boundary })),
+		lines: current.map((text, i) => ({ text, commit: commitOf(i).hash, boundary: owner[i] === null })),
 		commits,
 		tooLarge: false,
 	};

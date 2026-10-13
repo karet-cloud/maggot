@@ -677,6 +677,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		method: "merge" | "squash";
 		message: string;
 		author: Identity;
+		/** The head commit the merger saw (and reviewers approved); the merge stops if the branch has moved on. */
+		expectedHead?: string;
 	}): Promise<{ commit: string; changedFiles: string[] }> {
 		const meta = this.meta();
 		this.assertWritable();
@@ -684,12 +686,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			const base = await this.baseAccess(meta);
 			const head = input.headRepo && input.headRepo !== meta.name ? await this.credentials(input.headRepo, input.headBranch, "read", INTERNAL_TOKEN_TTL) : null;
 			const headAccess = head ? { url: head.remote, token: head.token } : base;
-			// The default branch's workspace is kept between merges; other bases get a fresh one.
-			const ws = input.base === meta.defaultBranch ? (this.workspace ??= new Workspace(meta.defaultBranch, MERGE_IDENTITY)) : new Workspace(input.base, MERGE_IDENTITY);
+			// The default branch's workspace is kept between merges (and reset now and then, as the queue's is); other bases get a fresh one.
+			if (input.base === meta.defaultBranch && (!this.workspace || this.workspaceMerges >= WORKSPACE_MAX_MERGES)) {
+				this.workspace = new Workspace(meta.defaultBranch, MERGE_IDENTITY);
+				this.workspaceMerges = 0;
+			}
+			const ws = input.base === meta.defaultBranch ? (this.workspace as Workspace) : new Workspace(input.base, MERGE_IDENTITY);
+			if (ws === this.workspace) this.workspaceMerges++;
 			try {
 				for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
 					await ws.syncBase(base);
 					const theirs = await ws.fetchTask(headAccess, input.headBranch);
+					if (input.expectedHead && theirs !== input.expectedHead) {
+						throw new HttpError(409, "HEAD_MOVED", `${input.headBranch} has new commits since you looked; review them and merge again`);
+					}
 					const outcome = await ws.merge(theirs, input.message, input.author, input.method === "squash" ? "squash" : "merge-commit");
 					if (outcome.kind === "conflict") {
 						throw new HttpError(409, "MERGE_CONFLICT", `These files conflict with ${input.base}: ${outcome.files.join(", ") || "unknown"}. Merge ${input.base} into the branch and push again.`);
@@ -835,7 +845,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.assertWritable();
 		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
 		const rule = protectionFor(this.branchRules(), name);
-		if (rule.blockDeletions || rule.requireMergeQueue) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
+		if (rule.blockDeletions || rule.requireMergeQueue || rule.requireReview) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
 		const access = await this.baseAccess(meta);
 		const head = (await listBranches(access)).get(name);
 		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
@@ -860,7 +870,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			throw new HttpError(409, "BRANCH_MOVED", `${input.branch} has new commits since you started editing; reload to see them`);
 		}
 		const target = input.newBranch ?? input.branch;
-		if (protectionFor(this.branchRules(), target).requireMergeQueue) {
+		const rule = protectionFor(this.branchRules(), target);
+		if (rule.requireReview) {
+			throw new HttpError(403, "PROTECTED_BRANCH", `${target} is a protected branch: changes to it go through reviewed pull requests. Commit to a new branch instead.`);
+		}
+		if (rule.requireMergeQueue) {
 			throw new HttpError(403, "PROTECTED_BRANCH", `${target} is a protected branch: changes to it go through the merge queue. Commit to a new branch instead.`);
 		}
 		if (input.newBranch !== undefined) {
@@ -1260,6 +1274,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const row = this.row(id);
 		// "merging" here means a previous alarm died mid-merge; the merge is idempotent, so redo it.
 		if (row.status !== "queued" && row.status !== "merging") return;
+		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
+		if (protectionFor(this.branchRules(), meta.defaultBranch).requireReview) {
+			return this.fail(id, "REVIEW_REQUIRED", `${meta.defaultBranch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
+		}
 		this.setStatus(id, "merging");
 		this.emit("task.merging", id, {});
 

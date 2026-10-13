@@ -67,7 +67,7 @@ export async function describeOrg(database: D1Database, org: OrgRow, viewerId: s
 		database
 			.prepare(
 				`select u."username", m."role", m."state", m."createdAt" from "org_member" m join "user" u on u."id" = m."userId"
-				 where m."orgId" = ? ${role ? "" : `and m."state" = 'active'`} order by m."role" desc, u."username" limit ${MAX_MEMBERS}`,
+				 where m."orgId" = ? order by m."role" desc, u."username" limit ${MAX_MEMBERS}`,
 			)
 			.bind(org.id),
 		database.prepare(`select "id", "name", "createdAt" from "team" where "orgId" = ? order by "name"`).bind(org.id),
@@ -85,7 +85,8 @@ export async function describeOrg(database: D1Database, org: OrgRow, viewerId: s
 		createdAt: org.createdAt,
 		role,
 		invited: invited.results.length > 0,
-		members: members.results as unknown as OrgMember[],
+		// Membership is private, as on GitHub by default: only members see who else is in.
+		members: role ? (members.results as unknown as OrgMember[]) : [],
 		teams: role
 			? (teams.results as { id: string; name: string; createdAt: string }[]).map(
 					(t): Team => ({

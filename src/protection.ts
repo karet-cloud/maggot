@@ -1,5 +1,5 @@
 // Branch protection: rules that refuse deleting a branch, rewriting its history (force pushes), or
-// pushing to it at all (so changes only land through the merge queue). Pushes are checked from the
+// pushing to it at all (so changes only land through the merge queue, or through reviewed pull requests). Pushes are checked from the
 // commands at the start of a receive-pack request; force pushes, which need the new commits to tell,
 // are checked once they're stored, and put back if they rewrote history.
 import type { BranchRule } from "./api.ts";
@@ -52,7 +52,8 @@ export function checkPush(rules: BranchRule[], commands: RefCommand[]): { refuse
 		const branch = c.ref.slice("refs/heads/".length);
 		const p = protectionFor(rules, branch);
 		if (p.patterns.length === 0) continue;
-		if (p.requireMergeQueue) refused.set(c.ref, `protected branch: changes to ${branch} go through pull requests or the merge queue`);
+		if (p.requireReview) refused.set(c.ref, `protected branch: changes to ${branch} go through reviewed pull requests`);
+		else if (p.requireMergeQueue) refused.set(c.ref, `protected branch: changes to ${branch} go through pull requests or the merge queue`);
 		else if (c.new === ZERO && p.blockDeletions) refused.set(c.ref, `protected branch: ${branch} can't be deleted`);
 		else if (c.new !== ZERO && c.old !== ZERO && p.blockForcePushes) fastForwardOnly.push(c);
 	}

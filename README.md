@@ -161,17 +161,20 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   and requesting changes is for people who can merge, not the author). Merging (write access) makes a
   merge commit or squashes, through the same single merge slot as the agent merge queue, so they never
   race; conflicts are refused with the files named. A branch rule can require an approving review from
-  someone with write access and no changes requested. "Fixes #n" in the description or the commits
-  closes those issues.
+  someone with write access, of the commit being merged, and no changes requested; such a branch then
+  takes changes only through pull requests (no pushes, web commits or merge queue). A pull request
+  from a private fork shows its changes only to people who can read the fork. "Fixes #n" in the
+  description or the commits closes those issues.
 - **Organizations, teams and collaborators**: an organization is an account repositories belong to
-  (`/orgs/new`; its page lists People and Teams). People join by invitation, accepted on `/transfers`.
-  Owners administer every repository; members read them all; teams give members read, write or admin
-  access to particular repositories. Any repository can also invite collaborators with read, write or
-  admin access. Access is one number per viewer and repository, computed in SQL (`accessLevel` in
+  (`/orgs/new`; its page lists People and Teams, to members only). People join by invitation, accepted
+  on `/transfers`. Owners administer every repository; members read them all, and administer the ones
+  they create; teams give members read, write or admin access to particular repositories. Any
+  repository can also invite collaborators with read, write or admin access. Access is one number per viewer and repository, computed in SQL (`accessLevel` in
   [`src/db.ts`](src/db.ts)) and used everywhere: the web, the API, git over HTTPS and SSH, lists and
-  review decisions. Write means pushing and merging; admin means settings, webhooks, collaborators,
-  transfers, archiving and deletion. Repositories can be created in, or transferred to, an
-  organization (its owners accept), and its notifications go to its owners.
+  review decisions. Write means pushing and merging; admin means settings, webhooks, collaborators
+  and archiving; transferring and deleting stay with the owner (an organization's owners). Live views
+  reconnect, and are checked again, whenever access changes. Repositories can be created in, or
+  transferred to, an organization (its owners accept), and its notifications go to its owners.
 - **Blame and file history**: Blame on any file shows each run of lines with the commit that last
   changed it, shaded by age; History lists the commits that changed the file, paging further back.
   Both walk the first-parent log once, diffing versions with Myers, and are cached per commit.
