@@ -27,17 +27,20 @@ const READ_CONCURRENCY = 8;
 
 /**
  * Lists every file under a root tree; submodules are skipped, as `git archive` does. Walks breadth
- * first with one concurrency limit for the whole walk, reading each distinct tree once, and gives up
- * past MAX_FILES files or MAX_DIRS directories.
+ * first with one concurrency limit for the whole walk, reading each distinct tree once. Past MAX_FILES
+ * files or MAX_DIRS directories it gives up, or with `truncate` returns what it found (shallowest first).
  */
-export async function listFiles(repo: ObjectReader, tree: string): Promise<ArchiveEntry[]> {
+export async function listFiles(repo: ObjectReader, tree: string, opts: { truncate?: boolean } = {}): Promise<{ files: ArchiveEntry[]; truncated: boolean }> {
 	const out: ArchiveEntry[] = [];
 	const trees = new TreeCache(repo, MAX_TREE_READS);
 	let level = [{ hash: tree, prefix: "" }];
 	let dirs = 0;
 	while (level.length > 0) {
 		dirs += level.length;
-		if (dirs > MAX_DIRS) throw new HttpError(413, "TOO_LARGE", `More than ${MAX_DIRS} directories; clone the repository instead`);
+		if (dirs > MAX_DIRS) {
+			if (opts.truncate) return { files: out, truncated: true };
+			throw new HttpError(413, "TOO_LARGE", `More than ${MAX_DIRS} directories; clone the repository instead`);
+		}
 		const next: typeof level = [];
 		const listings = await mapLimit(level, READ_CONCURRENCY, (d) => trees.read(d.hash).then((entries) => ({ ...d, entries })));
 		for (const { prefix, entries } of listings) {
@@ -45,11 +48,14 @@ export async function listFiles(repo: ObjectReader, tree: string): Promise<Archi
 				if (e.type === "tree") next.push({ hash: e.hash, prefix: `${prefix}${e.name}/` });
 				else if (e.type !== "gitlink") out.push({ path: prefix + e.name, hash: e.hash, type: e.type });
 			}
-			if (out.length > MAX_FILES) throw new HttpError(413, "TOO_LARGE", `More than ${MAX_FILES} files; clone the repository instead`);
+			if (out.length > MAX_FILES) {
+				if (opts.truncate) return { files: out.slice(0, MAX_FILES), truncated: true };
+				throw new HttpError(413, "TOO_LARGE", `More than ${MAX_FILES} files; clone the repository instead`);
+			}
 		}
 		level = next;
 	}
-	return out;
+	return { files: out, truncated: false };
 }
 
 export function archiveStream(

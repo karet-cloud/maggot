@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { BookLock, BookMarked, GitFork, Star } from "lucide-react";
+import { Archive, BookLock, BookMarked, GitFork, Star } from "lucide-react";
 import type { RepoInfo } from "../lib/api.ts";
 import { cx, Empty, TimeAgo } from "./ui.tsx";
 
@@ -12,6 +12,16 @@ export function VisibilityBadge({ visibility }: { visibility: RepoInfo["visibili
 			)}
 		>
 			{visibility === "private" ? "Private" : "Public"}
+		</span>
+	);
+}
+
+/** Archived repositories are read-only. */
+export function ArchivedBadge() {
+	return (
+		<span className="flex items-center gap-1 rounded-full bg-amber-400/10 px-2 py-0.5 text-[11px] font-medium text-amber-300 ring-1 ring-inset ring-amber-400/30">
+			<Archive className="size-3" />
+			Archived
 		</span>
 	);
 }
@@ -42,6 +52,7 @@ export function RepoList({ repos, showOwner, empty }: { repos: RepoInfo[]; showO
 								{showOwner ? r.fullName : r.name}
 							</Link>
 							<VisibilityBadge visibility={r.visibility} />
+							{r.archivedAt && <ArchivedBadge />}
 						</div>
 						{r.forkOf && <ForkedFrom source={r.forkOf} className="mt-0.5" />}
 						{r.description && <p className="mt-1 text-xs text-dim">{r.description}</p>}

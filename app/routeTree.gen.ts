@@ -18,10 +18,12 @@ import { Route as ParityRouteImport } from './routes/parity'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as SearchRouteImport } from './routes/search'
 import { Route as SignupRouteImport } from './routes/signup'
+import { Route as TransfersRouteImport } from './routes/transfers'
 import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as OwnerIndexRouteImport } from './routes/$owner.index'
 import { Route as OwnerRepoRouteImport } from './routes/$owner.$repo'
 import { Route as SettingsPasswordRouteImport } from './routes/settings.password'
+import { Route as SettingsSshRouteImport } from './routes/settings.ssh'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner.$repo.index'
 import { Route as OwnerRepoAgentsRouteImport } from './routes/$owner.$repo.agents'
@@ -80,6 +82,11 @@ const SignupRoute = SignupRouteImport.update({
   path: '/signup',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TransfersRoute = TransfersRouteImport.update({
+  id: '/transfers',
+  path: '/transfers',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const VerifyEmailRoute = VerifyEmailRouteImport.update({
   id: '/verify-email',
   path: '/verify-email',
@@ -98,6 +105,11 @@ const OwnerRepoRoute = OwnerRepoRouteImport.update({
 const SettingsPasswordRoute = SettingsPasswordRouteImport.update({
   id: '/settings/password',
   path: '/settings/password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsSshRoute = SettingsSshRouteImport.update({
+  id: '/settings/ssh',
+  path: '/settings/ssh',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsTokensRoute = SettingsTokensRouteImport.update({
@@ -171,9 +183,11 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
+  '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
   '/settings/password': typeof SettingsPasswordRoute
+  '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
@@ -198,8 +212,10 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
+  '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
   '/settings/password': typeof SettingsPasswordRoute
+  '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner': typeof OwnerIndexRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
@@ -225,9 +241,11 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/search': typeof SearchRoute
   '/signup': typeof SignupRoute
+  '/transfers': typeof TransfersRoute
   '/verify-email': typeof VerifyEmailRoute
   '/$owner/$repo': typeof OwnerRepoRouteWithChildren
   '/settings/password': typeof SettingsPasswordRoute
+  '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
@@ -254,9 +272,11 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/search'
     | '/signup'
+    | '/transfers'
     | '/verify-email'
     | '/$owner/$repo'
     | '/settings/password'
+    | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
     | '/$owner/$repo/agents'
@@ -281,8 +301,10 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/search'
     | '/signup'
+    | '/transfers'
     | '/verify-email'
     | '/settings/password'
+    | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner'
     | '/$owner/$repo/agents'
@@ -307,9 +329,11 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/search'
     | '/signup'
+    | '/transfers'
     | '/verify-email'
     | '/$owner/$repo'
     | '/settings/password'
+    | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
     | '/$owner/$repo/agents'
@@ -335,9 +359,11 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   SearchRoute: typeof SearchRoute
   SignupRoute: typeof SignupRoute
+  TransfersRoute: typeof TransfersRoute
   VerifyEmailRoute: typeof VerifyEmailRoute
   OwnerRepoRoute: typeof OwnerRepoRouteWithChildren
   SettingsPasswordRoute: typeof SettingsPasswordRoute
+  SettingsSshRoute: typeof SettingsSshRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
 }
@@ -407,6 +433,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SignupRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/transfers': {
+      id: '/transfers'
+      path: '/transfers'
+      fullPath: '/transfers'
+      preLoaderRoute: typeof TransfersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/verify-email': {
       id: '/verify-email'
       path: '/verify-email'
@@ -433,6 +466,13 @@ declare module '@tanstack/react-router' {
       path: '/settings/password'
       fullPath: '/settings/password'
       preLoaderRoute: typeof SettingsPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/ssh': {
+      id: '/settings/ssh'
+      path: '/settings/ssh'
+      fullPath: '/settings/ssh'
+      preLoaderRoute: typeof SettingsSshRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/tokens': {
@@ -564,9 +604,11 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   SearchRoute: SearchRoute,
   SignupRoute: SignupRoute,
+  TransfersRoute: TransfersRoute,
   VerifyEmailRoute: VerifyEmailRoute,
   OwnerRepoRoute: OwnerRepoRouteWithChildren,
   SettingsPasswordRoute: SettingsPasswordRoute,
+  SettingsSshRoute: SettingsSshRoute,
   SettingsTokensRoute: SettingsTokensRoute,
   OwnerIndexRoute: OwnerIndexRoute,
 }

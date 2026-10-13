@@ -1,6 +1,6 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
 // The schema is created idempotently on first use in each isolate, so deploys need no migration step.
-import type { Notification, NotificationKind, RepoInfo, Visibility } from "./api.ts";
+import type { Notification, NotificationKind, RepoInfo, RepoTransfer, SshKey, Visibility } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
 // Generated from Better Auth 1.7 (email/password + username plugin) with getMigrations().compileMigrations().
@@ -26,6 +26,14 @@ const APP_SCHEMA = [
 	`create index if not exists "star_repoId_idx" on "star" ("repoId")`,
 	`create table if not exists "notification" ("id" text not null primary key, "userId" text not null references "user" ("id") on delete cascade, "kind" text not null, "repoId" text references "repo" ("id") on delete cascade, "title" text not null, "url" text not null, "actor" text, "createdAt" text not null, "readAt" text)`,
 	`create index if not exists "notification_user_idx" on "notification" ("userId", "createdAt")`,
+	// Old owner/name pairs of renamed and transferred repositories, so links and remotes keep working.
+	`create table if not exists "repo_redirect" ("owner" text not null, "name" text not null collate nocase, "repoId" text not null references "repo" ("id") on delete cascade, "createdAt" text not null, primary key ("owner", "name"))`,
+	`create index if not exists "repo_redirect_repoId_idx" on "repo_redirect" ("repoId")`,
+	// A repository its owner offered to another user; one at a time, until accepted, declined or expired.
+	`create table if not exists "repo_transfer" ("repoId" text not null primary key references "repo" ("id") on delete cascade, "fromUserId" text not null references "user" ("id") on delete cascade, "toUserId" text not null references "user" ("id") on delete cascade, "createdAt" text not null)`,
+	`create index if not exists "repo_transfer_to_idx" on "repo_transfer" ("toUserId")`,
+	`create table if not exists "ssh_key" ("id" text not null primary key, "userId" text not null references "user" ("id") on delete cascade, "name" text not null, "type" text not null, "fingerprint" text not null unique, "publicKey" text not null, "createdAt" text not null, "lastUsedAt" text)`,
+	`create index if not exists "ssh_key_userId_idx" on "ssh_key" ("userId")`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -33,6 +41,8 @@ const COLUMNS = [
 	// Bytes pushed to the repository, which quotas are checked against.
 	`alter table "repo" add column "bytes" integer not null default 0`,
 	`alter table "repo" add column "forkOf" text references "repo" ("id") on delete set null`,
+	// Archived repositories are read-only.
+	`alter table "repo" add column "archivedAt" text`,
 ];
 
 /** Indexes on added columns, created once the columns exist. */
@@ -82,6 +92,8 @@ export interface RepoRow {
 	bytes: number;
 	/** The repository this one was forked from; null if it wasn't, or the source was deleted. */
 	forkOf: string | null;
+	/** When it was archived (made read-only), or null. */
+	archivedAt: string | null;
 }
 
 /** A repository with what lists and its page show: star and fork counts, and the fork's source. */
@@ -106,8 +118,132 @@ export function assertRepoName(name: string): string {
 	return name;
 }
 
+/**
+ * A repository by owner and name, following the redirect a rename or transfer left behind when no
+ * repository has that name now.
+ */
 export async function findRepo(database: D1Database, owner: string, name: string): Promise<RepoRow | null> {
-	return database.prepare(`select * from "repo" where "owner" = ? and "name" = ?`).bind(owner.toLowerCase(), name).first<RepoRow>();
+	const row = await database
+		.prepare(
+			`select * from (
+				select r.*, 0 as "redirected" from "repo" r where r."owner" = ?1 and r."name" = ?2
+				union all
+				select r.*, 1 as "redirected" from "repo_redirect" d join "repo" r on r."id" = d."repoId" where d."owner" = ?1 and d."name" = ?2
+			) order by "redirected" limit 1`,
+		)
+		.bind(owner.toLowerCase(), name)
+		.first<RepoRow & { redirected?: number }>();
+	if (row) delete row.redirected;
+	return row;
+}
+
+/** Renames a repository, keeping the old name as a redirect. */
+export async function renameRepo(database: D1Database, row: RepoRow, name: string): Promise<void> {
+	const now = new Date().toISOString();
+	const statements = [
+		database.prepare(`update "repo" set "name" = ? where "id" = ?`).bind(name, row.id),
+		// The new name is a real repository now, so an old redirect under it would never be reached.
+		database.prepare(`delete from "repo_redirect" where "owner" = ? and "name" = ?`).bind(row.owner, name),
+	];
+	// A change of case only is the same name.
+	if (name.toLowerCase() !== row.name.toLowerCase()) {
+		statements.push(database.prepare(`insert or replace into "repo_redirect" ("owner", "name", "repoId", "createdAt") values (?, ?, ?, ?)`).bind(row.owner, row.name, row.id, now));
+	}
+	try {
+		await database.batch(statements);
+	} catch (err) {
+		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", `${row.owner}/${name} already exists`);
+		throw err;
+	}
+}
+
+export async function setArchived(database: D1Database, id: string, archived: boolean): Promise<void> {
+	await database.prepare(`update "repo" set "archivedAt" = ? where "id" = ?`).bind(archived ? new Date().toISOString() : null, id).run();
+}
+
+// ── Transfers ────────────────────────────────────────────────────────────────
+
+/** How long the recipient has to accept a transfer. */
+export const TRANSFER_DAYS = 7;
+
+const TRANSFER = `select t."repoId" as "id", r."owner" || '/' || r."name" as "repo", f."username" as "from", u."username" as "to",
+	r."description", r."visibility", t."createdAt", t."fromUserId", t."toUserId"
+	from "repo_transfer" t join "repo" r on r."id" = t."repoId" join "user" f on f."id" = t."fromUserId" join "user" u on u."id" = t."toUserId"`;
+
+type TransferRow = Omit<RepoTransfer, "expiresAt"> & { fromUserId: string; toUserId: string };
+
+function toTransfer({ fromUserId: _from, toUserId: _to, ...row }: TransferRow): RepoTransfer {
+	return { ...row, expiresAt: new Date(Date.parse(row.createdAt) + TRANSFER_DAYS * 86400_000).toISOString() };
+}
+
+const transferLive = () => new Date(Date.now() - TRANSFER_DAYS * 86400_000).toISOString();
+
+/** Offers a repository to another user, replacing any earlier offer for it. */
+export async function offerTransfer(database: D1Database, repoId: string, fromUserId: string, toUserId: string): Promise<void> {
+	await database
+		.prepare(`insert or replace into "repo_transfer" ("repoId", "fromUserId", "toUserId", "createdAt") values (?, ?, ?, ?)`)
+		.bind(repoId, fromUserId, toUserId, new Date().toISOString())
+		.run();
+}
+
+/** The live offer for a repository, if there is one. */
+export async function getTransfer(database: D1Database, repoId: string): Promise<(RepoTransfer & { fromUserId: string; toUserId: string }) | null> {
+	const row = await database.prepare(`${TRANSFER} where t."repoId" = ? and t."createdAt" > ?`).bind(repoId, transferLive()).first<TransferRow>();
+	return row ? { ...toTransfer(row), fromUserId: row.fromUserId, toUserId: row.toUserId } : null;
+}
+
+/** Live offers made to a user. */
+export async function incomingTransfers(database: D1Database, userId: string): Promise<RepoTransfer[]> {
+	const { results } = await database
+		.prepare(`${TRANSFER} where t."toUserId" = ? and t."createdAt" > ? order by t."createdAt" desc`)
+		.bind(userId, transferLive())
+		.all<TransferRow>();
+	return results.map(toTransfer);
+}
+
+export async function cancelTransfer(database: D1Database, repoId: string): Promise<boolean> {
+	const result = await database.prepare(`delete from "repo_transfer" where "repoId" = ?`).bind(repoId).run();
+	return result.meta.changes > 0;
+}
+
+/**
+ * Hands a repository to the user a transfer was offered to, if they have room for it (the same
+ * count and size quotas as creating one) and it still belongs to whoever offered it. The old
+ * owner/name becomes a redirect, and the old owner's notifications about it go.
+ */
+export async function completeTransfer(
+	database: D1Database,
+	transfer: { id: string; fromUserId: string },
+	to: { id: string; username: string },
+	name: string,
+	limits: { maxRepos: number; maxBytes: number },
+): Promise<void> {
+	const before = await database.prepare(`select * from "repo" where "id" = ?`).bind(transfer.id).first<RepoRow>();
+	if (!before || before.ownerId !== transfer.fromUserId) throw new HttpError(409, "TRANSFER_STALE", "That repository has changed hands since the offer was made");
+	let changed: number;
+	try {
+		const result = await database
+			.prepare(
+				`update "repo" set "ownerId" = ?1, "owner" = ?2, "name" = ?3
+				 where "id" = ?4 and "ownerId" = ?5
+				 and (select count(*) from "repo" where "ownerId" = ?1) < ?6
+				 and (select coalesce(sum("bytes"), 0) from "repo" where "ownerId" = ?1) + "bytes" <= ?7`,
+			)
+			.bind(to.id, to.username, name, transfer.id, transfer.fromUserId, limits.maxRepos, limits.maxBytes)
+			.run();
+		changed = result.meta.changes;
+	} catch (err) {
+		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", `You already have a repository called ${name}; pick another name`);
+		throw err;
+	}
+	if (changed === 0) throw new HttpError(403, "QUOTA_EXCEEDED", "You don't have room for this repository: you're at your repository count or storage quota.");
+	const now = new Date().toISOString();
+	await database.batch([
+		database.prepare(`delete from "repo_redirect" where "owner" = ? and "name" = ?`).bind(to.username, name),
+		database.prepare(`insert or replace into "repo_redirect" ("owner", "name", "repoId", "createdAt") values (?, ?, ?, ?)`).bind(before.owner, before.name, before.id, now),
+		database.prepare(`delete from "repo_transfer" where "repoId" = ?`).bind(before.id),
+		database.prepare(`delete from "notification" where "repoId" = ? and "userId" = ?`).bind(before.id, before.ownerId),
+	]);
 }
 
 /**
@@ -242,6 +378,8 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		starred: Boolean(row.starred),
 		forkOf: parentVisible ? { owner: row.parentOwner as string, name: row.parentName as string } : null,
 		sizeBytes: row.bytes,
+		sshUrl: `git@${new URL(origin).hostname}:${row.owner}/${row.name}.git`,
+		archivedAt: row.archivedAt ?? null,
 	};
 }
 
@@ -368,4 +506,64 @@ export async function userForToken(database: D1Database, token: string): Promise
 		await database.prepare(`update "token" set "lastUsedAt" = ? where "id" = ?`).bind(new Date().toISOString(), row.tokenId).run();
 	}
 	return { id: row.id, username: row.username, verified: Boolean(row.emailVerified) };
+}
+
+// ── SSH keys ─────────────────────────────────────────────────────────────────
+
+export const MAX_SSH_KEYS = 50;
+
+export async function listSshKeys(database: D1Database, userId: string): Promise<SshKey[]> {
+	const { results } = await database
+		.prepare(`select "id", "name", "type", "fingerprint", "createdAt", "lastUsedAt" from "ssh_key" where "userId" = ? order by "createdAt" desc`)
+		.bind(userId)
+		.all<SshKey>();
+	return results;
+}
+
+/** Adds a key; one key belongs to one account, since it's how SSH tells who is connecting. */
+export async function addSshKey(database: D1Database, userId: string, key: { name: string; type: string; fingerprint: string; publicKey: string }): Promise<SshKey> {
+	const info: SshKey = { id: crypto.randomUUID(), name: key.name, type: key.type, fingerprint: key.fingerprint, createdAt: new Date().toISOString(), lastUsedAt: null };
+	let inserted: boolean;
+	try {
+		const result = await database
+			.prepare(
+				`insert into "ssh_key" ("id", "userId", "name", "type", "fingerprint", "publicKey", "createdAt")
+				 select ?, ?, ?, ?, ?, ?, ? where (select count(*) from "ssh_key" where "userId" = ?) < ?`,
+			)
+			.bind(info.id, userId, info.name, info.type, info.fingerprint, key.publicKey, info.createdAt, userId, MAX_SSH_KEYS)
+			.run();
+		inserted = result.meta.changes > 0;
+	} catch (err) {
+		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", "That key is already in use on megit");
+		throw err;
+	}
+	if (!inserted) throw new HttpError(403, "QUOTA_EXCEEDED", `An account can have at most ${MAX_SSH_KEYS} SSH keys`);
+	return info;
+}
+
+export async function deleteSshKey(database: D1Database, userId: string, id: string): Promise<boolean> {
+	const result = await database.prepare(`delete from "ssh_key" where "id" = ? and "userId" = ?`).bind(id, userId).run();
+	return result.meta.changes > 0;
+}
+
+/** The account a public key (by fingerprint) belongs to, with the key as stored. */
+export async function userForSshKey(
+	database: D1Database,
+	fingerprint: string,
+): Promise<{ keyId: string; publicKey: string; lastUsedAt: string | null; id: string; username: string; verified: boolean } | null> {
+	const row = await database
+		.prepare(
+			`select k."id" as "keyId", k."publicKey", k."lastUsedAt", u."id", u."username", u."emailVerified"
+			 from "ssh_key" k join "user" u on u."id" = k."userId" where k."fingerprint" = ?`,
+		)
+		.bind(fingerprint)
+		.first<{ keyId: string; publicKey: string; lastUsedAt: string | null; id: string; username: string | null; emailVerified: number }>();
+	if (!row?.username) return null;
+	return { keyId: row.keyId, publicKey: row.publicKey, lastUsedAt: row.lastUsedAt, id: row.id, username: row.username, verified: Boolean(row.emailVerified) };
+}
+
+/** Records that a key was used (at most once a minute). */
+export async function touchSshKey(database: D1Database, keyId: string, lastUsedAt: string | null): Promise<void> {
+	if (lastUsedAt && Date.parse(lastUsedAt) > Date.now() - 60_000) return;
+	await database.prepare(`update "ssh_key" set "lastUsedAt" = ? where "id" = ?`).bind(new Date().toISOString(), keyId).run();
 }

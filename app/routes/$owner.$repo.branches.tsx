@@ -12,6 +12,9 @@ function BranchesPage() {
 	const project = `${owner}/${repo}`;
 	const queryClient = useQueryClient();
 	const branches = useQuery({ queryKey: keys.branches(project), queryFn: () => api.branches(project) });
+	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	// Only the owner deletes branches, and not while the repository is archived.
+	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
 	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
 	const remove = useMutation({ mutationFn: (name: string) => api.deleteBranch(project, name), onSuccess: refresh });
 	const abandon = useMutation({
@@ -54,7 +57,7 @@ function BranchesPage() {
 									refName={b.name}
 									scale={scale}
 									actions={
-										<Button
+										writable && <Button
 											variant="ghost"
 											className="px-2 text-xs hover:text-red-300"
 											busy={remove.isPending && remove.variables === b.name}

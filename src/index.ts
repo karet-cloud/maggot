@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, Project, RepoInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, FileList, Project, RepoInfo, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
 import {
@@ -15,6 +15,17 @@ import {
 	listRepos,
 	listTokens,
 	addRepoBytes,
+	addSshKey,
+	cancelTransfer,
+	completeTransfer,
+	deleteSshKey,
+	getTransfer,
+	incomingTransfers,
+	listSshKeys,
+	offerTransfer,
+	renameRepo,
+	setArchived,
+	TRANSFER_DAYS,
 	listNotifications,
 	notifiedRecently,
 	markRead,
@@ -36,6 +47,7 @@ import { MAX_QUERY_LENGTH } from "./search.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
 import { repoStore } from "./store.ts";
+import { hostKey, parsePublicKey, SSH_PATH } from "./ssh/keys.ts";
 
 export { Limiter } from "./policy.ts";
 export { ProjectCoordinator, Registry } from "./project.ts";
@@ -273,6 +285,83 @@ app.post("/api/notifications/read", async (c) => {
 	return c.json({ ok: true });
 });
 
+// ── Transfers offered to the signed-in user ──────────────────────────────────
+
+app.get("/api/transfers", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	return c.json({ transfers: await incomingTransfers(db(c.env), user.id) });
+});
+
+/** Takes a repository offered to you, under its own name or `name` if you already have one called that. */
+app.post("/api/transfers/:id/accept", async (c) => {
+	const user = requireUser(c);
+	requireVerified(c.env, user);
+	const input = (await c.req.json().catch(() => ({}))) as { name?: string };
+	const transfer = await getTransfer(db(c.env), c.req.param("id"));
+	if (!transfer || transfer.toUserId !== user.id) throw new HttpError(404, "NOT_FOUND", `No transfer offer for you with that id (they expire after ${TRANSFER_DAYS} days)`);
+	const before = (await db(c.env).prepare(`select * from "repo" where "id" = ?`).bind(transfer.id).first<RepoRow>()) as RepoRow;
+	const name = assertRepoName((typeof input.name === "string" && input.name.trim()) || before.name);
+	const p = policy(c.env);
+	await completeTransfer(db(c.env), transfer, { id: user.id, username: user.username }, name, { maxRepos: p.reposPerUser, maxBytes: p.userBytes });
+	const after: RepoRow = { ...before, ownerId: user.id, owner: user.username, name };
+	const coordinator = projects(c.env).getByName(after.id);
+	await coordinator.setRepository(repositoryRef(c, after));
+	// Live views were authorized for the old owner.
+	await coordinator.disconnectAll("Ownership changed");
+	c.executionCtx.waitUntil(
+		notifyUser(db(c.env), {
+			userId: transfer.fromUserId,
+			kind: "transfer",
+			repoId: null,
+			title: `${user.username} accepted ${before.owner}/${before.name}; it's now ${after.owner}/${after.name}`,
+			url: `/${after.owner}/${after.name}`,
+			actor: user.username,
+		}),
+	);
+	const listing = await getListing(db(c.env), after.id, user.id);
+	return c.json({ repo: toRepoInfo(listing ?? after, origin(c), true, user.id) });
+});
+
+app.post("/api/transfers/:id/decline", async (c) => {
+	const user = requireUser(c);
+	const transfer = await getTransfer(db(c.env), c.req.param("id"));
+	if (!transfer || transfer.toUserId !== user.id) throw new HttpError(404, "NOT_FOUND", "No transfer offer for you with that id");
+	await cancelTransfer(db(c.env), transfer.id);
+	return c.json({ deleted: true });
+});
+
+// ── SSH keys ─────────────────────────────────────────────────────────────────
+
+/** The server's host key and where the SSH WebSocket is, for the setup instructions. */
+app.get("/api/ssh", async (c) => {
+	const key = await hostKey(c.env);
+	const url = new URL(SSH_PATH, c.req.url);
+	url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+	return c.json({ hostKey: key.line, fingerprint: key.fingerprint, url: url.toString(), host: url.hostname } satisfies SshInfo);
+});
+
+app.get("/api/ssh/keys", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	return c.json({ keys: await listSshKeys(db(c.env), user.id) });
+});
+
+app.post("/api/ssh/keys", async (c) => {
+	const user = requireUser(c);
+	const input = await body<{ name?: string; key?: string }>(c);
+	const parsed = await parsePublicKey(typeof input.key === "string" ? input.key : "");
+	const name = (typeof input.name === "string" && input.name.trim().slice(0, 80)) || parsed.comment.slice(0, 80) || parsed.type;
+	await ensureSchema(db(c.env));
+	const key = await addSshKey(db(c.env), user.id, { name, type: parsed.type, fingerprint: parsed.fingerprint, publicKey: parsed.blob });
+	return c.json({ key }, 201);
+});
+
+app.delete("/api/ssh/keys/:id", async (c) => {
+	if (!(await deleteSshKey(db(c.env), requireUser(c).id, c.req.param("id")))) throw new HttpError(404, "NOT_FOUND", "No such key");
+	return c.json({ deleted: true });
+});
+
 // ── Repositories ─────────────────────────────────────────────────────────────
 
 const viewerId = (p: Principal) => (p.kind === "user" ? p.id : null);
@@ -335,6 +424,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		// A fork starts out as big as its source, so forking can't get around the storage quota.
 		bytes: source?.bytes ?? 0,
 		forkOf: source?.id ?? null,
+		archivedAt: null,
 	};
 	await ensureSchema(db(c.env));
 	await assertCanCreateRepo(c.env, db(c.env), user.id);
@@ -448,6 +538,8 @@ const repo = new Hono<App>();
 
 /** Things anyone who can read a repository may do to it: star or unstar it, and fork it. Exact routes only. */
 const READER_ACTIONS: Record<string, string[]> = { "/star": ["PUT", "DELETE"], "/forks": ["POST"] };
+/** Changes the owner can still make to an archived repository: its settings (unarchiving included), deleting it, and handing it on. */
+const ARCHIVED_ACTIONS: Record<string, string[]> = { "/": ["PATCH", "DELETE"], "/transfer": ["POST", "DELETE"] };
 
 /**
  * Resolves the repository and checks access: reads (and starring or forking) need read access,
@@ -468,6 +560,9 @@ repo.use("*", async (c, next) => {
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
 	const write = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS[routeRest(c, "")]?.includes(c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
+	if (write && row.archivedAt && !ARCHIVED_ACTIONS[routeRest(c, "")]?.includes(c.req.method)) {
+		throw new HttpError(403, "ARCHIVED", "This repository is archived, so it's read-only. Its owner can unarchive it in Settings.");
+	}
 	c.set("projectId", row.id);
 	c.set("repo", row);
 	return next();
@@ -486,13 +581,32 @@ repo.get("/", async (c) => {
 repo.patch("/", async (c) => {
 	const row = c.var.repo;
 	if (!row) throw new HttpError(400, "INVALID_INPUT", "Only user repositories have settings");
-	const input = await body<{ visibility?: Visibility; description?: string | null }>(c);
+	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean }>(c);
 	if (input.visibility !== undefined && input.visibility !== "public" && input.visibility !== "private") {
 		throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
+	}
+	if (input.archived !== undefined && typeof input.archived !== "boolean") throw new HttpError(400, "INVALID_INPUT", "archived is true or false");
+	if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "INVALID_INPUT", "name is a string");
+	// While archived, only unarchiving (and deleting or transferring, elsewhere) is allowed.
+	if (row.archivedAt && input.archived !== false && (input.visibility !== undefined || input.description !== undefined || input.name !== undefined)) {
+		throw new HttpError(403, "ARCHIVED", "Unarchive the repository before changing its settings");
+	}
+	if (input.name !== undefined) {
+		const name = assertRepoName(input.name.trim());
+		if (name !== row.name) {
+			await renameRepo(db(c.env), row, name);
+			row.name = name;
+		}
+	}
+	if (input.archived !== undefined && input.archived !== Boolean(row.archivedAt)) {
+		// The coordinator refuses first if agent tasks are still active, and from then on refuses writes.
+		await project(c).setArchived(input.archived);
+		await setArchived(db(c.env), row.id, input.archived);
 	}
 	await updateRepo(db(c.env), row.id, { visibility: input.visibility, description: input.description === undefined ? undefined : input.description?.trim() || null });
 	// Live sockets were authorized when they connected; after a visibility change they reconnect and are checked again.
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
+	if (input.name !== undefined) await project(c).setRepository(repositoryRef(c, row));
 	const updated = (await getListing(db(c.env), row.id, viewerId(c.var.principal))) as RepoListing;
 	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal)) });
 });
@@ -529,6 +643,43 @@ repo.post("/forks", async (c) => {
 	const source = userRepo(c);
 	const input = (await c.req.json().catch(() => ({}))) as { name?: string; description?: string };
 	return createRepo(c, { name: input.name?.trim() || source.name, description: input.description }, source);
+});
+
+// ── Transfers: the owner offers the repository to another user, who accepts it from /transfers ─
+
+repo.get("/transfer", async (c) => {
+	const row = userRepo(c);
+	if (!canWrite(c.var.principal, row)) throw new HttpError(404, "NOT_FOUND", "Not found");
+	return c.json({ transfer: await getTransfer(db(c.env), row.id) });
+});
+
+repo.post("/transfer", async (c) => {
+	const user = requireUser(c);
+	const row = userRepo(c);
+	const { to } = await body<{ to?: string }>(c);
+	const name = to?.trim().toLowerCase() ?? "";
+	const recipient = name ? await db(c.env).prepare(`select "id", "username" from "user" where "username" = ?`).bind(name).first<{ id: string; username: string }>() : null;
+	if (!recipient) throw new HttpError(404, "NOT_FOUND", `There's no user called ${to?.trim() || "that"}`);
+	if (recipient.id === row.ownerId) throw new HttpError(400, "INVALID_INPUT", "You already own this repository");
+	await offerTransfer(db(c.env), row.id, user.id, recipient.id);
+	// The offer names the repository even if it's private: the recipient has to know what they're accepting.
+	c.executionCtx.waitUntil(
+		notifyUser(db(c.env), {
+			userId: recipient.id,
+			kind: "transfer",
+			repoId: null,
+			title: `${user.username} wants to transfer ${row.owner}/${row.name} to you`,
+			url: "/transfers",
+			actor: user.username,
+		}),
+	);
+	return c.json({ transfer: await getTransfer(db(c.env), row.id) }, 201);
+});
+
+repo.delete("/transfer", async (c) => {
+	const row = userRepo(c);
+	if (!(await cancelTransfer(db(c.env), row.id))) throw new HttpError(404, "NOT_FOUND", "There's no transfer to cancel");
+	return c.json({ deleted: true });
 });
 
 repo.delete("/", async (c) => {
@@ -577,6 +728,25 @@ repo.get("/tree", async (c) => {
 	return c.json({ tree: await project(c).tree(c.req.query("ref"), c.req.query("path") ?? "") });
 });
 
+// Every file path at a ref, for the file finder ("Go to file"). Capped like archives, but truncated rather than refused.
+repo.get("/paths", async (c) => {
+	const ref = c.req.query("ref");
+	const at = await project(c)
+		.locate(ref)
+		.catch((err) => {
+			// An empty repository has nothing to list.
+			if (toHttpError(err).status === 404 && !ref) return null;
+			throw err;
+		});
+	if (!at) return c.json({ commit: null, paths: [], truncated: false } satisfies FileList);
+	using store = await repoStore(c.env).get(at.repo);
+	const { files, truncated } = await listFiles(store, at.treeHash, { truncate: true });
+	const paths = files.map((f) => f.path).sort();
+	return c.json({ commit: at.commit, paths, truncated } satisfies FileList, 200, {
+		"cache-control": ref === at.commit ? "private, max-age=31536000, immutable" : "private, no-cache",
+	});
+});
+
 repo.get("/files/*", async (c) => {
 	const path = routeRest(c, "/files/");
 	if (!path) throw new HttpError(400, "INVALID_INPUT", "File path is required");
@@ -614,7 +784,7 @@ repo.get("/archive", async (c) => {
 	const at = await project(c).locate(ref);
 	const repo = await repoStore(c.env).get(at.repo);
 	try {
-		const files = await listFiles(repo, at.treeHash);
+		const { files } = await listFiles(repo, at.treeHash);
 		const label = ref && !ref.startsWith("task:") && ref !== at.commit ? ref.replaceAll("/", "-") : at.commit.slice(0, 7);
 		const root = `${name}-${label}`;
 		const stream = archiveStream(repo, files, { format, root, mtime: at.committedAt, onDone: () => repo[Symbol.dispose]() });

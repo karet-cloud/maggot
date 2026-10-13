@@ -4,6 +4,7 @@ import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Fo
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
+import { GoToFile } from "../components/file-finder.tsx";
 import { BranchSelect } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
@@ -33,6 +34,8 @@ function Code() {
 	const tree = useQuery({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
 	const readme = !file ? tree.data?.entries.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name)) : undefined;
 	const shown = file ?? readme?.path;
+	// Archived repositories are read-only, even for their owner.
+	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
 
 	// Links from READMEs guess whether a path is a file or a directory; correct the guess either way.
 	const listedAsDir = file !== undefined && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
@@ -78,7 +81,8 @@ function Code() {
 								{tree.data.commit.slice(0, 7)}
 							</Link>
 						</span>
-						{info.data?.repo.canWrite && isBranch(ref) && (
+						<GoToFile project={project} refName={ref} />
+						{writable && isBranch(ref) && (
 							<Link
 								to="/$owner/$repo/edit"
 								params={repoParams(project)}
@@ -131,7 +135,7 @@ function Code() {
 						refName={ref}
 						path={shown}
 						commit={tree.data?.commit ?? null}
-						editable={Boolean(info.data?.repo.canWrite && isBranch(ref))}
+						editable={writable && isBranch(ref)}
 						branch={ref ?? info.data?.defaultBranch}
 					/>
 				) : (
