@@ -10,96 +10,261 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as PProjectRouteImport } from './routes/p.$project'
-import { Route as PProjectIndexRouteImport } from './routes/p.$project.index'
-import { Route as PProjectCodeRouteImport } from './routes/p.$project.code'
-import { Route as PProjectHistoryRouteImport } from './routes/p.$project.history'
-import { Route as PProjectTTaskRouteImport } from './routes/p.$project.t.$task'
+import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
+import { Route as LoginRouteImport } from './routes/login'
+import { Route as NewRouteImport } from './routes/new'
+import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as SignupRouteImport } from './routes/signup'
+import { Route as VerifyEmailRouteImport } from './routes/verify-email'
+import { Route as OwnerIndexRouteImport } from './routes/$owner.index'
+import { Route as OwnerRepoRouteImport } from './routes/$owner.$repo'
+import { Route as SettingsPasswordRouteImport } from './routes/settings.password'
+import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
+import { Route as OwnerRepoIndexRouteImport } from './routes/$owner.$repo.index'
+import { Route as OwnerRepoAgentsRouteImport } from './routes/$owner.$repo.agents'
+import { Route as OwnerRepoBranchesRouteImport } from './routes/$owner.$repo.branches'
+import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.compare'
+import { Route as OwnerRepoHistoryRouteImport } from './routes/$owner.$repo.history'
+import { Route as OwnerRepoSettingsRouteImport } from './routes/$owner.$repo.settings'
+import { Route as OwnerRepoCommitHashRouteImport } from './routes/$owner.$repo.commit.$hash'
+import { Route as OwnerRepoTTaskRouteImport } from './routes/$owner.$repo.t.$task'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PProjectRoute = PProjectRouteImport.update({
-  id: '/p/$project',
-  path: '/p/$project',
+const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
+  id: '/forgot-password',
+  path: '/forgot-password',
   getParentRoute: () => rootRouteImport,
 } as any)
-const PProjectIndexRoute = PProjectIndexRouteImport.update({
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const NewRoute = NewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ResetPasswordRoute = ResetPasswordRouteImport.update({
+  id: '/reset-password',
+  path: '/reset-password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SignupRoute = SignupRouteImport.update({
+  id: '/signup',
+  path: '/signup',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const VerifyEmailRoute = VerifyEmailRouteImport.update({
+  id: '/verify-email',
+  path: '/verify-email',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerIndexRoute = OwnerIndexRouteImport.update({
+  id: '/$owner/',
+  path: '/$owner/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerRepoRoute = OwnerRepoRouteImport.update({
+  id: '/$owner/$repo',
+  path: '/$owner/$repo',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsPasswordRoute = SettingsPasswordRouteImport.update({
+  id: '/settings/password',
+  path: '/settings/password',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsTokensRoute = SettingsTokensRouteImport.update({
+  id: '/settings/tokens',
+  path: '/settings/tokens',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => PProjectRoute,
+  getParentRoute: () => OwnerRepoRoute,
 } as any)
-const PProjectCodeRoute = PProjectCodeRouteImport.update({
-  id: '/code',
-  path: '/code',
-  getParentRoute: () => PProjectRoute,
+const OwnerRepoAgentsRoute = OwnerRepoAgentsRouteImport.update({
+  id: '/agents',
+  path: '/agents',
+  getParentRoute: () => OwnerRepoRoute,
 } as any)
-const PProjectHistoryRoute = PProjectHistoryRouteImport.update({
+const OwnerRepoBranchesRoute = OwnerRepoBranchesRouteImport.update({
+  id: '/branches',
+  path: '/branches',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoCompareRoute = OwnerRepoCompareRouteImport.update({
+  id: '/compare',
+  path: '/compare',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoHistoryRoute = OwnerRepoHistoryRouteImport.update({
   id: '/history',
   path: '/history',
-  getParentRoute: () => PProjectRoute,
+  getParentRoute: () => OwnerRepoRoute,
 } as any)
-const PProjectTTaskRoute = PProjectTTaskRouteImport.update({
+const OwnerRepoSettingsRoute = OwnerRepoSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoCommitHashRoute = OwnerRepoCommitHashRouteImport.update({
+  id: '/commit/$hash',
+  path: '/commit/$hash',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoTTaskRoute = OwnerRepoTTaskRouteImport.update({
   id: '/t/$task',
   path: '/t/$task',
-  getParentRoute: () => PProjectRoute,
+  getParentRoute: () => OwnerRepoRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/p/$project': typeof PProjectRouteWithChildren
-  '/p/$project/code': typeof PProjectCodeRoute
-  '/p/$project/history': typeof PProjectHistoryRoute
-  '/p/$project/': typeof PProjectIndexRoute
-  '/p/$project/t/$task': typeof PProjectTTaskRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/login': typeof LoginRoute
+  '/new': typeof NewRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/signup': typeof SignupRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/$owner/$repo': typeof OwnerRepoRouteWithChildren
+  '/settings/password': typeof SettingsPasswordRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/$owner/': typeof OwnerIndexRoute
+  '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
+  '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
+  '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo/': typeof OwnerRepoIndexRoute
+  '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/p/$project/code': typeof PProjectCodeRoute
-  '/p/$project/history': typeof PProjectHistoryRoute
-  '/p/$project': typeof PProjectIndexRoute
-  '/p/$project/t/$task': typeof PProjectTTaskRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/login': typeof LoginRoute
+  '/new': typeof NewRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/signup': typeof SignupRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/settings/password': typeof SettingsPasswordRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/$owner': typeof OwnerIndexRoute
+  '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
+  '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
+  '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo': typeof OwnerRepoIndexRoute
+  '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/p/$project': typeof PProjectRouteWithChildren
-  '/p/$project/code': typeof PProjectCodeRoute
-  '/p/$project/history': typeof PProjectHistoryRoute
-  '/p/$project/': typeof PProjectIndexRoute
-  '/p/$project/t/$task': typeof PProjectTTaskRoute
+  '/forgot-password': typeof ForgotPasswordRoute
+  '/login': typeof LoginRoute
+  '/new': typeof NewRoute
+  '/reset-password': typeof ResetPasswordRoute
+  '/signup': typeof SignupRoute
+  '/verify-email': typeof VerifyEmailRoute
+  '/$owner/$repo': typeof OwnerRepoRouteWithChildren
+  '/settings/password': typeof SettingsPasswordRoute
+  '/settings/tokens': typeof SettingsTokensRoute
+  '/$owner/': typeof OwnerIndexRoute
+  '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
+  '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
+  '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
+  '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
+  '/$owner/$repo/': typeof OwnerRepoIndexRoute
+  '/$owner/$repo/commit/$hash': typeof OwnerRepoCommitHashRoute
+  '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/p/$project'
-    | '/p/$project/code'
-    | '/p/$project/history'
-    | '/p/$project/'
-    | '/p/$project/t/$task'
+    | '/forgot-password'
+    | '/login'
+    | '/new'
+    | '/reset-password'
+    | '/signup'
+    | '/verify-email'
+    | '/$owner/$repo'
+    | '/settings/password'
+    | '/settings/tokens'
+    | '/$owner/'
+    | '/$owner/$repo/agents'
+    | '/$owner/$repo/branches'
+    | '/$owner/$repo/compare'
+    | '/$owner/$repo/history'
+    | '/$owner/$repo/settings'
+    | '/$owner/$repo/'
+    | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/t/$task'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
-    | '/p/$project/code'
-    | '/p/$project/history'
-    | '/p/$project'
-    | '/p/$project/t/$task'
+    | '/forgot-password'
+    | '/login'
+    | '/new'
+    | '/reset-password'
+    | '/signup'
+    | '/verify-email'
+    | '/settings/password'
+    | '/settings/tokens'
+    | '/$owner'
+    | '/$owner/$repo/agents'
+    | '/$owner/$repo/branches'
+    | '/$owner/$repo/compare'
+    | '/$owner/$repo/history'
+    | '/$owner/$repo/settings'
+    | '/$owner/$repo'
+    | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/t/$task'
   id:
     | '__root__'
     | '/'
-    | '/p/$project'
-    | '/p/$project/code'
-    | '/p/$project/history'
-    | '/p/$project/'
-    | '/p/$project/t/$task'
+    | '/forgot-password'
+    | '/login'
+    | '/new'
+    | '/reset-password'
+    | '/signup'
+    | '/verify-email'
+    | '/$owner/$repo'
+    | '/settings/password'
+    | '/settings/tokens'
+    | '/$owner/'
+    | '/$owner/$repo/agents'
+    | '/$owner/$repo/branches'
+    | '/$owner/$repo/compare'
+    | '/$owner/$repo/history'
+    | '/$owner/$repo/settings'
+    | '/$owner/$repo/'
+    | '/$owner/$repo/commit/$hash'
+    | '/$owner/$repo/t/$task'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  PProjectRoute: typeof PProjectRouteWithChildren
+  ForgotPasswordRoute: typeof ForgotPasswordRoute
+  LoginRoute: typeof LoginRoute
+  NewRoute: typeof NewRoute
+  ResetPasswordRoute: typeof ResetPasswordRoute
+  SignupRoute: typeof SignupRoute
+  VerifyEmailRoute: typeof VerifyEmailRoute
+  OwnerRepoRoute: typeof OwnerRepoRouteWithChildren
+  SettingsPasswordRoute: typeof SettingsPasswordRoute
+  SettingsTokensRoute: typeof SettingsTokensRoute
+  OwnerIndexRoute: typeof OwnerIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -111,65 +276,173 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/p/$project': {
-      id: '/p/$project'
-      path: '/p/$project'
-      fullPath: '/p/$project'
-      preLoaderRoute: typeof PProjectRouteImport
+    '/forgot-password': {
+      id: '/forgot-password'
+      path: '/forgot-password'
+      fullPath: '/forgot-password'
+      preLoaderRoute: typeof ForgotPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/p/$project/': {
-      id: '/p/$project/'
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/new': {
+      id: '/new'
+      path: '/new'
+      fullPath: '/new'
+      preLoaderRoute: typeof NewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reset-password': {
+      id: '/reset-password'
+      path: '/reset-password'
+      fullPath: '/reset-password'
+      preLoaderRoute: typeof ResetPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/signup': {
+      id: '/signup'
+      path: '/signup'
+      fullPath: '/signup'
+      preLoaderRoute: typeof SignupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/verify-email': {
+      id: '/verify-email'
+      path: '/verify-email'
+      fullPath: '/verify-email'
+      preLoaderRoute: typeof VerifyEmailRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/': {
+      id: '/$owner/'
+      path: '/$owner'
+      fullPath: '/$owner/'
+      preLoaderRoute: typeof OwnerIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$repo': {
+      id: '/$owner/$repo'
+      path: '/$owner/$repo'
+      fullPath: '/$owner/$repo'
+      preLoaderRoute: typeof OwnerRepoRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/password': {
+      id: '/settings/password'
+      path: '/settings/password'
+      fullPath: '/settings/password'
+      preLoaderRoute: typeof SettingsPasswordRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/tokens': {
+      id: '/settings/tokens'
+      path: '/settings/tokens'
+      fullPath: '/settings/tokens'
+      preLoaderRoute: typeof SettingsTokensRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/$owner/$repo/': {
+      id: '/$owner/$repo/'
       path: '/'
-      fullPath: '/p/$project/'
-      preLoaderRoute: typeof PProjectIndexRouteImport
-      parentRoute: typeof PProjectRoute
+      fullPath: '/$owner/$repo/'
+      preLoaderRoute: typeof OwnerRepoIndexRouteImport
+      parentRoute: typeof OwnerRepoRoute
     }
-    '/p/$project/code': {
-      id: '/p/$project/code'
-      path: '/code'
-      fullPath: '/p/$project/code'
-      preLoaderRoute: typeof PProjectCodeRouteImport
-      parentRoute: typeof PProjectRoute
+    '/$owner/$repo/agents': {
+      id: '/$owner/$repo/agents'
+      path: '/agents'
+      fullPath: '/$owner/$repo/agents'
+      preLoaderRoute: typeof OwnerRepoAgentsRouteImport
+      parentRoute: typeof OwnerRepoRoute
     }
-    '/p/$project/history': {
-      id: '/p/$project/history'
+    '/$owner/$repo/branches': {
+      id: '/$owner/$repo/branches'
+      path: '/branches'
+      fullPath: '/$owner/$repo/branches'
+      preLoaderRoute: typeof OwnerRepoBranchesRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/compare': {
+      id: '/$owner/$repo/compare'
+      path: '/compare'
+      fullPath: '/$owner/$repo/compare'
+      preLoaderRoute: typeof OwnerRepoCompareRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/history': {
+      id: '/$owner/$repo/history'
       path: '/history'
-      fullPath: '/p/$project/history'
-      preLoaderRoute: typeof PProjectHistoryRouteImport
-      parentRoute: typeof PProjectRoute
+      fullPath: '/$owner/$repo/history'
+      preLoaderRoute: typeof OwnerRepoHistoryRouteImport
+      parentRoute: typeof OwnerRepoRoute
     }
-    '/p/$project/t/$task': {
-      id: '/p/$project/t/$task'
+    '/$owner/$repo/settings': {
+      id: '/$owner/$repo/settings'
+      path: '/settings'
+      fullPath: '/$owner/$repo/settings'
+      preLoaderRoute: typeof OwnerRepoSettingsRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/commit/$hash': {
+      id: '/$owner/$repo/commit/$hash'
+      path: '/commit/$hash'
+      fullPath: '/$owner/$repo/commit/$hash'
+      preLoaderRoute: typeof OwnerRepoCommitHashRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/t/$task': {
+      id: '/$owner/$repo/t/$task'
       path: '/t/$task'
-      fullPath: '/p/$project/t/$task'
-      preLoaderRoute: typeof PProjectTTaskRouteImport
-      parentRoute: typeof PProjectRoute
+      fullPath: '/$owner/$repo/t/$task'
+      preLoaderRoute: typeof OwnerRepoTTaskRouteImport
+      parentRoute: typeof OwnerRepoRoute
     }
   }
 }
 
-interface PProjectRouteChildren {
-  PProjectCodeRoute: typeof PProjectCodeRoute
-  PProjectHistoryRoute: typeof PProjectHistoryRoute
-  PProjectIndexRoute: typeof PProjectIndexRoute
-  PProjectTTaskRoute: typeof PProjectTTaskRoute
+interface OwnerRepoRouteChildren {
+  OwnerRepoAgentsRoute: typeof OwnerRepoAgentsRoute
+  OwnerRepoBranchesRoute: typeof OwnerRepoBranchesRoute
+  OwnerRepoCompareRoute: typeof OwnerRepoCompareRoute
+  OwnerRepoHistoryRoute: typeof OwnerRepoHistoryRoute
+  OwnerRepoSettingsRoute: typeof OwnerRepoSettingsRoute
+  OwnerRepoIndexRoute: typeof OwnerRepoIndexRoute
+  OwnerRepoCommitHashRoute: typeof OwnerRepoCommitHashRoute
+  OwnerRepoTTaskRoute: typeof OwnerRepoTTaskRoute
 }
 
-const PProjectRouteChildren: PProjectRouteChildren = {
-  PProjectCodeRoute: PProjectCodeRoute,
-  PProjectHistoryRoute: PProjectHistoryRoute,
-  PProjectIndexRoute: PProjectIndexRoute,
-  PProjectTTaskRoute: PProjectTTaskRoute,
+const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
+  OwnerRepoAgentsRoute: OwnerRepoAgentsRoute,
+  OwnerRepoBranchesRoute: OwnerRepoBranchesRoute,
+  OwnerRepoCompareRoute: OwnerRepoCompareRoute,
+  OwnerRepoHistoryRoute: OwnerRepoHistoryRoute,
+  OwnerRepoSettingsRoute: OwnerRepoSettingsRoute,
+  OwnerRepoIndexRoute: OwnerRepoIndexRoute,
+  OwnerRepoCommitHashRoute: OwnerRepoCommitHashRoute,
+  OwnerRepoTTaskRoute: OwnerRepoTTaskRoute,
 }
 
-const PProjectRouteWithChildren = PProjectRoute._addFileChildren(
-  PProjectRouteChildren,
+const OwnerRepoRouteWithChildren = OwnerRepoRoute._addFileChildren(
+  OwnerRepoRouteChildren,
 )
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  PProjectRoute: PProjectRouteWithChildren,
+  ForgotPasswordRoute: ForgotPasswordRoute,
+  LoginRoute: LoginRoute,
+  NewRoute: NewRoute,
+  ResetPasswordRoute: ResetPasswordRoute,
+  SignupRoute: SignupRoute,
+  VerifyEmailRoute: VerifyEmailRoute,
+  OwnerRepoRoute: OwnerRepoRouteWithChildren,
+  SettingsPasswordRoute: SettingsPasswordRoute,
+  SettingsTokensRoute: SettingsTokensRoute,
+  OwnerIndexRoute: OwnerIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

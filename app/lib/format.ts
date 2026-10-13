@@ -36,3 +36,10 @@ export const STATUS: Record<TaskStatus, { label: string; dot: string; text: stri
 };
 
 export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+export function formatBytes(n: number): string {
+	if (n < 1024) return `${n} B`;
+	if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+	if (n < 1024 ** 3) return `${Math.round(n / 1024 ** 2)} MB`;
+	return `${+(n / 1024 ** 3).toFixed(1)} GB`;
+}

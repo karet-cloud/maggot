@@ -1,12 +1,14 @@
 import { Link } from "@tanstack/react-router";
-import { AlertTriangle, CircleDot, GitBranchPlus, GitCommitHorizontal, GitMerge, Inbox, Loader, Send, Sparkles, Trash2, XCircle } from "lucide-react";
+import { AlertTriangle, CircleDot, GitBranchPlus, GitCommitHorizontal, GitMerge, Inbox, Loader, Send, Sparkles, Trash2, Upload, XCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import type { EventType, ProjectEvent, Task } from "../lib/api.ts";
+import { repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
 import { cx, TimeAgo } from "./ui.tsx";
 
 const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"project.created": { icon: <Sparkles className="size-3.5" />, tone: "text-accent" },
+	"repo.pushed": { icon: <Upload className="size-3.5" />, tone: "text-sky-300" },
 	"task.created": { icon: <CircleDot className="size-3.5" />, tone: "text-violet-300" },
 	"task.ready": { icon: <GitBranchPlus className="size-3.5" />, tone: "text-sky-300" },
 	"task.submitted": { icon: <Send className="size-3.5" />, tone: "text-amber-300" },
@@ -25,7 +27,11 @@ export function describe(e: ProjectEvent): string {
 	const d = e.data as Record<string, unknown>;
 	switch (e.type) {
 		case "project.created":
-			return d.imported ? "Project imported" : "Project created";
+			return d.imported ? "Repository imported" : "Repository created";
+		case "repo.pushed":
+			if (d.moved === false) return "Pushed other branches or tags";
+			if (!d.from) return d.to ? `Pushed ${String(d.branch)} at ${shortOid(d.to as string)}` : "Pushed";
+			return `Pushed ${String(d.branch)} ${shortOid(d.from as string)} → ${shortOid(d.to as string)}`;
 		case "task.created":
 			return `${(d.agent as string | null) ?? "Someone"} started a task`;
 		case "task.ready": {
@@ -57,8 +63,8 @@ export function EventRow({ event, task, project, compact }: { event: ProjectEven
 			<div className="min-w-0 flex-1">
 				{!compact && event.taskId && (
 					<Link
-						to="/p/$project/t/$task"
-						params={{ project, task: event.taskId }}
+						to="/$owner/$repo/t/$task"
+						params={{ ...repoParams(project), task: event.taskId }}
 						className="block truncate text-[13px] font-medium text-fg hover:text-accent"
 					>
 						{task?.title ?? event.taskId}

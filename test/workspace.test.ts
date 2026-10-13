@@ -35,7 +35,8 @@ async function agentChange(name: string, files: Record<string, string>) {
 }
 
 async function mainFile(path: string) {
-	return (await artifacts.call<{ content: string }>("GET", `/repos/proj/file?ref=main&path=${path}`)).content;
+	const { content } = await artifacts.call<{ content: string }>("GET", `/repos/proj/file?ref=main&path=${path}`);
+	return Buffer.from(content, "base64").toString();
 }
 
 test("merges concurrent non-overlapping tasks, fast-forward then true merge", async () => {

@@ -101,6 +101,7 @@ export interface QueueEntry {
 
 export type EventType =
 	| "project.created"
+	| "repo.pushed"
 	| "task.created"
 	| "task.ready"
 	| "task.submitted"
@@ -141,6 +142,102 @@ export interface Tree {
 	commit: string | null;
 	path: string;
 	entries: TreeEntry[];
+}
+
+/** A commit with everything the commit page shows. */
+export interface CommitDetail extends Commit {
+	treeHash: string;
+	committer: { name: string; email: string };
+	authoredAt: number;
+}
+
+export interface DiffHunk {
+	oldStart: number;
+	oldLines: number;
+	newStart: number;
+	newLines: number;
+	/** Each line starts with " ", "+", "-", or "\\" (for "No newline at end of file"). */
+	lines: string[];
+}
+
+export interface FileDiff {
+	path: string;
+	status: "added" | "deleted" | "modified";
+	oldMode: string | null;
+	newMode: string | null;
+	additions: number;
+	deletions: number;
+	binary: boolean;
+	/** Too big to diff inline; additions and deletions are 0. */
+	tooLarge: boolean;
+	hunks: DiffHunk[];
+}
+
+export interface Diff {
+	files: FileDiff[];
+	additions: number;
+	deletions: number;
+	/** More files changed than a diff lists; `files` holds the first ones found, sorted by path. */
+	truncated: boolean;
+}
+
+/** What `head` adds on top of `base`: the commits only `head` has and the diff from their merge base. */
+export interface Comparison {
+	base: string;
+	head: string;
+	/** Null when no common ancestor is within the searched history. */
+	mergeBase: string | null;
+	/** Newest first. */
+	commits: Commit[];
+	/** `commits` stopped at the search limit. */
+	capped: boolean;
+	diff: Diff;
+}
+
+export interface BranchSummary {
+	name: string;
+	head: string;
+	commit: Pick<Commit, "message" | "author" | "committedAt"> | null;
+	/** Commits on the branch but not the default branch; null if not computed. */
+	ahead: number | null;
+	/** Commits on the default branch (first-parent) since the branch split off. */
+	behind: number | null;
+	/** The ahead count stopped at its limit. */
+	capped: boolean;
+}
+
+export interface Branches {
+	defaultBranch: string;
+	branches: (BranchSummary & { default: boolean })[];
+	/** Task forks: each agent works on its own fork's copy of the default branch. */
+	agents: (BranchSummary & { taskId: string; title: string; agent: string | null; status: TaskStatus })[];
+}
+
+export type Visibility = "public" | "private";
+
+/** A user-owned repository: `owner/name` on the web, `<origin>/owner/name.git` for git. */
+export interface RepoInfo {
+	owner: string;
+	name: string;
+	fullName: string;
+	description: string | null;
+	visibility: Visibility;
+	defaultBranch: string;
+	createdAt: string;
+	/** HTTPS clone URL served by megit; push with a personal access token as the password. */
+	cloneUrl: string;
+	/** Whether the caller may push, change settings, and run tasks. */
+	canWrite: boolean;
+}
+
+export interface Viewer {
+	id: string;
+	username: string;
+	name: string;
+	email: string;
+	emailVerified: boolean;
+	/** What the account uses against its quotas. */
+	usage: { repos: number; bytes: number; maxRepos: number; maxBytes: number };
 }
 
 export interface ApiError {

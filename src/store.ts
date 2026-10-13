@@ -8,6 +8,8 @@ export interface RepoHandle extends Disposable {
 	log(opts?: { ref?: string; limit?: number; offset?: number }): Promise<ArtifactsCommitMetadata[]>;
 	readFile(args: { ref: string; path: string }): Promise<Blob | null>;
 	readTree(hash: string): Promise<ArtifactsTreeEntry[] | null>;
+	readBlob(hash: string): Promise<Blob | null>;
+	readCommit(hash: string): Promise<ArtifactsCommitMetadata | null>;
 }
 
 /** The subset of the `Artifacts` namespace binding megit uses. */
@@ -78,13 +80,21 @@ class LocalArtifacts implements RepoStore {
 				return this.call<ArtifactsCommitMetadata[]>("GET", `${path}/log?${q}`);
 			},
 			readFile: async ({ ref, path: file }) => {
-				const result = await this.call<{ content: string } | null>(
+				const result = await this.call<{ content: string; type: string } | null>(
 					"GET",
 					`${path}/file?${new URLSearchParams({ ref, path: file })}`,
 				);
-				return result ? new Blob([result.content], { type: "text/plain;charset=utf-8" }) : null;
+				return result ? new Blob([fromBase64(result.content)], { type: result.type }) : null;
 			},
 			readTree: (hash) => this.call<ArtifactsTreeEntry[] | null>("GET", `${path}/tree?${new URLSearchParams({ hash })}`),
+			readBlob: async (hash) => {
+				const result = await this.call<{ content: string } | null>("GET", `${path}/blob?${new URLSearchParams({ hash })}`);
+				return result ? new Blob([fromBase64(result.content)]) : null;
+			},
+			readCommit: async (hash) => {
+				const [commit] = await this.call<ArtifactsCommitMetadata[]>("GET", `${path}/log?${new URLSearchParams({ ref: hash, limit: "1" })}`);
+				return commit?.hash === hash ? commit : null;
+			},
 			[Symbol.dispose]() {},
 		};
 	}
@@ -92,4 +102,8 @@ class LocalArtifacts implements RepoStore {
 	delete(name: string) {
 		return this.call<boolean>("DELETE", `/repos/${encodeURIComponent(name)}`);
 	}
+}
+
+function fromBase64(data: string): Uint8Array<ArrayBuffer> {
+	return Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
 }

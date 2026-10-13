@@ -68,6 +68,7 @@ export function useProjectLive(project: string): Live {
 				if (event.type === "main.advanced") {
 					invalidate(["project", project, "log"]);
 					invalidate(keys.code(project));
+					invalidate(keys.branches(project));
 				}
 			};
 			socket.onclose = () => {

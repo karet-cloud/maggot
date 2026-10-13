@@ -2,8 +2,12 @@ import { DurableObject } from "cloudflare:workers";
 import {
 	ACTIVE_STATUSES,
 	TASK_STATUSES,
+	type Branches,
 	type Commit,
+	type CommitDetail,
+	type Comparison,
 	type ConflictInfo,
+	type Diff,
 	type EventType,
 	type GitCredentials,
 	type Project,
@@ -15,6 +19,8 @@ import {
 	type Tree,
 } from "./api.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
+import { diffTrees, mapLimit, walkToMainline, type ObjectReader } from "./git/diff.ts";
+import { deleteBranch, listBranches } from "./git/protocol.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
@@ -25,6 +31,8 @@ const INTERNAL_TOKEN_TTL = 900;
 /** Drop the cached workspace after this many merges to bound memory. */
 const WORKSPACE_MAX_MERGES = 50;
 const MAX_PUSH_ATTEMPTS = 3;
+/** How much default-branch history ahead/behind counts and merge bases are searched in. */
+const MAINLINE_DEPTH = 1000;
 /** Direct push tokens for people are long-lived; they end up in a git remote URL. */
 const REPO_TOKEN_TTL = 30 * 24 * 3600;
 /**
@@ -89,6 +97,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private workspace: Workspace | undefined;
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
+	private readToken: { token: string; expires: number } | undefined;
 	/** Once the default branch has a commit it always will; skips re-checking on every task. */
 	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
@@ -153,7 +162,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 							source: { url: input.importUrl, branch: input.importBranch },
 							target: { name: input.name, opts: { description: input.description } },
 						})
-					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "main" }),
+					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" }),
 			);
 		} catch (err) {
 			// The repo exists but this coordinator never recorded it: a previous create died partway
@@ -200,6 +209,29 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.credentials(meta.name, meta.defaultBranch, scope, REPO_TOKEN_TTL);
 	}
 
+	/** Where the Git proxy sends a user's clone or push, with a cached short-lived Artifacts token. */
+	async gitRemote(scope: "read" | "write"): Promise<RemoteAccess> {
+		const meta = this.meta();
+		if (scope === "write") return this.baseAccess(meta);
+		if (!this.readToken || this.readToken.expires < Date.now() + 120_000) {
+			const creds = await this.credentials(meta.name, meta.defaultBranch, "read", INTERNAL_TOKEN_TTL);
+			this.readToken = { token: creds.token, expires: Date.parse(creds.expiresAt) };
+		}
+		return { url: meta.remote, token: this.readToken.token };
+	}
+
+	/** Called after a push through the Git proxy: records the new head so live views refresh. */
+	async pushed(): Promise<void> {
+		const meta = this.meta();
+		using repo = await this.store.get(meta.name);
+		const head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
+		const previous = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'pushedHead'").toArray()[0]?.value ?? null;
+		if (head) this.hasCommits = true;
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pushedHead', ?)", head ?? "");
+		// The proxy can't see which refs a push touched; report whether the default branch moved.
+		this.emit("repo.pushed", null, { branch: meta.defaultBranch, from: previous || null, to: head, moved: head !== (previous || null) });
+	}
+
 	async getProject(): Promise<Project> {
 		const meta = this.meta();
 		const stats = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
@@ -238,7 +270,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const meta = this.meta();
 		const { repoName, ref: resolved } = this.resolveRef(ref ?? meta.defaultBranch);
 		using repo = await this.store.get(repoName);
-		const commits = await repo.log({ ref: resolved, limit: Math.min(limit, 200) });
+		const commits = await repo.log({ ref: resolved, limit: Math.max(1, Math.min(limit, 200)) });
 		return commits.map((c) => ({
 			hash: c.hash,
 			message: c.message,
@@ -280,6 +312,138 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				.map((e) => ({ name: e.name, path: dir ? `${dir}/${e.name}` : e.name, type: e.type, hash: e.hash }))
 				.sort((a, b) => Number(b.type === "tree") - Number(a.type === "tree") || a.name.localeCompare(b.name)),
 		};
+	}
+
+	/** A commit and its diff against its first parent. `ref` picks the repo, as in readFile. */
+	async commit(hash: string, ref?: string): Promise<{ commit: CommitDetail; diff: Diff }> {
+		const { repoName } = this.resolveRef(ref ?? this.meta().defaultBranch);
+		using repo = await this.store.get(repoName);
+		const commit = await resolveCommit(repo, hash);
+		const parent = commit.parents[0] ? await resolveCommit(repo, commit.parents[0]) : null;
+		const diff = await diffTrees(repo, parent?.treeHash ?? null, commit.treeHash);
+		return {
+			commit: {
+				hash: commit.hash,
+				treeHash: commit.treeHash,
+				message: commit.message,
+				author: commit.author,
+				committer: commit.committer,
+				parents: commit.parents,
+				authoredAt: commit.authoredAt,
+				committedAt: commit.committedAt,
+			},
+			diff,
+		};
+	}
+
+	/**
+	 * What `head` adds to `base` (`base...head`): `base` is a branch or commit of the project repo,
+	 * `head` anything readFile accepts, including `task:<id>`.
+	 */
+	async compare(base: string, head: string): Promise<Comparison> {
+		const meta = this.meta();
+		const target = this.resolveRef(head);
+		using project = await this.store.get(meta.name);
+		using fork = target.repoName === meta.name ? null : await this.store.get(target.repoName);
+		const repo = fork ?? project;
+		const mainline = await project.log({ ref: base, limit: MAINLINE_DEPTH });
+		if (mainline.length === 0) throw new HttpError(404, "NOT_FOUND", `${base} does not exist or has no commits`);
+		const tip = await resolveCommit(repo, target.ref);
+		const walk = await walkToMainline(repo, tip.hash, mainline.map((c) => c.hash));
+		// Without a merge base in reach, fall back to comparing the two tips directly.
+		const from = mainline.find((c) => c.hash === walk.mergeBase) ?? mainline[0];
+		return {
+			base: mainline[0].hash,
+			head: tip.hash,
+			mergeBase: walk.mergeBase,
+			commits: walk.commits,
+			capped: walk.capped,
+			diff: await diffTrees(repo, from.treeHash, tip.treeHash),
+		};
+	}
+
+	/** What a task changed: its fork against the default branch, or what it merged. */
+	async taskChanges(id: string): Promise<Comparison> {
+		const row = this.row(id);
+		if (!row.merged_oid) return this.compare(this.meta().defaultBranch, `task:${id}`);
+		using repo = await this.store.get(this.meta().name);
+		const merge = await resolveCommit(repo, row.merged_oid);
+		// A merge commit's first parent is the default branch it landed on; a fast-forward has none.
+		if (merge.parents.length > 1) return this.compare(merge.parents[0], merge.parents[1]);
+		return this.compare(row.base_oid ?? merge.parents[0] ?? merge.hash, merge.hash);
+	}
+
+	/** Branches of the project repo, and each active task's fork, with ahead/behind counts unless `counts` is false. */
+	async branches(counts = true): Promise<Branches> {
+		const meta = this.meta();
+		const refs = await listBranches(await this.baseAccess(meta));
+		using project = await this.store.get(meta.name);
+		const mainline = await project.log({ ref: meta.defaultBranch, limit: MAINLINE_DEPTH });
+		const hashes = mainline.map((c) => c.hash);
+		const known = new Map(mainline.map((c) => [c.hash, c]));
+
+		const summarize = async (repo: ObjectReader, head: string) => {
+			if (!counts) return { head, commit: null, ahead: null, behind: null, capped: false };
+			const walk = await walkToMainline(repo, head, hashes, 300);
+			const top = walk.commits.find((c) => c.hash === head) ?? known.get(head) ?? (await repo.readCommit(head));
+			return {
+				head,
+				commit: top ? { message: top.message, author: top.author, committedAt: top.committedAt } : null,
+				ahead: walk.commits.length,
+				behind: walk.behind,
+				capped: walk.capped,
+			};
+		};
+
+		const branches = await mapLimit([...refs], 4, async ([name, head]) => ({
+			name,
+			default: name === meta.defaultBranch,
+			...(await summarize(project, head)),
+		}));
+		branches.sort((a, b) => Number(b.default) - Number(a.default) || (b.commit?.committedAt ?? 0) - (a.commit?.committedAt ?? 0));
+
+		const active = this.sql
+			.exec<TaskRow>("SELECT * FROM tasks WHERE status IN ('open', 'queued', 'merging', 'conflict', 'failed') ORDER BY created_at DESC")
+			.toArray()
+			.filter((r) => r.remote);
+		const agents = (
+			await mapLimit(active, 4, async (row) => {
+				try {
+					using fork = await this.store.get(row.repo);
+					const [tip] = await fork.log({ ref: meta.defaultBranch, limit: 1 });
+					if (!tip) return null;
+					return {
+						name: `task:${row.id}`,
+						taskId: row.id,
+						title: row.title,
+						agent: row.agent,
+						status: row.status,
+						...(await summarize(fork, tip.hash)),
+					};
+				} catch {
+					return null; // the fork is being deleted or is briefly unavailable
+				}
+			})
+		).filter((a) => a !== null);
+
+		return { defaultBranch: meta.defaultBranch, branches, agents };
+	}
+
+	async deleteBranch(name: string): Promise<void> {
+		const meta = this.meta();
+		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
+		const access = await this.baseAccess(meta);
+		const head = (await listBranches(access)).get(name);
+		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
+		await deleteBranch(access, name, head);
+	}
+
+	/** Which repo and commit a ref names, for reads done outside the coordinator (raw files, archives). */
+	async locate(ref?: string): Promise<{ repo: string; commit: string; treeHash: string; committedAt: number }> {
+		const { repoName, ref: resolved } = this.resolveRef(ref ?? this.meta().defaultBranch);
+		using repo = await this.store.get(repoName);
+		const commit = await resolveCommit(repo, resolved);
+		return { repo: repoName, commit: commit.hash, treeHash: commit.treeHash, committedAt: commit.committedAt };
 	}
 
 	// ── Tasks ────────────────────────────────────────────────────────────────
@@ -420,7 +584,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.sql
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events ORDER BY seq DESC LIMIT ?",
-				Math.min(limit, 1000),
+				Math.max(1, Math.min(limit, 1000)),
 			)
 			.toArray()
 			.reverse()
@@ -433,7 +597,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
 				after,
-				Math.min(limit, 1000),
+				Math.max(1, Math.min(limit, 1000)),
 			)
 			.toArray()
 			.map(toEvent);
@@ -881,6 +1045,13 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
 		const e = toHttpError(err);
 		throw new HttpError(e.status, e.code, `${name}: ${e.detail}`);
 	}
+}
+
+/** Reads a commit by full hash, or the tip of a branch or tag. */
+async function resolveCommit(repo: RepoHandle, ref: string): Promise<ArtifactsCommitMetadata> {
+	const commit = /^[0-9a-f]{40}$/.test(ref) ? await repo.readCommit(ref) : (await repo.log({ ref, limit: 1 }))[0];
+	if (!commit) throw new HttpError(404, "NOT_FOUND", `${ref} is not a commit in this repository`);
+	return commit;
 }
 
 /** Artifacts tokens look like `art_v1_<secret>?expires=<unix seconds>`. */

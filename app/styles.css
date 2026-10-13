@@ -49,3 +49,129 @@ body {
 ::selection {
 	background: color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
+
+/* Syntax highlighting (highlight.js classes), tuned for the dark theme. */
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta .hljs-keyword,
+.hljs-doctag {
+	color: #c792ea;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-meta .hljs-string {
+	color: #a5d6a7;
+}
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+	color: #f78c6c;
+}
+.hljs-title,
+.hljs-title.function_,
+.hljs-section {
+	color: #82aaff;
+}
+.hljs-title.class_,
+.hljs-type,
+.hljs-built_in {
+	color: #ffcb6b;
+}
+.hljs-attr,
+.hljs-attribute,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-property {
+	color: #89ddff;
+}
+.hljs-name,
+.hljs-tag,
+.hljs-selector-class,
+.hljs-selector-id {
+	color: #f07178;
+}
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+	color: #697586;
+	font-style: italic;
+}
+.hljs-deletion {
+	color: #f07178;
+}
+.hljs-emphasis {
+	font-style: italic;
+}
+.hljs-strong {
+	font-weight: 600;
+}
+
+/* Rendered Markdown (READMEs). */
+.markdown {
+	@apply text-sm leading-relaxed text-fg/90;
+}
+.markdown > * + * {
+	@apply mt-3;
+}
+.markdown h1 {
+	@apply border-b border-line pb-2 text-2xl font-semibold text-fg;
+}
+.markdown h2 {
+	@apply mt-6 border-b border-line pb-1.5 text-xl font-semibold text-fg;
+}
+.markdown h3 {
+	@apply mt-5 text-base font-semibold text-fg;
+}
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+	@apply mt-4 text-sm font-semibold text-fg;
+}
+.markdown a {
+	@apply text-accent hover:underline;
+}
+.markdown ul {
+	@apply list-disc pl-6;
+}
+.markdown ol {
+	@apply list-decimal pl-6;
+}
+.markdown li + li {
+	@apply mt-1;
+}
+.markdown li:has(> input[type="checkbox"]) {
+	@apply list-none;
+}
+.markdown li > input[type="checkbox"] {
+	@apply mr-1.5 -ml-5 align-middle;
+}
+.markdown blockquote {
+	@apply border-l-2 border-line-strong pl-4 text-dim;
+}
+.markdown code {
+	@apply rounded bg-raised px-1.5 py-0.5 font-mono text-[12.5px];
+}
+.markdown pre {
+	@apply overflow-x-auto rounded-md border border-line bg-bg p-3 leading-5;
+}
+.markdown pre code {
+	@apply bg-transparent p-0 text-[12.5px];
+}
+.markdown table {
+	@apply block w-max max-w-full overflow-x-auto border-collapse text-[13px];
+}
+.markdown th,
+.markdown td {
+	@apply border border-line px-3 py-1.5;
+}
+.markdown th {
+	@apply bg-raised font-semibold;
+}
+.markdown img {
+	@apply inline max-w-full;
+}
+.markdown hr {
+	@apply border-line;
+}

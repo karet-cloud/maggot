@@ -37,6 +37,10 @@ jobs:
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      # Optional: a sender on a domain set up for Cloudflare Email Sending turns on password reset emails.
+      MEGIT_EMAIL_FROM: ${{ vars.MEGIT_EMAIL_FROM }}
+      # Optional: JSON overrides for the rate limits and quotas in src/policy.ts.
+      MEGIT_POLICY: ${{ vars.MEGIT_POLICY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -49,8 +53,8 @@ jobs:
       - name: Smoke test
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://megit.sarthak7u.workers.dev/api/session)
-            [ "$code" = 401 ] && echo "API up" && exit 0
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://megit.sarthak7u.workers.dev/api/me)
+            [ "$code" = 200 ] && echo "API up" && exit 0
             sleep 5
           done
           echo "unexpected status $code" && exit 1

@@ -1,21 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
-import { FolderCode, History, LayoutGrid, Plus, Radio, Terminal } from "lucide-react";
+import { Bot, FolderCode, GitBranch, History, Plus, Radio, Settings, Terminal } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
-import { Button, CopyField, cx, ErrorNote, Modal, Oid, Panel, Spinner } from "../components/ui.tsx";
-import { api, keys, type Task } from "../lib/api.ts";
+import { VisibilityBadge } from "../components/repos.tsx";
+import { Button, CopyField, cx, Empty, Modal, Oid, Panel, Spinner } from "../components/ui.tsx";
+import { api, ApiError, keys, repoParams, type Task } from "../lib/api.ts";
 import { useProjectTasks } from "../lib/queries.ts";
 import { LiveContext, useProjectLive, type LiveStatus } from "../lib/live.ts";
 
-export const Route = createFileRoute("/p/$project")({ component: ProjectLayout });
+export const Route = createFileRoute("/$owner/$repo")({ component: ProjectLayout });
 
 function ProjectLayout() {
-	const { project } = Route.useParams();
+	const { owner, repo } = Route.useParams();
+	const project = `${owner}/${repo}`;
 	const live = useProjectLive(project);
-	// Direct git pushes don't produce events yet, so poll the head (quickly while the repo is still empty).
+	// Pushes through megit's git URL emit events, but poll the head too (quickly while the repo is empty).
 	const info = useQuery({
 		queryKey: keys.project(project),
 		queryFn: () => api.project(project),
@@ -28,12 +30,16 @@ function ProjectLayout() {
 	const p = info.data;
 
 	if (info.error) {
+		const missing = info.error instanceof ApiError && info.error.status === 404;
 		return (
-			<main className="mx-auto max-w-[1600px] px-5 py-8">
-				<ErrorNote error={info.error} />
+			<main className="mx-auto max-w-xl px-5 py-16">
+				<Empty title={missing ? "Repository not found" : "Couldn't load this repository"}>
+					{missing ? "It doesn't exist, or it's private and you're not signed in as its owner." : info.error.message}
+				</Empty>
 			</main>
 		);
 	}
+	const canWrite = p?.repo.canWrite ?? false;
 
 	return (
 		<LiveContext.Provider value={live}>
@@ -43,6 +49,7 @@ function ProjectLayout() {
 						<div className="min-w-0">
 							<div className="flex items-center gap-3">
 								<h1 className="font-mono text-xl font-semibold tracking-tight">{project}</h1>
+								{p && <VisibilityBadge visibility={p.repo.visibility} />}
 								<LiveDot status={live.status} />
 							</div>
 							<p className="mt-1 text-sm text-dim">{p ? p.description || "No description" : <Spinner className="inline" />}</p>
@@ -52,10 +59,12 @@ function ProjectLayout() {
 								<Terminal className="size-4" />
 								Clone / push
 							</Button>
-							<Button variant="primary" onClick={() => setCreating(true)} disabled={p !== undefined && !p.head} title={p && !p.head ? "Push a first commit before creating tasks" : undefined}>
-								<Plus className="size-4" />
-								New task
-							</Button>
+							{canWrite && (
+								<Button variant="primary" onClick={() => setCreating(true)} disabled={p !== undefined && !p.head} title={p && !p.head ? "Push a first commit before creating tasks" : "Give an agent its own fork to work in"}>
+									<Plus className="size-4" />
+									New agent task
+								</Button>
+							)}
 						</div>
 					</div>
 					{p && (
@@ -82,14 +91,16 @@ function ProjectLayout() {
 								</span>
 							)}
 							<div className="w-full max-w-md sm:ml-auto sm:w-auto sm:min-w-80">
-								<CopyField value={p.remote} />
+								<CopyField value={p.repo.cloneUrl} />
 							</div>
 						</div>
 					)}
 					<nav className="mt-4 flex gap-1">
-						<Tab to="/p/$project" project={project} icon={<LayoutGrid className="size-3.5" />} label="Board" exact />
-						<Tab to="/p/$project/code" project={project} icon={<FolderCode className="size-3.5" />} label="Code" />
-						<Tab to="/p/$project/history" project={project} icon={<History className="size-3.5" />} label="History" />
+						<Tab to="/$owner/$repo" project={project} icon={<FolderCode className="size-3.5" />} label="Code" exact />
+						<Tab to="/$owner/$repo/history" project={project} icon={<History className="size-3.5" />} label="History" />
+						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
+						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
+						{canWrite && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
 					</nav>
 				</div>
 			</div>
@@ -112,7 +123,7 @@ function ProjectLayout() {
 			</div>
 
 			<Modal open={connecting} onClose={() => setConnecting(false)} title={`Use ${project} with git`}>
-				<RepoCommands project={project} empty={!p?.head} />
+				{p && <RepoCommands repo={p.repo} empty={!p.head} />}
 			</Modal>
 			<Modal open={creating} onClose={() => setCreating(false)} title="New task">
 				<NewTask project={project} onClose={() => setCreating(false)} />
@@ -121,11 +132,13 @@ function ProjectLayout() {
 	);
 }
 
-function Tab({ to, project, icon, label, exact }: { to: "/p/$project" | "/p/$project/code" | "/p/$project/history"; project: string; icon: ReactNode; label: string; exact?: boolean }) {
+type TabTarget = "/$owner/$repo" | "/$owner/$repo/agents" | "/$owner/$repo/history" | "/$owner/$repo/branches" | "/$owner/$repo/settings";
+
+function Tab({ to, project, icon, label, exact }: { to: TabTarget; project: string; icon: ReactNode; label: string; exact?: boolean }) {
 	return (
 		<Link
 			to={to}
-			params={{ project }}
+			params={repoParams(project)}
 			activeOptions={{ exact, includeSearch: false }}
 			className="-mb-px flex items-center gap-1.5 border-b-2 border-transparent px-3 py-2 text-sm text-dim hover:text-fg data-[status=active]:border-accent data-[status=active]:text-fg"
 		>
