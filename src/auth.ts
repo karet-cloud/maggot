@@ -17,7 +17,7 @@ export type Principal =
 const RESERVED = new Set([
 	"api", "assets", "login", "signup", "logout", "new", "settings", "explore", "p", "admin", "about", "help",
 	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "megit", "forgot-password", "reset-password",
-	"verify-email", "search", "notifications", "stars", "dashboard",
+	"verify-email", "search", "notifications", "stars", "dashboard", "parity",
 ]);
 const USERNAME = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
 
