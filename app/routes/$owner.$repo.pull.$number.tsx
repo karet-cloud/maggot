@@ -160,7 +160,9 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 
 function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDone: () => void }) {
 	const [method, setMethod] = useState<MergeMethod>("merge");
-	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method), onSuccess: onDone });
+	// The head shown in Files changed is the one that merges; if the branch moved since, the merge stops.
+	const files = useQuery({ queryKey: keys.pullFiles(project, pull.number), queryFn: () => api.pullFiles(project, pull.number), enabled: pull.pullState === "open" });
+	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.head), onSuccess: onDone });
 	if (pull.pullState === "merged") {
 		return (
 			<div className="flex items-center gap-3 rounded-lg border border-violet-500/30 bg-violet-500/10 px-4 py-3 text-sm">

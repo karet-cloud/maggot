@@ -29,11 +29,11 @@ function Profile() {
 			<main className="mx-auto max-w-[1100px] space-y-4 px-5 py-8">
 				<OrgHeader org={o} />
 				<nav className="flex gap-1 border-b border-line">
-					<ProfileTab owner={owner} active={!tab || tab === "stars"} icon={<BookMarked className="size-3.5" />} label="Repositories" />
-					<ProfileTab owner={owner} tab="people" active={tab === "people"} icon={<Users className="size-3.5" />} label="People" />
+					<ProfileTab owner={owner} active={!tab || tab === "stars" || !o.role} icon={<BookMarked className="size-3.5" />} label="Repositories" />
+					{o.role && <ProfileTab owner={owner} tab="people" active={tab === "people"} icon={<Users className="size-3.5" />} label="People" />}
 					{o.role && <ProfileTab owner={owner} tab="teams" active={tab === "teams"} icon={<UsersRound className="size-3.5" />} label="Teams" />}
 				</nav>
-				{tab === "people" ? (
+				{tab === "people" && o.role ? (
 					<People org={o} />
 				) : tab === "teams" && o.role ? (
 					<Teams org={o} />

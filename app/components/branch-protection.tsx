@@ -8,7 +8,7 @@ const OPTIONS: { id: keyof Omit<BranchRule, "pattern" | "createdAt">; label: str
 	{ id: "blockForcePushes", label: "Block force pushes", hint: "Pushes may only add commits; a push that rewrites history is put back and refused" },
 	{ id: "blockDeletions", label: "Block deletion", hint: "Nobody can delete the branch, from git or the web" },
 	{ id: "requireMergeQueue", label: "No direct pushes", hint: "No pushes or web commits; work lands through pull requests or agent tasks" },
-	{ id: "requireReview", label: "Require an approving review", hint: "Pull requests need an approval from someone who can merge, and no changes requested" },
+	{ id: "requireReview", label: "Require an approving review", hint: "Changes land only through pull requests approved by someone who can merge (no changes requested): no direct pushes, web commits or merge queue" },
 ];
 
 /** A repository's branch protection rules: add, change and remove them. */

@@ -453,7 +453,7 @@ export async function setStar(database: D1Database, userId: string, repoId: stri
 	return result.meta.changes > 0;
 }
 
-export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, canWrite: boolean, viewerId: string | null = null, canAdmin = false): RepoInfo {
+export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, canWrite: boolean, viewerId: string | null = null, canAdmin = false, isOwner = false): RepoInfo {
 	// Where a fork came from is shown only to people who can see the source.
 	const parentVisible = row.parentOwner && (row.parentVisibility === "public" || (row.parentLevel ?? 0) > 0 || row.parentOwnerId === viewerId);
 	return {
@@ -467,6 +467,7 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		cloneUrl: `${origin}/${row.owner}/${row.name}.git`,
 		canWrite,
 		canAdmin,
+		isOwner,
 		stars: row.stars ?? 0,
 		forks: row.forks ?? 0,
 		starred: Boolean(row.starred),
@@ -925,7 +926,7 @@ export async function closeIssuesByCommits(
 			database
 				.prepare(
 					`update "issue" set "state" = 'closed', "closedAt" = ?, "closedById" = null, "closedByCommit" = ?, "updatedAt" = ?
-					 where "repoId" = ? and "number" = ? and "state" = 'open' returning "number", "title", "authorId"`,
+					 where "repoId" = ? and "number" = ? and "state" = 'open' and "isPull" = 0 returning "number", "title", "authorId"`,
 				)
 				.bind(now, commit, now, repoId, number),
 		),
@@ -1022,6 +1023,23 @@ export async function markPullMerged(database: D1Database, pull: PullRow, userId
 			.bind(now, userId, now, pull.id),
 		database.prepare(`update "pull" set "mergedAt" = ?, "mergedById" = ?, "mergeCommit" = ? where "issueId" = ?`).bind(now, userId, commit, pull.id),
 	]);
+}
+
+/**
+ * Whether someone who can merge approved `head` itself and hasn't changed their mind since: approvals
+ * of earlier commits don't count once the branch moves on.
+ */
+export async function approvedAt(database: D1Database, pull: PullRow, head: string): Promise<boolean> {
+	const row = await database
+		.prepare(
+			`select 1 from "review" v join "issue" i on i."id" = v."issueId" join "repo" r on r."id" = i."repoId"
+			where v."issueId" = ? and v."state" = 'approved' and v."commitSha" = ? and ${accessLevel("r", 'v."authorId"')} >= 2
+			and not exists (select 1 from "review" w where w."issueId" = v."issueId" and w."authorId" = v."authorId" and w."state" <> 'commented' and w."createdAt" > v."createdAt")
+			limit 1`,
+		)
+		.bind(pull.id, head)
+		.first();
+	return row !== null;
 }
 
 export const MAX_REVIEW_COMMENTS = 100;

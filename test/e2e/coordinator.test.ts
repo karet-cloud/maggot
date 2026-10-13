@@ -1060,6 +1060,8 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.match(squashed.commit.message, new RegExp(`Use hello \\(#${pr.number}\\)`));
 	const after = (await (await as(null)(`${repo}/pulls/${pr.number}`)).json()) as { pull: { pullState: string; mergedBy: string } };
 	assert.deepEqual([after.pull.pullState, after.pull.mergedBy], ["merged", ada.username]);
+	assert.equal((await as(ada)(`${repo}/issues/${pr.number}`, { method: "PATCH", body: JSON.stringify({ state: "open" }) })).status, 409, "a merged pull request stays merged");
+	assert.equal((await as(ada)(`${repo}/pulls/${pr.number}/merge`, { method: "POST", body: JSON.stringify({ method: "squash" }) })).status, 409);
 	await until(async () => (((await (await as(null)(`${repo}/issues/${issue.number}`)).json()) as { issue: { state: string } }).issue.state === "closed" ? true : undefined));
 
 	// The other branch edits the same line: merging it now conflicts, and nothing changes.
@@ -1080,6 +1082,12 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.equal(fromFork.status, 201, await fromFork.clone().text());
 	const forkPull = ((await fromFork.json()) as { pull: { number: number; headRepo: string } }).pull;
 	assert.equal(forkPull.headRepo, `${bob.username}/prs`);
+	// A fork that goes private shows its branch only to people who can read it.
+	assert.equal((await as(bob)(`/repos/${bob.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
+	assert.equal((await as(null)(`${repo}/pulls/${forkPull.number}/files`)).status, 403);
+	assert.equal((await as(ada)(`${repo}/pulls/${forkPull.number}/merge`, { method: "POST", body: "{}" })).status, 403, "nor merged blind");
+	assert.equal((await as(bob)(`${repo}/pulls/${forkPull.number}/files`)).status, 200);
+	assert.equal((await as(bob)(`/repos/${bob.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
 	const viaFork = await as(ada)(`${repo}/pulls/${forkPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
 	assert.equal(viaFork.status, 200, await viaFork.clone().text());
 	const mergeCommit = ((await viaFork.json()) as { commit: string }).commit;
@@ -1166,10 +1174,35 @@ test("organizations, teams and collaborators: invitations, read for members, wri
 	assert.equal((await as(ada)(`${solo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireReview: true }) })).status, 200);
 	const pr = ((await (await as(ada)(`${solo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Change", base: "master", head: "change" }) })).json()) as { pull: { number: number } }).pull;
 	assert.equal((await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" })).status, 403);
+	// A branch that wants a review takes nothing else: no web commits, no pushes.
+	const webCommit = await as(ada)(`${solo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", message: "direct", files: [{ path: "direct.txt", content: "x" }] }) });
+	assert.equal(webCommit.status, 403, await webCommit.clone().text());
+	await exec("git", ["checkout", "-q", "master"], { cwd: soloDir });
+	await writeFile(join(soloDir, "direct.txt"), "x\n");
+	await exec("git", ["add", "-A"], { cwd: soloDir });
+	await exec("git", ["-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "-m", "direct"], { cwd: soloDir });
+	await assert.rejects(exec("git", ["push", "-q", "origin", "master"], { cwd: soloDir }), /protected branch/);
+	await exec("git", ["checkout", "-q", "change"], { cwd: soloDir });
 	assert.equal((await as(cy)(`${solo}/pulls/${pr.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "approved" }) })).status, 201);
 	assert.equal(((await (await as(ada)(`${solo}/pulls/${pr.number}`)).json()) as { pull: { decision: string } }).pull.decision, "approved");
-	assert.equal((await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" })).status, 200);
+	// A commit pushed after the approval isn't approved: merging waits for a review of it.
+	await writeFile(join(soloDir, "y.txt"), "y\n");
+	await exec("git", ["add", "-A"], { cwd: soloDir });
+	await exec("git", ["-c", "user.name=a", "-c", "user.email=a@a", "commit", "-q", "-m", "after the review"], { cwd: soloDir });
+	await exec("git", ["push", "-q", "origin", "change"], { cwd: soloDir });
+	const stale = await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" });
+	assert.equal(stale.status, 403, await stale.clone().text());
+	assert.equal((await as(cy)(`${solo}/pulls/${pr.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "approved", commit: "0".repeat(40) }) })).status, 409, "approving a commit that isn't the head");
+	assert.equal((await as(cy)(`${solo}/pulls/${pr.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "approved" }) })).status, 201);
+	const approvedMerge = await as(ada)(`${solo}/pulls/${pr.number}/merge`, { method: "POST", body: "{}" });
+	assert.equal(approvedMerge.status, 200, await approvedMerge.clone().text());
 	assert.equal((await as(cy)(`${solo}/collaborators`)).status, 404, "collaborators are listed to admins only");
+	// Admin by grant manages the repository, but only its owner gives it away or deletes it.
+	assert.equal((await as(ada)(`${solo}/collaborators/${cy.username}`, { method: "PUT", body: JSON.stringify({ permission: "admin" }) })).status, 200);
+	const asAdmin = (await (await as(cy)(solo)).json()) as { repo: { canAdmin: boolean; isOwner: boolean } };
+	assert.deepEqual([asAdmin.repo.canAdmin, asAdmin.repo.isOwner], [true, false]);
+	assert.equal((await as(cy)(`${solo}/transfer`, { method: "POST", body: JSON.stringify({ to: cy.username }) })).status, 403);
+	assert.equal((await as(cy)(solo, { method: "DELETE" })).status, 403);
 
 	// Transfers into an organization are accepted by its owners.
 	const offered = await as(ada)(`${solo}/transfer`, { method: "POST", body: JSON.stringify({ to: orgName }) });
@@ -1181,4 +1214,14 @@ test("organizations, teams and collaborators: invitations, read for members, wri
 	assert.equal(moved.status, 200, await moved.clone().text());
 	assert.equal(((await moved.json()) as { repo: { fullName: string } }).repo.fullName, `${orgName}/solo`);
 	assert.equal((await as(bob)(`/repos/${orgName}/solo`)).status, 200, "now members read it");
+
+	// A member who creates a repository in the organization administers it; other members read it.
+	const made = await as(bob)("/repos", { method: "POST", body: JSON.stringify({ name: "bobs-tool", owner: orgName, readme: true }) });
+	assert.equal(made.status, 201, await made.clone().text());
+	const mine = (await (await as(bob)(`/repos/${orgName}/bobs-tool`)).json()) as { repo: { canWrite: boolean; canAdmin: boolean; isOwner: boolean } };
+	assert.deepEqual([mine.repo.canWrite, mine.repo.canAdmin, mine.repo.isOwner], [true, true, false]);
+	assert.equal((await as(ada)(`/repos/${orgName}/bobs-tool`, { method: "DELETE" })).status, 200, "the organization's owners still decide its fate");
+	// Membership is for members to see.
+	const outside = (await (await as(null)(`/orgs/${orgName}`)).json()) as { org: { members: unknown[] } };
+	assert.deepEqual(outside.org.members, []);
 });

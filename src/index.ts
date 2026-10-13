@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, Comparison, FileList, IssueState, MergeMethod, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, Comparison, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
@@ -43,6 +43,7 @@ import {
 	toIssueSummary,
 	updateIssue,
 	addReview,
+	approvedAt,
 	getPull,
 	listPulls,
 	listReviews,
@@ -377,7 +378,7 @@ app.post("/api/transfers/:id/accept", async (c) => {
 		}),
 	);
 	const listing = await getListing(db(c.env), after.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? after, origin(c), true, user.id, true) });
+	return c.json({ repo: toRepoInfo(listing ?? after, origin(c), true, user.id, true, true) });
 });
 
 app.post("/api/transfers/:id/decline", async (c) => {
@@ -424,6 +425,22 @@ app.get("/api/orgs/:org", async (c) => {
 	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 });
 
+/**
+ * Live views (and their sockets) were authorized with the access people had then; after a change to
+ * who can reach these repositories, they reconnect and are checked again.
+ */
+function reauthorize(c: Context<App>, repoIds: string[]): void {
+	if (repoIds.length === 0) return;
+	c.executionCtx.waitUntil(Promise.allSettled(repoIds.map((id) => projects(c.env).getByName(id).disconnectAll("Access changed"))));
+}
+
+async function repoIdsWhere(c: Context<App>, sql: string, ...args: string[]): Promise<string[]> {
+	const { results } = await db(c.env).prepare(sql).bind(...args).all<{ id: string }>();
+	return results.map((r) => r.id);
+}
+const orgRepos = (c: Context<App>, orgId: string) => repoIdsWhere(c, `select "id" from "repo" where "ownerId" = ?`, orgId);
+const teamRepos = (c: Context<App>, teamId: string) => repoIdsWhere(c, `select "repoId" as "id" from "team_repo" where "teamId" = ?`, teamId);
+
 app.delete("/api/orgs/:org", async (c) => {
 	const { org } = await orgRoute(c, "owner");
 	await deleteOrg(db(c.env), org.id);
@@ -448,6 +465,7 @@ app.patch("/api/orgs/:org/members/:username", async (c) => {
 	const input = await body<{ role?: string }>(c);
 	if (input.role !== "owner" && input.role !== "member") throw new HttpError(400, "INVALID_INPUT", "role is owner or member");
 	await setMemberRole(db(c.env), org.id, c.req.param("username"), input.role);
+	reauthorize(c, await orgRepos(c, org.id));
 	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 });
 
@@ -457,6 +475,7 @@ app.delete("/api/orgs/:org/members/:username", async (c) => {
 	const leaving = c.req.param("username").toLowerCase() === user.username;
 	const { org } = await orgRoute(c, leaving ? "member" : "owner");
 	await removeMember(db(c.env), org.id, c.req.param("username"));
+	reauthorize(c, await orgRepos(c, org.id));
 	return c.json({ org: await describeOrg(db(c.env), org, user.id) });
 });
 
@@ -469,7 +488,9 @@ app.post("/api/orgs/:org/teams", async (c) => {
 
 app.delete("/api/orgs/:org/teams/:team", async (c) => {
 	const { org } = await orgRoute(c, "owner");
+	const reach = await teamRepos(c, c.req.param("team"));
 	await deleteTeam(db(c.env), org.id, c.req.param("team"));
+	reauthorize(c, reach);
 	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 });
 
@@ -477,6 +498,7 @@ for (const [method, member] of [["put", true], ["delete", false]] as const) {
 	app[method]("/api/orgs/:org/teams/:team/members/:username", async (c) => {
 		const { org } = await orgRoute(c, "owner");
 		await setTeamMember(db(c.env), org.id, c.req.param("team"), c.req.param("username"), member);
+		reauthorize(c, await teamRepos(c, c.req.param("team")));
 		return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 	});
 }
@@ -485,12 +507,14 @@ app.put("/api/orgs/:org/teams/:team/repos/:repo", async (c) => {
 	const { org } = await orgRoute(c, "owner");
 	const input = await body<{ permission?: string }>(c);
 	await setTeamRepo(db(c.env), org.id, c.req.param("team"), c.req.param("repo"), assertPermission(input.permission));
+	reauthorize(c, await repoIdsWhere(c, `select "id" from "repo" where "ownerId" = ? and "name" = ?`, org.id, c.req.param("repo")));
 	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 });
 
 app.delete("/api/orgs/:org/teams/:team/repos/:repo", async (c) => {
 	const { org } = await orgRoute(c, "owner");
 	await setTeamRepo(db(c.env), org.id, c.req.param("team"), c.req.param("repo"), null);
+	reauthorize(c, await repoIdsWhere(c, `select "id" from "repo" where "ownerId" = ? and "name" = ?`, org.id, c.req.param("repo")));
 	return c.json({ org: await describeOrg(db(c.env), org, viewerId(c.var.principal)) });
 });
 
@@ -584,12 +608,13 @@ interface NewRepo {
 }
 
 /** Whose account a new repository (or fork) goes in: the caller's, or an organization they're a member of. */
-async function newOwner(c: Context<App>, user: { id: string; username: string }, owner: unknown): Promise<{ id: string; username: string }> {
-	if (owner === undefined || owner === null || owner === "" || owner === user.username) return user;
+async function newOwner(c: Context<App>, user: { id: string; username: string }, owner: unknown): Promise<{ id: string; username: string; role: OrgRole | null }> {
+	if (owner === undefined || owner === null || owner === "" || owner === user.username) return { ...user, role: null };
 	if (typeof owner !== "string") throw new HttpError(400, "INVALID_INPUT", "owner is an organization's name");
 	const org = await findOrg(db(c.env), owner);
-	if (!org || !(await roleIn(db(c.env), org.id, user.id))) throw new HttpError(403, "FORBIDDEN", `You can't create repositories in ${owner}`);
-	return { id: org.id, username: org.username };
+	const role = org ? await roleIn(db(c.env), org.id, user.id) : null;
+	if (!org || !role) throw new HttpError(403, "FORBIDDEN", `You can't create repositories in ${owner}`);
+	return { id: org.id, username: org.username, role };
 }
 
 /**
@@ -629,6 +654,13 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
 	await insertRepo(db(c.env), row, policy(c.env).reposPerUser, policy(c.env).userBytes);
+	// A member who creates a repository in an organization administers it, as on GitHub; members alone only read.
+	if (owner.role === "member") {
+		await db(c.env)
+			.prepare(`insert into "repo_collaborator" ("repoId", "userId", "permission", "state", "invitedBy", "createdAt") values (?, ?, 'admin', 'active', ?, ?)`)
+			.bind(row.id, user.id, user.id, row.createdAt)
+			.run();
+	}
 	let created: Project;
 	try {
 		if (source) await projects(c.env).getByName(source.id).forkInto(row.id, row.description ?? undefined);
@@ -688,7 +720,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		);
 	}
 	const listing = await getListing(db(c.env), row.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true), project: created }, 201);
+	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true, owner.id === user.id || (await roleIn(db(c.env), owner.id, user.id)) === "owner"), project: created }, 201);
 }
 
 /** How webhook payloads name a repository. */
@@ -741,6 +773,19 @@ function adminAction(rest: string, method: string): boolean {
 	return false;
 }
 
+/** Transferring and deleting: the owner's (or, for an organization's repository, its owners'), not every admin's. */
+function ownerAction(rest: string, method: string): boolean {
+	if (rest === "/") return method === "DELETE";
+	return rest === "/transfer" && (method === "POST" || method === "DELETE");
+}
+
+async function ownsRepo(c: Context<App>, row: RepoRow): Promise<boolean> {
+	const p = c.var.principal;
+	if (p.kind === "admin") return true;
+	if (p.kind !== "user") return false;
+	return p.id === row.ownerId || (await roleIn(db(c.env), row.ownerId, p.id)) === "owner";
+}
+
 /**
  * Whether a write is one a reader may make: starring and forking, and opening and discussing issues
  * (whose routes check authorship themselves).
@@ -787,6 +832,10 @@ repo.use("*", async (c, next) => {
 		if (c.req.method === "GET") throw new HttpError(404, "NOT_FOUND", "Not found");
 		throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "Only the repository's admins can do that");
 	}
+	// Handing a repository on or deleting it is for whoever owns it, not every admin (collaborators and teams included).
+	if (ownerAction(rest, c.req.method) && !(await ownsRepo(c, row))) {
+		throw new HttpError(403, "FORBIDDEN", `Only ${row.owner} (or its owners, for an organization) can transfer or delete ${row.owner}/${row.name}`);
+	}
 	const write = !["GET", "HEAD"].includes(c.req.method) && !readerAction(rest, c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
 	// Archived means read-only for everyone: issues and comments too, but starring and forking still work.
@@ -803,7 +852,7 @@ repo.get("/", async (c) => {
 	const row = c.var.repo;
 	const p = c.var.principal;
 	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
-	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row)) : null;
+	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row), await ownsRepo(c, row)) : null;
 	const state = await project(c).getProject();
 	// People reach user repositories through megit's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
@@ -839,7 +888,7 @@ repo.patch("/", async (c) => {
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
 	if (input.name !== undefined) await project(c).setRepository(repositoryRef(c, row));
 	const updated = (await getListing(db(c.env), row.id, viewerId(c.var.principal))) as RepoListing;
-	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal), true) });
+	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal), true, await ownsRepo(c, row)) });
 });
 
 /** The repository behind a user-facing route; admin project routes have none. */
@@ -886,6 +935,8 @@ repo.put("/collaborators/:username", async (c) => {
 	const input = await body<{ permission?: string }>(c);
 	const permission = assertPermission(input.permission);
 	const result = await setCollaborator(db(c.env), row, c.req.param("username"), permission, user.id);
+	// A changed grant (a downgrade, say) applies to views already open too.
+	if (!result.invited) reauthorize(c, [row.id]);
 	if (result.invited) {
 		c.executionCtx.waitUntil(
 			notifyUser(db(c.env), {
@@ -904,8 +955,7 @@ repo.put("/collaborators/:username", async (c) => {
 repo.delete("/collaborators/:username", async (c) => {
 	const row = userRepo(c);
 	await removeCollaborator(db(c.env), row.id, c.req.param("username"));
-	// Live views were authorized with the old access.
-	await project(c).disconnectAll("Access changed");
+	reauthorize(c, [row.id]);
 	return c.json({ collaborators: await listCollaborators(db(c.env), row.id) });
 });
 
@@ -1410,6 +1460,12 @@ repo.get("/issues/:number/comments", async (c) => {
 	return c.json(await listComments(db(c.env), issue.id, { id: viewerId(c.var.principal), owner: canWrite(c.var.principal, row) }, before));
 });
 
+/** A merged pull request stays merged: closing or reopening it would leave it counted as open but unmergeable. */
+async function assertNotMerged(c: Context<App>, issueId: string): Promise<void> {
+	const merged = await db(c.env).prepare(`select 1 from "pull" where "issueId" = ? and "mergedAt" is not null`).bind(issueId).first();
+	if (merged) throw new HttpError(409, "ALREADY_MERGED", "This pull request is merged, so it can't be closed or reopened");
+}
+
 repo.patch("/issues/:number", async (c) => {
 	const row = userRepo(c);
 	const user = requireUser(c);
@@ -1419,6 +1475,7 @@ repo.patch("/issues/:number", async (c) => {
 	const input = await body<{ title?: string; body?: string; state?: IssueState; labels?: unknown }>(c);
 	if (input.state !== undefined && input.state !== "open" && input.state !== "closed") throw new HttpError(400, "INVALID_INPUT", "state is open or closed");
 	if (input.labels !== undefined && !owner) throw new HttpError(403, "FORBIDDEN", "Only the repository's owner can label issues");
+	if (input.state !== undefined && input.state !== issue.state) await assertNotMerged(c, issue.id);
 	const updated = await updateIssue(db(c.env), issue, {
 		...issueText(input, false),
 		state: input.state,
@@ -1444,6 +1501,7 @@ repo.post("/issues/:number/comments", async (c) => {
 	if (changing && !owner && c.var.principal.kind === "user" && c.var.principal.id !== issue.authorId) {
 		throw new HttpError(403, "FORBIDDEN", "Only the issue's author and the repository's owner can close or reopen it");
 	}
+	if (changing) await assertNotMerged(c, issue.id);
 	const user = await canPost(c);
 	const comment = await addComment(db(c.env), issue, user.id, text, { id: user.id, owner });
 	announceIssue(c, row, issue, "commented", user, { comment: { id: comment.id, body: text.slice(0, 2000) } });
@@ -1506,6 +1564,21 @@ async function loadPull(c: Context<App>): Promise<PullRow> {
 	const pull = await getPull(db(c.env), userRepo(c).id, issueNumber(c));
 	if (!pull) throw new HttpError(404, "NOT_FOUND", `Pull request #${c.req.param("number")} not found`);
 	return pull;
+}
+
+/**
+ * The repository a pull request's changes are read from (null for this one), checked again on every read:
+ * a fork that's private, or went private, shows its branch only to people who can read the fork.
+ */
+async function liveHead(c: Context<App>, pull: PullRow): Promise<string | null> {
+	// Same-repository pull requests record this repository as the head; null means the fork was deleted.
+	if (pull.headRepoId === null) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
+	if (pull.headRepoId === pull.repoId) return null;
+	const fork = pull.headOwner && pull.headName ? await findRepo(db(c.env), pull.headOwner, pull.headName, viewerId(c.var.principal)) : null;
+	if (!fork || fork.id !== pull.headRepoId || !canRead(c.var.principal, fork)) {
+		throw new HttpError(403, "HEAD_PRIVATE", "The changes are in a private fork; only people who can read it see them");
+	}
+	return pull.headRepoId;
 }
 
 async function reviewRequired(c: Context<App>, base: string): Promise<boolean> {
@@ -1612,10 +1685,7 @@ repo.get("/pulls/:number/files", async (c) => {
 		const comparison: Comparison = { base: commit.parents[0] ?? commit.hash, head: commit.hash, mergeBase: commit.parents[0] ?? null, commits: [commit], capped: false, diff };
 		return c.json({ comparison });
 	}
-	// Same-repository pull requests record this repository as the head; null means the fork was deleted.
-	if (pull.headRepoId === null) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
-	const headRepo = pull.headRepoId !== pull.repoId ? pull.headRepoId : null;
-	return c.json({ comparison: await project(c).pullCompare(pull.baseBranch, headRepo, pull.headBranch) });
+	return c.json({ comparison: await project(c).pullCompare(pull.baseBranch, await liveHead(c, pull), pull.headBranch) });
 });
 
 repo.post("/pulls/:number/reviews", async (c) => {
@@ -1644,7 +1714,13 @@ repo.post("/pulls/:number/reviews", async (c) => {
 	});
 	if (state === "commented" && !text && comments.length === 0) throw new HttpError(400, "INVALID_INPUT", "A review needs a comment, line comments, or an approval");
 	const user = await canPost(c);
-	const commit = typeof input.commit === "string" && /^[0-9a-f]{40}$/.test(input.commit) ? input.commit : null;
+	let commit = typeof input.commit === "string" && /^[0-9a-f]{40}$/.test(input.commit) ? input.commit : null;
+	if (state !== "commented") {
+		// A verdict is about the branch as it is now: recorded against its head, and refused if the reviewer saw an older one.
+		const head = (await project(c).pullCompare(pull.baseBranch, await liveHead(c, pull), pull.headBranch)).head;
+		if (commit && commit !== head) throw new HttpError(409, "HEAD_MOVED", `${pull.headBranch} has new commits since you looked; review them first`);
+		commit = head;
+	}
 	const id = await addReview(db(c.env), pull, user.id, { state, body: text, commit, comments });
 	announcePull(c, row, pull, "pull.reviewed", user, { state, review: { id, body: text.slice(0, 2000), comments: comments.length } });
 	return c.json({ review: id }, 201);
@@ -1657,14 +1733,23 @@ repo.post("/pulls/:number/merge", async (c) => {
 	const pull = await loadPull(c);
 	if (pull.mergedAt) throw new HttpError(409, "ALREADY_MERGED", "This pull request is already merged");
 	if (pull.state !== "open") throw new HttpError(409, "PULL_CLOSED", "Reopen the pull request to merge it");
-	const input = (await c.req.json().catch(() => ({}))) as { method?: MergeMethod };
+	const input = (await c.req.json().catch(() => ({}))) as { method?: MergeMethod; expectedHead?: string };
 	const method = input.method ?? "merge";
 	if (method !== "merge" && method !== "squash") throw new HttpError(400, "INVALID_INPUT", "method is merge or squash");
-	if ((await reviewRequired(c, pull.baseBranch)) && pull.decision !== "approved") {
-		throw new HttpError(403, "REVIEW_REQUIRED", `${pull.baseBranch} needs an approving review before pull requests merge into it`);
+	if (input.expectedHead !== undefined && (typeof input.expectedHead !== "string" || !/^[0-9a-f]{40}$/.test(input.expectedHead))) {
+		throw new HttpError(400, "INVALID_INPUT", "expectedHead is a commit hash");
 	}
-	if (pull.headRepoId === null) throw new HttpError(410, "HEAD_GONE", "The fork this pull request came from has been deleted");
-	const headRepo = pull.headRepoId !== pull.repoId ? pull.headRepoId : null;
+	// Whoever merges has to be able to see what they're merging.
+	const headRepo = await liveHead(c, pull);
+	let expectedHead = input.expectedHead;
+	if (await reviewRequired(c, pull.baseBranch)) {
+		// The approval has to be of the commit that merges, not of an earlier one.
+		const head = expectedHead ?? (await project(c).pullCompare(pull.baseBranch, headRepo, pull.headBranch)).head;
+		if (pull.decision !== "approved" || !(await approvedAt(db(c.env), pull, head))) {
+			throw new HttpError(403, "REVIEW_REQUIRED", `${pull.baseBranch} needs an approving review of the latest commit before pull requests merge into it`);
+		}
+		expectedHead = head;
+	}
 	const from = pull.headOwner && headRepo ? `${pull.headOwner}:${pull.headBranch}` : pull.headBranch;
 	const message = method === "squash" ? `${pull.title} (#${pull.number})\n\n${pull.body}`.trim() : `Merge pull request #${pull.number} from ${from}\n\n${pull.title}`;
 	const result = await project(c).mergePull({
@@ -1674,6 +1759,7 @@ repo.post("/pulls/:number/merge", async (c) => {
 		method,
 		message,
 		author: { name: user.username, email: `${user.username}@users.noreply.${new URL(c.req.url).hostname}` },
+		expectedHead,
 	});
 	await markPullMerged(db(c.env), pull, user.id, result.commit);
 	// "Fixes #n" in the description closes those issues too, as GitHub does.

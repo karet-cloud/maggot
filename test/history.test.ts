@@ -72,3 +72,18 @@ test("blame gives each line to the commit that last changed it", async () => {
 	assert.ok(result.lines.every((l) => !l.boundary));
 	assert.deepEqual(Object.keys(result.commits).sort(), ["c0", "c1", "c2", "c3"]);
 });
+
+test("blame past the history it looks at marks the older lines as boundary, and still answers for untouched files", async () => {
+	// 1,100 commits: the file is written once at the start, one line changes at the end, and LICENSE never changes.
+	const snapshots: Record<string, string>[] = [];
+	for (let i = 0; i < 1100; i++) snapshots.push({ "f.txt": i < 1099 ? "old\nkept\n" : "new\nkept\n", LICENSE: "MIT\n", "noise.txt": String(i) });
+	const { reader, hashes } = repo(snapshots);
+	const result = await blame(reader, hashes[1099], "f.txt");
+	assert.deepEqual(
+		result.lines.map((l) => [l.text, l.commit, l.boundary]),
+		[["new", "c1099", false], ["kept", "c100", true]],
+	);
+	const license = await blame(reader, hashes[1099], "LICENSE");
+	assert.equal(license.lines.length, 1);
+	assert.deepEqual([license.lines[0].commit, license.lines[0].boundary], ["c100", true], "unchanged in every commit looked at");
+});
