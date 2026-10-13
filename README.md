@@ -102,12 +102,16 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   most starred). Each repository's "Search code" tab searches its default branch: text files up to
   256 KB are kept in an FTS5 trigram index inside the repository's coordinator, updated from tree diffs
   whenever the branch moves, so any substring of three or more characters matches (shorter ones match
-  file names), case-insensitively, with the matching lines.
+  file names), case-insensitively, with the matching lines. Queries are up to 100 characters and
+  limited to 30 a minute; an update too large to apply file by file rebuilds the index instead.
 - **Webhooks**: in a repository's settings. Pushes (one delivery per branch moved, from git, the web
   editor or a merge), merges and agent task events are POSTed as JSON with `X-Megit-Event`,
   `X-Megit-Delivery` and `X-Megit-Signature-256: sha256=<HMAC-SHA256 of the body>`. Each hook gets a
   ping when it's added; deliveries are retried five times over about nine hours, kept (last 50) with
-  their responses, and can be redelivered. https only, no private addresses, no redirects followed.
+  their responses, and can be redelivered. A secret (8+ characters) is required. Pausing a hook drops
+  what it had queued; at most 500 deliveries wait per repository. https only, no private addresses, no
+  redirects followed. Merges also send a push delivery for the branch they moved, and deleting a
+  branch sends one with `deleted: true`.
 - **Notifications**: the bell in the top bar. Stars and forks of your repositories, agent tasks that
   merged, failed or hit conflicts, and webhooks that keep failing. Kept in D1, newest 200 per user.
 - **README**: the root README renders on the repository's front page (the Code tab), like GitHub.

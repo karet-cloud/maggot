@@ -276,6 +276,16 @@ export async function notify(env: Env, repoId: string, n: { kind: NotificationKi
 	await notifyUser(database, { userId: repo.ownerId, kind: n.kind, repoId, title: n.title, url: `/${repo.owner}/${repo.name}/${n.path}`, actor: null });
 }
 
+/** Whether `actor` already caused this kind of notification about this repository in the last day (star, unstar, star again). */
+export async function notifiedRecently(database: D1Database, userId: string, kind: NotificationKind, repoId: string, actor: string): Promise<boolean> {
+	const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+	const row = await database
+		.prepare(`select 1 from "notification" where "userId" = ? and "kind" = ? and "repoId" = ? and "actor" = ? and "createdAt" > ? limit 1`)
+		.bind(userId, kind, repoId, actor, since)
+		.first();
+	return row !== null;
+}
+
 export async function listNotifications(database: D1Database, userId: string, unreadOnly: boolean): Promise<{ notifications: Notification[]; unread: number }> {
 	const [list, count] = await database.batch<Record<string, unknown>>([
 		database

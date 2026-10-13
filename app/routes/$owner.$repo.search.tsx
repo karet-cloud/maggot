@@ -72,6 +72,7 @@ function CodeSearchPage() {
 					}
 					actions={r.matches > r.lines.length ? <span className="text-[11px] text-faint">{r.matches} matching lines</span> : undefined}
 				>
+					{r.lines.length === 0 && <p className="px-4 py-2 text-xs text-faint">Matched by its path.</p>}
 					{r.lines.length > 0 && (
 						<table className="w-full font-mono text-[12px] leading-5">
 							<tbody>
