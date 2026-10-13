@@ -100,5 +100,7 @@ From the three-model review of 2026-10-13 (GPT-6.1-Sol, GPT-6-Astra, Claude Fabl
 - **Agent fork credentials**: tasks hand out Artifacts tokens directly; proxy them through megit so the
   push limits and token revocation apply.
 - **Live sockets and revoked tokens**: a socket opened with a token stays open after the token is revoked.
+- **Web commits**: read the branch head with one ref lookup instead of the full advertisement; Edit
+  shows for tag refs typed into the URL.
 - **UI nits**: sign-in doesn't return to the page you came from; compare allows head = base; a profile for
   a user who doesn't exist says they have no repositories.

@@ -167,8 +167,8 @@ export function Panel({ title, actions, children, className }: { title?: ReactNo
 	return (
 		<section className={cx("rounded-lg border border-line bg-panel", className)}>
 			{(title || actions) && (
-				<header className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
-					<h3 className="text-xs font-semibold uppercase tracking-wide text-dim">{title}</h3>
+				<header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-line px-4 py-2.5">
+					<h3 className="min-w-0 text-xs font-semibold uppercase tracking-wide break-all text-dim">{title}</h3>
 					{actions}
 				</header>
 			)}

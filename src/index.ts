@@ -319,9 +319,10 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	}
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
-	await insertRepo(db(c.env), row, policy(c.env).reposPerUser);
+	await insertRepo(db(c.env), row, policy(c.env).reposPerUser, policy(c.env).userBytes);
 	let created: Project;
 	try {
+		if (source) await projects(c.env).getByName(source.id).forkInto(row.id, row.description ?? undefined);
 		created = await projects(c.env).getByName(row.id).create({
 			name: row.id,
 			title: row.name,
@@ -329,7 +330,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 			defaultBranch: input.importUrl || source ? undefined : defaultBranch,
 			importUrl: source ? undefined : input.importUrl?.trim() || undefined,
 			importBranch: source ? undefined : input.importBranch?.trim() || undefined,
-			forkFrom: source?.id,
+			forked: Boolean(source),
 			readme: source ? false : (input.readme ?? false),
 		});
 	} catch (err) {
@@ -399,8 +400,8 @@ app.post("/api/projects", async (c) => {
 
 const repo = new Hono<App>();
 
-/** Things anyone who can read a repository may do to it: star it, and fork it. */
-const READER_ACTIONS = /\/(star|forks)$/;
+/** Things anyone who can read a repository may do to it: star or unstar it, and fork it. Exact routes only. */
+const READER_ACTIONS: Record<string, string[]> = { "/star": ["PUT", "DELETE"], "/forks": ["POST"] };
 
 /**
  * Resolves the repository and checks access: reads (and starring or forking) need read access,
@@ -419,7 +420,7 @@ repo.use("*", async (c, next) => {
 	const row = await findRepo(db(c.env), owner, c.req.param("repo") ?? "");
 	const p = c.var.principal;
 	if (!row || !canRead(p, row)) throw new HttpError(404, "NOT_FOUND", `${owner}/${c.req.param("repo")} not found`);
-	const write = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS.test(c.req.path);
+	const write = !["GET", "HEAD"].includes(c.req.method) && !READER_ACTIONS[routeRest(c, "")]?.includes(c.req.method);
 	if (write && !canWrite(p, row)) throw new HttpError(p.kind === "anonymous" ? 401 : 403, "FORBIDDEN", "You can't change this repository");
 	c.set("projectId", row.id);
 	c.set("repo", row);
@@ -600,6 +601,8 @@ repo.delete("/branches/*", async (c) => {
 const MAX_EDIT_BYTES = 1024 * 1024;
 
 repo.post("/contents", async (c) => {
+	// Up to 20 files of 1 MB, JSON-escaped; anything far bigger isn't read at all.
+	if (Number(c.req.header("content-length") ?? 0) > 50 * MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", "That's too much for one web commit");
 	const row = c.var.repo;
 	const p = c.var.principal;
 	requireVerified(c.env, p);
@@ -612,7 +615,7 @@ repo.post("/contents", async (c) => {
 		baseCommit?: string | null;
 		newBranch?: string;
 		message?: string;
-		files?: { path?: string; content?: string | null }[];
+		files?: { path?: string; content?: string | null; previousPath?: string }[];
 	}>(c);
 	const message = input.message?.trim();
 	if (!message) throw new HttpError(400, "INVALID_INPUT", "A commit message is required");
@@ -626,14 +629,24 @@ repo.post("/contents", async (c) => {
 		if (f.content !== null && typeof f.content !== "string") throw new HttpError(400, "INVALID_INPUT", `Content for ${path} must be a string, or null to delete it`);
 		const content = f.content === null ? null : encoder.encode(f.content);
 		if (content && content.length > MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", `${path} is over 1 MB; push it with git instead`);
-		return { path, content };
+		// A rename keeps the file's mode (an executable stays executable).
+		return { path, content, modeFrom: f.previousPath ? normalizeRepoPath(f.previousPath) : undefined };
 	});
 	const who =
 		p.kind === "user"
 			? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` }
 			: { name: "megit", email: "admin@megit.dev" };
 	const branch = input.branch?.trim() || (await project(c).getProject()).defaultBranch;
+	// A web commit is a push: it has the push size limit, and has to fit what the repository and its
+	// owner have left.
+	const limits = policy(c.env);
+	let maxPackBytes = limits.pushBytes;
+	if (row) {
+		const used = await usage(db(c.env), row.ownerId);
+		maxPackBytes = Math.min(maxPackBytes, limits.repoBytes - row.bytes, limits.userBytes - used.bytes);
+	}
 	const result = await project(c).commitFiles({
+		maxPackBytes,
 		branch,
 		baseCommit: input.baseCommit,
 		newBranch: input.newBranch?.trim() || undefined,
@@ -645,13 +658,26 @@ repo.post("/contents", async (c) => {
 	return c.json(result, 201);
 });
 
-/** A repository path from a form: no leading or trailing slash, no empty, "." or ".." segments, nothing in .git. */
+/**
+ * A repository path from a form: no leading or trailing slash, no empty, "." or ".." segments, and
+ * nothing git refuses to check out (".git" in any spelling Windows or macOS treat as ".git").
+ */
 function normalizeRepoPath(raw: string): string {
 	const parts = raw.trim().replace(/^\/+|\/+$/g, "").split("/");
-	if (parts.length === 0 || parts.some((part) => part === "" || part === "." || part === ".." || part.toLowerCase() === ".git" || part.includes("\0"))) {
+	if (raw.length > 4096 || parts.length > 64 || parts.some((part) => part === "" || part === "." || part === ".." || /[\\\0]/.test(part) || isDotGit(part))) {
 		throw new HttpError(400, "INVALID_PATH", `${raw || "An empty path"} isn't a valid file path`);
 	}
 	return parts.join("/");
+}
+
+/** Git's own check (verify_path): HFS+ ignores some zero-width characters, NTFS trailing dots and spaces, alternate streams and 8.3 names. */
+function isDotGit(part: string): boolean {
+	const name = part
+		.replace(/[\u200b-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/g, "")
+		.toLowerCase()
+		.replace(/:.*$/, "")
+		.replace(/[. ]+$/, "");
+	return name === ".git" || /^git~\d+$/.test(name);
 }
 
 // ── Tasks ────────────────────────────────────────────────────────────────────

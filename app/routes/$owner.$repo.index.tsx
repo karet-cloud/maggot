@@ -36,11 +36,15 @@ function Code() {
 
 	// Links from READMEs guess whether a path is a file or a directory; correct the guess either way.
 	const listedAsDir = file !== undefined && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
-	const notADirectory = !file && path !== "" && tree.error instanceof ApiError && tree.error.status === 404 && /not a directory/.test(tree.error.message);
+	const missing = path !== "" && tree.error instanceof ApiError && tree.error.status === 404;
+	const notADirectory = !file && missing && /not a directory/.test(tree.error?.message ?? "");
 	useEffect(() => {
+		const parent = path.split("/").slice(0, -1).join("/") || undefined;
 		if (listedAsDir) void navigate({ search: { ref, path: file }, replace: true });
-		else if (notADirectory) void navigate({ search: { ref, path: path.split("/").slice(0, -1).join("/") || undefined, file: path }, replace: true });
-	}, [listedAsDir, notADirectory, navigate, ref, file, path]);
+		else if (notADirectory) void navigate({ search: { ref, path: parent, file: path }, replace: true });
+		// A folder that's gone (its last file was deleted): go up until one exists.
+		else if (missing) void navigate({ search: { ref, path: parent }, replace: true });
+	}, [listedAsDir, notADirectory, missing, navigate, ref, file, path]);
 
 	if (tree.data && !tree.data.commit && !ref && info.data) {
 		return (
@@ -240,7 +244,7 @@ function FileView({
 		<Panel
 			title={<span className="font-mono normal-case tracking-normal text-fg">{path}</span>}
 			actions={
-				<div className="flex items-center gap-1">
+				<div className="flex flex-wrap items-center justify-end gap-1">
 					{file.data !== undefined && !binary && <span className="mr-2 text-[11px] text-faint">{lines.length} lines</span>}
 					{markdown && (
 						<div className="mr-1 flex overflow-hidden rounded-md border border-line-strong">

@@ -112,22 +112,30 @@ export async function findRepo(database: D1Database, owner: string, name: string
  * Records a new repository, unless its owner already has `maxRepos`. The count and the insert are one
  * statement, so concurrent creates can't both take the last slot.
  */
-export async function insertRepo(database: D1Database, row: RepoRow, maxRepos: number): Promise<void> {
+export async function insertRepo(database: D1Database, row: RepoRow, maxRepos: number, maxBytes: number): Promise<void> {
 	let inserted: boolean;
 	try {
 		const result = await database
 			.prepare(
 				`insert into "repo" ("id", "ownerId", "owner", "name", "description", "visibility", "defaultBranch", "createdAt", "bytes", "forkOf")
-				 select ?, ?, ?, ?, ?, ?, ?, ?, ?, ? where (select count(*) from "repo" where "ownerId" = ?) < ?`,
+				 select ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+				 where (select count(*) from "repo" where "ownerId" = ?) < ?
+				 and (select coalesce(sum("bytes"), 0) from "repo" where "ownerId" = ?) + ? <= ?`,
 			)
-			.bind(row.id, row.ownerId, row.owner, row.name, row.description, row.visibility, row.defaultBranch, row.createdAt, row.bytes, row.forkOf, row.ownerId, maxRepos)
+			.bind(
+				row.id, row.ownerId, row.owner, row.name, row.description, row.visibility, row.defaultBranch, row.createdAt, row.bytes, row.forkOf,
+				row.ownerId, maxRepos,
+				row.ownerId, row.bytes, maxBytes,
+			)
 			.run();
 		inserted = result.meta.changes > 0;
 	} catch (err) {
 		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", `${row.owner}/${row.name} already exists`);
 		throw err;
 	}
-	if (!inserted) throw new HttpError(403, "QUOTA_EXCEEDED", `You have ${maxRepos} repositories, the most an account can have. Delete one to make room.`);
+	if (!inserted) {
+		throw new HttpError(403, "QUOTA_EXCEEDED", `That would take you past ${maxRepos} repositories or your storage quota. Delete a repository to make room.`);
+	}
 }
 
 /** Sets a repository's recorded size (after an import is measured). */
@@ -152,8 +160,8 @@ export async function deleteRepo(database: D1Database, id: string): Promise<void
 /** Repository columns plus counts; the one placeholder is the viewer's user id (for `starred`). */
 const LISTING = `select r.*,
 	(select count(*) from "star" s where s."repoId" = r."id") as "stars",
-	(select count(*) from "repo" f where f."forkOf" = r."id" and f."visibility" = 'public') as "forks",
-	exists (select 1 from "star" s where s."repoId" = r."id" and s."userId" = ?) as "starred",
+	(select count(*) from "repo" f where f."forkOf" = r."id" and (f."visibility" = 'public' or f."ownerId" = ?1)) as "forks",
+	exists (select 1 from "star" s where s."repoId" = r."id" and s."userId" = ?1) as "starred",
 	p."owner" as "parentOwner", p."name" as "parentName", p."visibility" as "parentVisibility", p."ownerId" as "parentOwnerId"
 	from "repo" r left join "repo" p on p."id" = r."forkOf"`;
 

@@ -14,6 +14,10 @@ export interface Identity {
 export interface FileChange {
 	path: string;
 	content: Uint8Array | null;
+	/** Set the mode (rather than keeping the existing file's): true for 100755, false for 100644. */
+	executable?: boolean;
+	/** The path must not exist yet (the new name of a renamed file). */
+	create?: boolean;
 }
 
 export interface CommitRequest {
@@ -27,6 +31,8 @@ export interface CommitRequest {
 	author: Identity;
 	/** Unix seconds. */
 	time: number;
+	/** Refuse to push a pack bigger than this. */
+	maxPackBytes: number;
 }
 
 type ObjectType = "commit" | "tree" | "blob";
@@ -42,21 +48,24 @@ const encoder = new TextEncoder();
 
 /** Builds the commit and pushes it. Returns the new commit's hash and the pack's size in bytes. */
 export async function commitChanges(repo: ObjectReader, remote: RemoteAccess, req: CommitRequest): Promise<{ commit: string; packBytes: number }> {
-	const objects: GitObject[] = [];
+	// Keyed by hash: the same content twice (two identical files) goes in the pack once, as git requires.
+	const objects = new Map<string, GitObject>();
 	const add = async (type: ObjectType, body: Uint8Array) => {
-		const object = { type, body, hash: await objectHash(type, body) };
-		objects.push(object);
-		return object.hash;
+		const hash = await objectHash(type, body);
+		if (!objects.has(hash)) objects.set(hash, { type, body, hash });
+		return hash;
 	};
 
 	const root = await writeTree(repo, req.parent?.treeHash ?? null, "", req.changes, add);
 	const tree = root ?? (await add("tree", new Uint8Array()));
+	if (req.parent && tree === req.parent.treeHash) throw new NoChanges();
 	const who = `${req.author.name.replace(/[<>\n]/g, "")} <${req.author.email.replace(/[<>\n]/g, "")}> ${req.time} +0000`;
 	const commit = await add(
 		"commit",
 		encoder.encode(`tree ${tree}\n${req.parent ? `parent ${req.parent.hash}\n` : ""}author ${who}\ncommitter ${who}\n\n${req.message.trim()}\n`),
 	);
-	const pack = await packObjects(objects);
+	const pack = await packObjects([...objects.values()]);
+	if (pack.length > req.maxPackBytes) throw new TooLarge(pack.length, req.maxPackBytes);
 	await pushPack(remote, `refs/heads/${req.branch}`, req.create || !req.parent ? null : req.parent.hash, commit, pack);
 	return { commit, packBytes: pack.length };
 }
@@ -89,6 +98,11 @@ async function writeTree(
 	for (const [name, change] of direct) {
 		const existing = entries.get(name);
 		if (existing?.type === "tree") throw new PathError(`${prefix}${name} is a directory`);
+		if (existing && change.create) throw new PathError(`${prefix}${name} already exists`);
+		// Links and submodules aren't text files; writing one here would quietly turn it into one.
+		if (change.content !== null && (existing?.type === "symlink" || existing?.type === "gitlink")) {
+			throw new PathError(`${prefix}${name} is a ${existing.type === "symlink" ? "symbolic link" : "submodule"}; change it with git`);
+		}
 		if (change.content === null) {
 			if (!existing) throw new PathError(`${prefix}${name} doesn't exist`);
 			entries.delete(name);
@@ -96,7 +110,8 @@ async function writeTree(
 		}
 		const blob = await add("blob", change.content);
 		// Edits keep the file's mode (an executable stays executable); new files are plain files.
-		const mode = existing?.type === "exec" ? "100755" : "100644";
+		const executable = change.executable ?? existing?.type === "exec";
+		const mode = executable ? "100755" : "100644";
 		entries.set(name, { name, mode, type: mode === "100755" ? "exec" : "blob", hash: blob });
 	}
 	for (const [name, sub] of nested) {
@@ -111,6 +126,22 @@ async function writeTree(
 }
 
 export class PathError extends Error {}
+
+export class NoChanges extends Error {
+	constructor() {
+		super("Nothing changed");
+	}
+}
+
+export class TooLarge extends Error {
+	readonly size: number;
+	readonly limit: number;
+	constructor(size: number, limit: number) {
+		super(`This commit is ${size} bytes packed, more than the ${Math.max(limit, 0)} bytes allowed`);
+		this.size = size;
+		this.limit = limit;
+	}
+}
 
 /** Git's tree format: entries sorted by name, directories compared as if their names ended in "/". */
 function serializeTree(entries: TreeEntry[]): Uint8Array {

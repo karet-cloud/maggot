@@ -577,3 +577,47 @@ test("people star and fork repositories, and commit files from the browser", asy
 	assert.equal(counted.repo.forks, 1);
 	assert.equal((await as(bob)(`${source}/forks`, { method: "POST", body: JSON.stringify({}) })).status, 409, "the name is taken");
 });
+
+test("only the exact star and fork routes skip the owner check; web commits keep git's rules and limits", async () => {
+	const ada = await newUser("exact-a");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers } });
+	for (const name of ["star", "forks"]) {
+		assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name, readme: true }) })).status, 201);
+		assert.equal((await as(null)(`/repos/${ada.username}/${name}`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 401);
+		assert.equal((await as(null)(`/repos/${ada.username}/${name}`, { method: "DELETE" })).status, 401);
+	}
+	const repo = `/repos/${ada.username}/star`;
+	const head = async () => ((await (await as(ada)(repo)).json()) as { project: { head: string } }).project.head;
+	const commit = (body: Record<string, unknown>) => as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ message: "m", ...body }) });
+	assert.equal((await commit({ baseCommit: await head(), newBranch: "topic/star", files: [{ path: "x", content: "x" }] })).status, 201);
+	assert.equal((await as(null)(`${repo}/branches/topic/star`, { method: "DELETE" })).status, 401, "a branch named like the route is still the owner's");
+
+	// Paths git refuses to check out, and names it refuses as branches, are refused here too.
+	for (const path of [".git/config", ".GIT./config", "git~1/hooks/x", ".g‌it/config", "a\\b"]) {
+		assert.equal((await commit({ files: [{ path, content: "x" }] })).status, 400, path);
+	}
+	for (const name of ["HEAD", "-x", "a..b"]) assert.equal((await commit({ newBranch: name, files: [{ path: "y", content: "y" }] })).status, 400, name);
+
+	// A web commit can't take a repository past its size limit (POLICY.repoBytes).
+	const noise = (await import("node:crypto")).randomBytes(400_000).toString("base64");
+	const big = await commit({ baseCommit: await head(), files: [{ path: "noise.txt", content: noise }] });
+	assert.equal(big.status, 413, await big.clone().text());
+
+	// Renaming an executable keeps it executable.
+	const exec = promisify(execFile);
+	const dir = join(root, "modes");
+	const url = new URL(`${api}/${ada.username}/star.git`);
+	url.username = ada.username;
+	url.password = ada.token;
+	await exec("git", ["clone", "-q", url.toString(), dir]);
+	await writeFile(join(dir, "run.sh"), "#!/bin/sh\necho hi\n", { mode: 0o755 });
+	await exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "x"], { cwd: dir }).catch(() => {});
+	await exec("git", ["add", "run.sh"], { cwd: dir });
+	await exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "add run.sh"], { cwd: dir });
+	await exec("git", ["push", "-q", "origin", "HEAD"], { cwd: dir });
+	const renamed = await commit({ baseCommit: await head(), files: [{ path: "run.sh", content: null }, { path: "bin/run.sh", content: "#!/bin/sh\necho hi\n", previousPath: "run.sh" }] });
+	assert.equal(renamed.status, 201, await renamed.clone().text());
+	await exec("git", ["pull", "-q", "origin", "master"], { cwd: dir });
+	assert.match((await exec("git", ["ls-tree", "HEAD", "bin/run.sh"], { cwd: dir })).stdout, /^100755 /);
+});
