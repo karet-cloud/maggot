@@ -90,6 +90,14 @@ One Worker serves Git at `/<owner>/<repo>.git`, the API at `/api`, and the UI ev
   number (shift-click for a range) to link to `#L10-L20`, and "Permalink" copies that link pinned to the
   commit. Markdown renders (relative links and images resolve inside the repo), images preview, and
   every file has Raw and Download. "Download" on the tree gets the whole ref as `.zip` or `.tar.gz`.
+- **Stars and forks**: star any repository you can see (counts on every list; a profile's Stars tab
+  lists them). Fork copies a repository with every branch and tag into your account (a fork of a
+  private repository stays private, and starts out counting its source's size against your quota);
+  the fork shows where it came from, and the source lists its forks.
+- **Edit in the browser**: Edit, Delete and Add file on any branch you can push to. The Worker builds
+  the blob, the trees on the changed path and the commit itself, packs them and pushes them with one
+  receive-pack request, so nothing is cloned. Commit to the branch or to a new one; if the branch moved
+  since the editor opened, the commit is refused rather than overwriting. Text files up to 1 MB.
 - **README**: the root README renders on the repository's front page (the Code tab), like GitHub.
 - **History**: first-parent history of the default branch; every commit opens a commit page with its
   message, author, parents and diff (unified or split).
@@ -194,11 +202,14 @@ the owner); anything else needs the owner. A private repository someone can't re
 | POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
 | GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
 | GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
-| GET | `/repos` | `?owner=&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
+| GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
 | POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, readme? }` | `{ repo, project }` (signed-in users) |
 | GET | `/repos/:owner/:repo` | | `{ project, repo }` |
 | PATCH | `/repos/:owner/:repo` | `{ visibility?, description? }` | `{ repo }` (owner) |
-| DELETE | `/repos/:owner/:repo` | | deletes it, its forks and state (owner) |
+| DELETE | `/repos/:owner/:repo` | | deletes it, its agent forks and state (owner) |
+| PUT / DELETE | `/repos/:owner/:repo/star` | | star or unstar (signed in, read access) → `{ starred, stars }` |
+| GET / POST | `/repos/:owner/:repo/forks` | `{ name? }` | list public forks; fork into your account (read access) |
+| POST | `/repos/:owner/:repo/contents` | `{ branch?, baseCommit?, newBranch?, message, files: [{ path, content \| null }] }` | commits up to 20 text files (null deletes); 409 if `branch` moved past `baseCommit` |
 
 Admin and per-repository routes: Errors look like `{ "error": { "code": "NOT_FOUND", "message": "…" } }`. Response
 shapes are the types in [`src/api.ts`](src/api.ts).
@@ -265,7 +276,8 @@ src/git-http.ts       git clone/fetch/push at /<owner>/<repo>.git, proxied to Ar
 src/project.ts        ProjectCoordinator DO (tasks, fork + merge queues, events, WebSocket) + Registry DO
 src/git/workspace.ts  In-memory git workspace: fetch, 3-way merge, changed files, push
 src/git/diff.ts       Tree diffs and merge-base walks over the Artifacts object reads
-src/git/protocol.ts   Branch listing and deletion over Git smart HTTP (the binding has no ref API)
+src/git/protocol.ts   Branch listing, deletion, pushes and repo measuring over Git smart HTTP
+src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
 src/archive.ts        Streaming .tar.gz / .zip of a tree
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)

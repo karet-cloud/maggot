@@ -1,13 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link, Outlet } from "@tanstack/react-router";
-import { Bot, FolderCode, GitBranch, History, Plus, Radio, Settings, Terminal } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link, Outlet, useNavigate } from "@tanstack/react-router";
+import { Bot, FolderCode, GitBranch, GitFork, History, Plus, Radio, Settings, Star, Terminal } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
-import { VisibilityBadge } from "../components/repos.tsx";
-import { Button, CopyField, cx, Empty, Modal, Oid, Panel, Spinner } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type Task } from "../lib/api.ts";
+import { ForkedFrom, VisibilityBadge } from "../components/repos.tsx";
+import { Button, CopyField, cx, Empty, ErrorNote, Field, Input, Modal, Oid, Panel, Spinner } from "../components/ui.tsx";
+import { api, ApiError, keys, repoParams, type RepoInfo, type Task } from "../lib/api.ts";
+import { useNeedsVerification, useViewer } from "./__root.tsx";
 import { useProjectTasks } from "../lib/queries.ts";
 import { LiveContext, useProjectLive, type LiveStatus } from "../lib/live.ts";
 
@@ -27,6 +28,7 @@ function ProjectLayout() {
 	const byId = useMemo(() => new Map<string, Task>((tasks.data ?? []).map((t) => [t.id, t])), [tasks.data]);
 	const [creating, setCreating] = useState(false);
 	const [connecting, setConnecting] = useState(false);
+	const [forking, setForking] = useState(false);
 	const p = info.data;
 
 	if (info.error) {
@@ -52,9 +54,27 @@ function ProjectLayout() {
 								{p && <VisibilityBadge visibility={p.repo.visibility} />}
 								<LiveDot status={live.status} />
 							</div>
+							{p?.repo.forkOf && <ForkedFrom source={p.repo.forkOf} className="mt-1" />}
 							<p className="mt-1 text-sm text-dim">{p ? p.description || "No description" : <Spinner className="inline" />}</p>
 						</div>
 						<div className="flex flex-wrap items-center gap-2">
+							{p && <StarButton project={project} repo={p.repo} />}
+							{p && (
+								<div className="flex items-center">
+									<Button onClick={() => setForking(true)} className="rounded-r-none" disabled={!p.head} title={p.head ? "Copy this repository, with all its branches, into your account" : "Nothing to fork yet"}>
+										<GitFork className="size-4" />
+										Fork
+									</Button>
+									<Link
+										to="/$owner/$repo/forks"
+										params={{ owner, repo }}
+										className="rounded-r-md border border-l-0 border-line bg-raised px-2.5 py-1.5 text-sm tabular-nums text-dim hover:text-fg"
+										title="Forks"
+									>
+										{p.repo.forks}
+									</Link>
+								</div>
+							)}
 							<Button onClick={() => setConnecting(true)}>
 								<Terminal className="size-4" />
 								Clone / push
@@ -125,10 +145,101 @@ function ProjectLayout() {
 			<Modal open={connecting} onClose={() => setConnecting(false)} title={`Use ${project} with git`}>
 				{p && <RepoCommands repo={p.repo} empty={!p.head} />}
 			</Modal>
+			<Modal open={forking} onClose={() => setForking(false)} title={`Fork ${project}`}>
+				{p && <ForkDialog project={project} repo={p.repo} onClose={() => setForking(false)} />}
+			</Modal>
 			<Modal open={creating} onClose={() => setCreating(false)} title="New task">
 				<NewTask project={project} onClose={() => setCreating(false)} />
 			</Modal>
 		</LiveContext.Provider>
+	);
+}
+
+function StarButton({ project, repo }: { project: string; repo: RepoInfo }) {
+	const viewer = useViewer();
+	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const star = useMutation({
+		mutationFn: (starred: boolean) => api.star(project, starred),
+		onSuccess: ({ starred, stars }) => {
+			queryClient.setQueryData(keys.project(project), (old: Awaited<ReturnType<typeof api.project>> | undefined) =>
+				old ? { ...old, repo: { ...old.repo, starred, stars } } : old,
+			);
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+		},
+	});
+	return (
+		<div className="flex items-center">
+			<Button
+				onClick={() => (viewer.data ? star.mutate(!repo.starred) : navigate({ to: "/login" }))}
+				busy={star.isPending}
+				className="rounded-r-none"
+				title={viewer.data ? (repo.starred ? "Unstar" : "Star this repository") : "Sign in to star"}
+			>
+				<Star className={cx("size-4", repo.starred && "fill-amber-300 text-amber-300")} />
+				{repo.starred ? "Starred" : "Star"}
+			</Button>
+			<span className="rounded-r-md border border-l-0 border-line bg-raised px-2.5 py-1.5 text-sm tabular-nums text-dim">{repo.stars}</span>
+		</div>
+	);
+}
+
+function ForkDialog({ project, repo, onClose }: { project: string; repo: RepoInfo; onClose: () => void }) {
+	const viewer = useViewer();
+	const needsVerification = useNeedsVerification();
+	const queryClient = useQueryClient();
+	const navigate = useNavigate();
+	const [name, setName] = useState(repo.name);
+	const fork = useMutation({
+		mutationFn: () => api.fork(project, name.trim()),
+		onSuccess: (created) => {
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+			void queryClient.invalidateQueries({ queryKey: keys.me });
+			void queryClient.invalidateQueries({ queryKey: keys.forks(project) });
+			onClose();
+			void navigate({ to: "/$owner/$repo", params: { owner: created.owner, repo: created.name } });
+		},
+	});
+	if (!viewer.data) {
+		return (
+			<p className="text-sm text-dim">
+				<Link to="/login" className="text-accent hover:underline">
+					Sign in
+				</Link>{" "}
+				to fork this repository.
+			</p>
+		);
+	}
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				fork.mutate();
+			}}
+			className="space-y-4"
+		>
+			<p className="text-sm text-dim">
+				A fork is your own copy of the repository, with every branch and tag. Push to it, then compare it with the original.
+				{repo.visibility === "private" && " It stays private."}
+			</p>
+			<div className="flex items-end gap-2">
+				<div className="pb-2 font-mono text-sm text-dim">{viewer.data.username} /</div>
+				<div className="flex-1">
+					<Field label="Repository name">
+						<Input value={name} onChange={(e) => setName(e.target.value)} pattern="[A-Za-z0-9._\-]{1,100}" autoFocus required />
+					</Field>
+				</div>
+			</div>
+			{needsVerification && <p className="text-xs text-amber-200">Verify your email address before forking.</p>}
+			<ErrorNote error={fork.error} />
+			<div className="flex justify-end gap-2">
+				<Button onClick={onClose}>Cancel</Button>
+				<Button type="submit" variant="primary" busy={fork.isPending} disabled={needsVerification}>
+					<GitFork className="size-4" />
+					Create fork
+				</Button>
+			</div>
+		</form>
 	);
 }
 

@@ -61,6 +61,14 @@ export interface TokenInfo {
 	lastUsedAt: string | null;
 }
 
+export interface RepoFilter {
+	owner?: string;
+	/** A username: the repositories they starred. */
+	starredBy?: string;
+	q?: string;
+	sort?: "created" | "stars";
+}
+
 export interface CreateRepoInput {
 	name: string;
 	description?: string;
@@ -83,7 +91,11 @@ export const api = {
 	changePassword: (currentPassword: string, newPassword: string) =>
 		call<unknown>("POST", "/auth/change-password", { currentPassword, newPassword, revokeOtherSessions: true }),
 
-	repos: (owner?: string) => call<{ repos: RepoInfo[] }>("GET", `/repos${owner ? `?owner=${encodeURIComponent(owner)}` : ""}`).then((r) => r.repos),
+	repos: (filter: string | RepoFilter = {}) => {
+		const f: RepoFilter = typeof filter === "string" ? { owner: filter } : filter;
+		const q = new URLSearchParams(Object.entries(f).filter((e): e is [string, string] => Boolean(e[1])));
+		return call<{ repos: RepoInfo[] }>("GET", `/repos${q.size ? `?${q}` : ""}`).then((r) => r.repos);
+	},
 	createRepo: (input: CreateRepoInput) => call<{ repo: RepoInfo }>("POST", "/repos", input).then((r) => r.repo),
 	/** The repository's Git state (head, task counts) with its settings, which win where both have a field. */
 	project: (project: string) =>
@@ -96,6 +108,14 @@ export const api = {
 	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
+	/** Commits files from the web editor; `content: null` deletes a file. */
+	commitFiles: (
+		project: string,
+		input: { branch: string; baseCommit: string | null; newBranch?: string; message: string; files: { path: string; content: string | null }[] },
+	) => call<{ commit: string; branch: string }>("POST", `${p(project)}/contents`, input),
+	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
+	forks: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/forks`).then((r) => r.repos),
+	fork: (project: string, name: string) => call<{ repo: RepoInfo }>("POST", `${p(project)}/forks`, { name }).then((r) => r.repo),
 
 	tokens: () => call<{ tokens: TokenInfo[] }>("GET", "/tokens").then((r) => r.tokens),
 	createToken: (name: string) => call<{ token: string; info: TokenInfo }>("POST", "/tokens", { name }),
@@ -151,7 +171,8 @@ export const api = {
 export const keys = {
 	me: ["me"] as const,
 	config: ["config"] as const,
-	repos: (owner?: string) => ["repos", owner ?? ""] as const,
+	repos: (filter: string | RepoFilter = "") => ["repos", filter] as const,
+	forks: (project: string) => ["project", project, "forks"] as const,
 	tokens: ["tokens"] as const,
 	projects: ["projects"] as const,
 	project: (project: string) => ["project", project] as const,

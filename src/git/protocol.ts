@@ -56,22 +56,40 @@ export async function measureRepository(remote: RemoteAccess, limit: number): Pr
 
 /** Deletes `refs/heads/<branch>` if it still points at `oid`. */
 export async function deleteBranch(remote: RemoteAccess, branch: string, oid: string): Promise<void> {
-	const command = `${oid} ${ZERO} refs/heads/${branch}\0report-status delete-refs agent=megit\n`;
+	await receivePack(remote, `refs/heads/${branch}`, oid, ZERO, new Uint8Array(), `Deleting ${branch}`);
+}
+
+/**
+ * Pushes `pack` and moves `ref` from `from` (null: create it) to `to`, atomically: the push is
+ * refused if the ref has moved since.
+ */
+export async function pushPack(remote: RemoteAccess, ref: string, from: string | null, to: string, pack: Uint8Array): Promise<void> {
+	await receivePack(remote, ref, from ?? ZERO, to, pack, `Updating ${ref.replace(/^refs\/heads\//, "")}`);
+}
+
+export class RefUpdateRejected extends Error {}
+
+async function receivePack(remote: RemoteAccess, ref: string, from: string, to: string, pack: Uint8Array, what: string): Promise<void> {
+	const capabilities = to === ZERO ? "report-status delete-refs agent=megit" : "report-status agent=megit";
+	const commands = new TextEncoder().encode(`${pkt(`${from} ${to} ${ref}\0${capabilities}\n`)}0000`);
+	const body = new Uint8Array(commands.length + pack.length);
+	body.set(commands);
+	body.set(pack, commands.length);
 	const res = await fetch(`${remote.url}/git-receive-pack`, {
 		method: "POST",
 		headers: headers(remote, {
 			"content-type": "application/x-git-receive-pack-request",
 			accept: "application/x-git-receive-pack-result",
 		}),
-		body: `${pkt(command)}0000`,
+		body,
 	});
-	if (!res.ok) throw new Error(`Deleting ${branch} failed: HTTP ${res.status}`);
-	// report-status must say the (empty) pack unpacked and this exact ref updated; anything else is a failure.
+	if (!res.ok) throw new Error(`${what} failed: HTTP ${res.status}`);
+	// report-status must say the pack unpacked and this exact ref updated; anything else is a failure.
 	const report = pktLines(new Uint8Array(await res.arrayBuffer())).map((l) => l.trimEnd());
-	if (report[0] !== "unpack ok" || !report.includes(`ok refs/heads/${branch}`)) {
+	if (report[0] !== "unpack ok" || !report.includes(`ok ${ref}`)) {
 		const reason =
 			report.find((l) => l.startsWith("ng ")) ?? report.find((l) => l.startsWith("unpack ") && l !== "unpack ok") ?? "no report-status in the response";
-		throw new Error(`Deleting ${branch} failed: ${reason}`);
+		throw reason.startsWith("ng ") ? new RefUpdateRejected(`${what} failed: ${reason}`) : new Error(`${what} failed: ${reason}`);
 	}
 }
 

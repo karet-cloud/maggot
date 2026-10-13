@@ -24,6 +24,8 @@ import { Route as OwnerRepoIndexRouteImport } from './routes/$owner.$repo.index'
 import { Route as OwnerRepoAgentsRouteImport } from './routes/$owner.$repo.agents'
 import { Route as OwnerRepoBranchesRouteImport } from './routes/$owner.$repo.branches'
 import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.compare'
+import { Route as OwnerRepoEditRouteImport } from './routes/$owner.$repo.edit'
+import { Route as OwnerRepoForksRouteImport } from './routes/$owner.$repo.forks'
 import { Route as OwnerRepoHistoryRouteImport } from './routes/$owner.$repo.history'
 import { Route as OwnerRepoSettingsRouteImport } from './routes/$owner.$repo.settings'
 import { Route as OwnerRepoCommitHashRouteImport } from './routes/$owner.$repo.commit.$hash'
@@ -104,6 +106,16 @@ const OwnerRepoCompareRoute = OwnerRepoCompareRouteImport.update({
   path: '/compare',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
+const OwnerRepoEditRoute = OwnerRepoEditRouteImport.update({
+  id: '/edit',
+  path: '/edit',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoForksRoute = OwnerRepoForksRouteImport.update({
+  id: '/forks',
+  path: '/forks',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
 const OwnerRepoHistoryRoute = OwnerRepoHistoryRouteImport.update({
   id: '/history',
   path: '/history',
@@ -140,6 +152,8 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/edit': typeof OwnerRepoEditRoute
+  '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
@@ -160,6 +174,8 @@ export interface FileRoutesByTo {
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/edit': typeof OwnerRepoEditRoute
+  '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo': typeof OwnerRepoIndexRoute
@@ -182,6 +198,8 @@ export interface FileRoutesById {
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
+  '/$owner/$repo/edit': typeof OwnerRepoEditRoute
+  '/$owner/$repo/forks': typeof OwnerRepoForksRoute
   '/$owner/$repo/history': typeof OwnerRepoHistoryRoute
   '/$owner/$repo/settings': typeof OwnerRepoSettingsRoute
   '/$owner/$repo/': typeof OwnerRepoIndexRoute
@@ -205,6 +223,8 @@ export interface FileRouteTypes {
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
+    | '/$owner/$repo/edit'
+    | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
@@ -225,6 +245,8 @@ export interface FileRouteTypes {
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
+    | '/$owner/$repo/edit'
+    | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
     | '/$owner/$repo/settings'
     | '/$owner/$repo'
@@ -246,6 +268,8 @@ export interface FileRouteTypes {
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
+    | '/$owner/$repo/edit'
+    | '/$owner/$repo/forks'
     | '/$owner/$repo/history'
     | '/$owner/$repo/settings'
     | '/$owner/$repo/'
@@ -374,6 +398,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoCompareRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/edit': {
+      id: '/$owner/$repo/edit'
+      path: '/edit'
+      fullPath: '/$owner/$repo/edit'
+      preLoaderRoute: typeof OwnerRepoEditRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/forks': {
+      id: '/$owner/$repo/forks'
+      path: '/forks'
+      fullPath: '/$owner/$repo/forks'
+      preLoaderRoute: typeof OwnerRepoForksRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/history': {
       id: '/$owner/$repo/history'
       path: '/history'
@@ -409,6 +447,8 @@ interface OwnerRepoRouteChildren {
   OwnerRepoAgentsRoute: typeof OwnerRepoAgentsRoute
   OwnerRepoBranchesRoute: typeof OwnerRepoBranchesRoute
   OwnerRepoCompareRoute: typeof OwnerRepoCompareRoute
+  OwnerRepoEditRoute: typeof OwnerRepoEditRoute
+  OwnerRepoForksRoute: typeof OwnerRepoForksRoute
   OwnerRepoHistoryRoute: typeof OwnerRepoHistoryRoute
   OwnerRepoSettingsRoute: typeof OwnerRepoSettingsRoute
   OwnerRepoIndexRoute: typeof OwnerRepoIndexRoute
@@ -420,6 +460,8 @@ const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
   OwnerRepoAgentsRoute: OwnerRepoAgentsRoute,
   OwnerRepoBranchesRoute: OwnerRepoBranchesRoute,
   OwnerRepoCompareRoute: OwnerRepoCompareRoute,
+  OwnerRepoEditRoute: OwnerRepoEditRoute,
+  OwnerRepoForksRoute: OwnerRepoForksRoute,
   OwnerRepoHistoryRoute: OwnerRepoHistoryRoute,
   OwnerRepoSettingsRoute: OwnerRepoSettingsRoute,
   OwnerRepoIndexRoute: OwnerRepoIndexRoute,

@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { BookLock, BookMarked } from "lucide-react";
+import { BookLock, BookMarked, GitFork, Star } from "lucide-react";
 import type { RepoInfo } from "../lib/api.ts";
 import { cx, Empty, TimeAgo } from "./ui.tsx";
 
@@ -13,6 +13,18 @@ export function VisibilityBadge({ visibility }: { visibility: RepoInfo["visibili
 		>
 			{visibility === "private" ? "Private" : "Public"}
 		</span>
+	);
+}
+
+export function ForkedFrom({ source, className }: { source: { owner: string; name: string }; className?: string }) {
+	return (
+		<p className={cx("flex items-center gap-1 text-[11px] text-faint", className)}>
+			<GitFork className="size-3" />
+			forked from{" "}
+			<Link to="/$owner/$repo" params={{ owner: source.owner, repo: source.name }} className="font-mono text-dim hover:text-accent hover:underline">
+				{source.owner}/{source.name}
+			</Link>
+		</p>
 	);
 }
 
@@ -31,9 +43,25 @@ export function RepoList({ repos, showOwner, empty }: { repos: RepoInfo[]; showO
 							</Link>
 							<VisibilityBadge visibility={r.visibility} />
 						</div>
+						{r.forkOf && <ForkedFrom source={r.forkOf} className="mt-0.5" />}
 						{r.description && <p className="mt-1 text-xs text-dim">{r.description}</p>}
-						<p className="mt-1 text-[11px] text-faint">
-							<span className="font-mono">{r.defaultBranch}</span> · created <TimeAgo at={r.createdAt} />
+						<p className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-faint">
+							<span className="font-mono">{r.defaultBranch}</span>
+							{r.stars > 0 && (
+								<span className="flex items-center gap-1">
+									<Star className="size-3" />
+									{r.stars}
+								</span>
+							)}
+							{r.forks > 0 && (
+								<span className="flex items-center gap-1">
+									<GitFork className="size-3" />
+									{r.forks}
+								</span>
+							)}
+							<span>
+								created <TimeAgo at={r.createdAt} />
+							</span>
 						</p>
 					</div>
 				</li>

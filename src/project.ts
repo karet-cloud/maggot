@@ -20,7 +20,8 @@ import {
 } from "./api.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, walkToMainline, type ObjectReader } from "./git/diff.ts";
-import { deleteBranch, listBranches } from "./git/protocol.ts";
+import { commitChanges, PathError, type FileChange } from "./git/commit.ts";
+import { deleteBranch, listBranches, RefUpdateRejected } from "./git/protocol.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
@@ -54,8 +55,32 @@ export interface CreateProjectInput {
 	defaultBranch?: string;
 	importUrl?: string;
 	importBranch?: string;
+	/** The README's heading, when the project name is an internal id. */
+	title?: string;
+	/** Fork this repository (an Artifacts repo name) with all of its branches and tags. */
+	forkFrom?: string;
 	/** Seed a README so the repo starts with a commit (default true). Leave it out to push an existing repo. */
 	readme?: boolean;
+}
+
+export interface CommitFilesInput {
+	branch: string;
+	/** The branch head the edit started from; null for an empty repository. */
+	baseCommit?: string | null;
+	newBranch?: string;
+	changes: FileChange[];
+	message: string;
+	author: Identity;
+}
+
+/** Git's ref name rules, as far as branch names typed into a form go. */
+export function validBranchName(name: string): boolean {
+	return (
+		/^[A-Za-z0-9._/-]{1,200}$/.test(name) &&
+		!name.split("/").some((part) => part === "" || part.startsWith(".") || part.endsWith(".lock")) &&
+		!name.includes("..") &&
+		!name.endsWith(".")
+	);
 }
 
 export interface CreateTaskInput {
@@ -156,14 +181,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (this.metaOrNull()) throw new HttpError(409, "ALREADY_EXISTS", `Project ${input.name} already exists`);
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
 		try {
-			created = await retrying(() =>
-				input.importUrl
+			created = await retrying(async () => {
+				if (input.forkFrom) {
+					using source = await this.store.get(input.forkFrom);
+					return source.fork(input.name, { description: input.description, defaultBranchOnly: false });
+				}
+				return input.importUrl
 					? this.store.import({
 							source: { url: input.importUrl, branch: input.importBranch },
 							target: { name: input.name, opts: { description: input.description } },
 						})
-					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" }),
-			);
+					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
+			});
 		} catch (err) {
 			// The repo exists but this coordinator never recorded it: a previous create died partway
 			// (for example, the object was reset mid-request). Adopt it and finish the setup.
@@ -179,11 +208,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			using repo = await this.store.get(created.name);
 			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
 		})();
-		if (empty && !input.importUrl && input.readme !== false) {
+		if (empty && !input.importUrl && !input.forkFrom && input.readme !== false) {
 			const seed = new Workspace(created.defaultBranch, MERGE_IDENTITY);
 			await seed.seed(
 				{ url: created.remote, token: created.token },
-				{ "README.md": `# ${input.name}\n\n${input.description ?? ""}\n` },
+				{ "README.md": `# ${input.title ?? input.name}\n\n${input.description ?? ""}\n` },
 				"Initial commit",
 			);
 		}
@@ -196,7 +225,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			createdAt: new Date().toISOString(),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
-		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl) });
+		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forkFrom) });
 		return this.getProject();
 	}
 
@@ -436,6 +465,46 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const head = (await listBranches(access)).get(name);
 		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
 		await deleteBranch(access, name, head);
+	}
+
+	/**
+	 * Commits file changes made in the browser to `branch` (or to a new branch `newBranch` started from
+	 * it). `baseCommit` is the commit the editor loaded; if the branch has moved since, nothing is
+	 * written and the caller is told to reload.
+	 */
+	async commitFiles(input: CommitFilesInput): Promise<{ commit: string; branch: string; packBytes: number }> {
+		const meta = this.meta();
+		const access = await this.baseAccess(meta);
+		const refs = await listBranches(access);
+		const head = refs.get(input.branch) ?? null;
+		if (!head && (refs.size > 0 || input.branch !== meta.defaultBranch)) throw new HttpError(404, "NOT_FOUND", `Branch ${input.branch} not found`);
+		if (input.baseCommit !== undefined && input.baseCommit !== head) {
+			throw new HttpError(409, "BRANCH_MOVED", `${input.branch} has new commits since you started editing; reload to see them`);
+		}
+		const target = input.newBranch ?? input.branch;
+		if (input.newBranch !== undefined) {
+			if (!validBranchName(input.newBranch)) throw new HttpError(400, "INVALID_INPUT", `${input.newBranch} isn't a valid branch name`);
+			if (refs.has(input.newBranch)) throw new HttpError(409, "ALREADY_EXISTS", `Branch ${input.newBranch} already exists`);
+		}
+		using repo = await this.store.get(meta.name);
+		const parent = head ? await resolveCommit(repo, head) : null;
+		try {
+			const result = await commitChanges(repo, access, {
+				branch: target,
+				parent: parent ? { hash: parent.hash, treeHash: parent.treeHash } : null,
+				create: input.newBranch !== undefined || !head,
+				changes: input.changes,
+				message: input.message,
+				author: input.author,
+				time: Math.floor(Date.now() / 1000),
+			});
+			await this.pushed();
+			return { commit: result.commit, branch: target, packBytes: result.packBytes };
+		} catch (err) {
+			if (err instanceof PathError) throw new HttpError(400, "INVALID_PATH", err.message);
+			if (err instanceof RefUpdateRejected) throw new HttpError(409, "BRANCH_MOVED", `${target} changed while committing; reload and try again`);
+			throw err;
+		}
 	}
 
 	/** Which repo and commit a ref names, for reads done outside the coordinator (raw files, archives). */

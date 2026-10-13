@@ -228,6 +228,15 @@ export interface RepoInfo {
 	cloneUrl: string;
 	/** Whether the caller may push, change settings, and run tasks. */
 	canWrite: boolean;
+	stars: number;
+	/** Public forks. */
+	forks: number;
+	/** Whether the caller has starred it. */
+	starred: boolean;
+	/** The repository it was forked from, if the caller can see that one. */
+	forkOf: { owner: string; name: string } | null;
+	/** Bytes pushed to it so far, which the size limit is checked against. */
+	sizeBytes: number;
 }
 
 export interface Viewer {
