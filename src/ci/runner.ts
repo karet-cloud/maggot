@@ -125,12 +125,17 @@ export interface JobState {
 	seq: number;
 	/** The coordinator has the completed report. */
 	reportedDone: boolean;
+	/** The steps as last acknowledged, and when: a report goes when they change, or as a heartbeat. */
+	reportedSteps?: string;
+	reportedAt?: number;
 	startedAt: string;
 	finishedAt: string | null;
 }
 
 /** How often the alarm checks on a running step. */
 export const TICK_MS = 2_000;
+/** How often a job with nothing new reports anyway, so the coordinator knows it's alive. */
+export const HEARTBEAT_MS = 60_000;
 /** How long a machine has to come up before the job gives up. */
 export const PROVISION_MS = 10 * 60_000;
 /** After a cancel, how long `always()` and `cancelled()` steps get before the machine is stopped. */
@@ -577,7 +582,8 @@ export class JobRunner {
 		const stopped = state.process.stopping;
 		// As on GitHub, what a step wrote to $GITHUB_ENV counts for the steps after it however it ended.
 		await this.collect(index);
-		const ok = exitCode === 0;
+		// A step stopped for its time limit failed, whatever its exit code (a TERM trap can exit 0).
+		const ok = exitCode === 0 && stopped?.reason !== "timeout";
 		let conclusion: Conclusion = ok || spec.continueOnError ? "success" : "failure";
 		if (stopped?.reason === "cancelled") {
 			conclusion = "cancelled";
@@ -609,7 +615,7 @@ export class JobRunner {
 			if (cut) this.log(index, `${name} had ${cut} bytes past the first ${COLLECT_BYTES / 1024} KB, which were left out\n`);
 		}
 		const parsed = parseEnvFile(env);
-		Object.assign(state.addedEnv, parsed.env);
+		state.addedEnv = { ...state.addedEnv, ...parsed.env };
 		for (const error of parsed.errors) this.log(index, `${error}\n`);
 		for (const dir of parsePathFile(path)) if (!state.addedPath.includes(dir)) state.addedPath.push(dir);
 	}
@@ -658,9 +664,13 @@ export class JobRunner {
 		return state.machineStopped;
 	}
 
-	/** Whether there's anything the coordinator doesn't have yet. */
+	/** Whether there's anything the coordinator doesn't have yet, or a heartbeat is due. */
 	get reportsDue(): boolean {
-		return !this.state.reportedDone || this.state.pending.length > 0 || this.state.unacked !== null;
+		const { state } = this;
+		if (state.pending.length > 0 || state.unacked !== null) return true;
+		if (state.reportedDone) return false;
+		if (state.phase === "done") return true;
+		return JSON.stringify(state.states) !== state.reportedSteps || Date.now() - (state.reportedAt ?? 0) >= HEARTBEAT_MS;
 	}
 
 	/** When the job next needs a tick, or null once it's settled. */
@@ -715,6 +725,8 @@ export class JobRunner {
 	/** The coordinator has `report`. */
 	acked(report: JobReport) {
 		this.state.unacked = null;
+		this.state.reportedSteps = JSON.stringify(report.steps);
+		this.state.reportedAt = Date.now();
 		if (report.status === "completed") this.state.reportedDone = true;
 	}
 

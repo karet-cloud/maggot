@@ -318,6 +318,27 @@ test("with a mask file, the log on the machine is masked, and exit codes and SIG
 });
 
 test("mask files hold one value per line, longest first, without multi-line values or short ones", () => {
-	assert.equal(maskFile(["abc", "abcdef", "x\ny-line", "ab"]), "abcdef\ny-line\nabc\n");
+	// A multi-line value is masked by its lines, and by its escaped one-line form (bash's $'x\ny-line').
+	assert.equal(maskFile(["abc", "abcdef", "x\ny-line", "ab"]), "x\\ny-line\nabcdef\ny-line\nabc\n");
 	assert.equal(maskFile([]), "");
+});
+
+test("secrets are masked in bash's set -x trace, printf %q and JSON, unusual characters and all", () => {
+	for (const secret of ["abc'def", "p@ss w0rd$!", "line1\nline2x", "tab\there\\x", `q"uo'te`]) {
+		const shown = [
+			// What `set -x` prints for `: "$SECRET"`: single quotes with '\'' inside, or $'…' for control characters.
+			/[\n\t\\]/.test(secret) ? `+ : $'${secret.replace(/[\\']/g, "\\$&").replace(/\n/g, "\\n").replace(/\t/g, "\\t")}'` : `+ : '${secret.replaceAll("'", "'\\''")}'`,
+			secret.replace(/[^A-Za-z0-9_\-.,:/@%+=]/g, "\\$&"),
+			JSON.stringify(secret),
+		].join("\n");
+		const m = new LogMasker([secret]);
+		const out = m.push(`${shown}\n`) + m.flush();
+		assert.ok(!/abc|w0rd|line1|here|uo/.test(out), `${JSON.stringify(secret)} leaked: ${out}`);
+	}
+});
+
+test("$GITHUB_ENV keeps a variable called __proto__ as a value", () => {
+	const { env } = parseEnvFile("__proto__=x\n");
+	assert.ok(Object.hasOwn(env, "__proto__"));
+	assert.deepEqual(Object.entries(env), [["__proto__", "x"]]);
 });

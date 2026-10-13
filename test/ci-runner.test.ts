@@ -201,6 +201,22 @@ test("a step past its time limit is stopped and fails the job", async () => {
 	assert.match(logs.get(1)!, /ran past its 1-minute limit/);
 });
 
+test("a step stopped for its time limit fails even if it exits 0 on TERM", async () => {
+	// No secrets, so no mask filter: the step's own exit code is what's recorded.
+	const launch = { ...launchFor([step("Trapped", "trap 'exit 0' TERM; echo trapped; sleep 30", { timeoutMinutes: 1 })]), mask: [] };
+	const state = newJobState(launch);
+	const runner = new JobRunner(launch, state, new LocalMachine());
+	const { reports } = await run(runner, {
+		onTick: () => {
+			// Once the step has set its trap (and said so).
+			const p = state.process;
+			if (state.phase === "steps" && p.launched && !p.stopping && p.offset > 0) p.deadline = Date.now() - 1;
+		},
+	});
+	assert.equal(reports.at(-1)!.conclusion, "failure");
+	assert.equal(reports.at(-1)!.steps[1].conclusion, "failure");
+});
+
 test("a failed checkout fails the job without running steps", async () => {
 	const repo = repository();
 	const launch = launchFor([step("Never", "echo never")], { url: repo.url, sha: "0".repeat(40) });

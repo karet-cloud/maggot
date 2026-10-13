@@ -29,8 +29,9 @@ function Actions() {
 		initialPageParam: undefined as number | undefined,
 		getNextPageParam: (last) => last.next ?? undefined,
 		placeholderData: keepPreviousData,
-		// Job progress isn't streamed as events; poll while anything is unfinished.
-		refetchInterval: (q) => (q.state.data?.pages[0]?.runs.some(isActive) ? 4000 : false),
+		// The live connection reports runs starting and finishing; this catches what it misses. Polling would
+		// refetch every loaded page, so it stops once older ones are shown.
+		refetchInterval: (q) => (q.state.data?.pages.length === 1 && q.state.data.pages[0].runs.some(isActive) ? 10_000 : false),
 	});
 	const list = runs.data?.pages.flatMap((p) => p.runs) ?? [];
 	const branch = info.data?.defaultBranch ?? "";

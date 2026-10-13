@@ -153,7 +153,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 		const checked = await settleStaged(env, access.row, upstream, new Uint8Array(await res.arrayBuffer()), staged, capabilities);
 		report = new Response(checked).body as ReadableStream<Uint8Array>;
 	}
-	await pipe(watchPush(env, ctx, access.row, report, () => sent), session);
+	await pipe(watchPush(env, ctx, access.row, report, () => sent, principal.username), session);
 	return 0;
 }
 

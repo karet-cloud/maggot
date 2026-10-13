@@ -139,3 +139,17 @@ test("expressions fill in secrets, env and github, and nothing else", () => {
 	assert.throws(() => expand("${{ github.toString }}", ctx, "w"), /isn't available/);
 	assert.throws(() => expand("${{ secrets.TOKEN || 'x' }}", ctx, "w"), /understands/);
 });
+
+test("environment variables called __proto__ are kept as values", () => {
+	const w = parses(`
+on: push
+env:
+  __proto__: top
+jobs:
+  build:
+    steps:
+      - run: echo
+`);
+	assert.ok(Object.hasOwn(w.env, "__proto__"));
+	assert.equal(w.env.__proto__ as unknown, "top");
+});

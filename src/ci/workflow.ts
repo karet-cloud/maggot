@@ -95,14 +95,15 @@ function strings(value: unknown, where: string): string[] {
 function envMap(value: unknown, where: string): Record<string, string> {
 	if (value === undefined || value === null) return {};
 	if (!isRecord(value)) return fail(`${where} is a map of names to values`);
-	const out: Record<string, string> = {};
+	const out: [string, string][] = [];
 	for (const [key, v] of Object.entries(value)) {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) fail(`${where}: ${key} isn't a valid environment variable name`);
-		if (typeof v === "string") out[key] = v;
-		else if (typeof v === "number" || typeof v === "boolean") out[key] = String(v);
+		if (typeof v === "string") out.push([key, v]);
+		else if (typeof v === "number" || typeof v === "boolean") out.push([key, String(v)]);
 		else fail(`${where}.${key} is a string, number or boolean`);
 	}
-	return out;
+	// fromEntries defines own properties, so a variable called __proto__ is kept rather than setting the prototype.
+	return Object.fromEntries(out);
 }
 
 function onlyKeys(value: Record<string, unknown>, allowed: string[], where: string) {

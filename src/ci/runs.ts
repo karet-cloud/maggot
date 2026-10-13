@@ -73,6 +73,8 @@ export interface CiHost {
 	repository(): RepositoryRef;
 	/** A run finished: for the feed and workflow_run webhooks. */
 	emit(data: Record<string, unknown>): void;
+	/** Runs were created or jobs started: open pages refresh (not recorded in the feed). */
+	changed(): void;
 	/** Asks for `tick` at (or before) `at`. */
 	wake(at: number): Promise<void>;
 	/** An archived repository starts nothing; what was running is cancelled when it's archived. */
@@ -128,6 +130,10 @@ export interface ReportAck {
 export type SequencedReport = JobReport & { seq?: number };
 
 export type ChecksState = "none" | "pending" | "success" | "failure";
+
+/** What a run summary needs: everything but the stored workflow and trigger, which can be large. */
+const SUMMARY = "number, workflow, path, event, branch, sha, pull, from_fork, actor, status, conclusion, error, created_at, started_at, finished_at";
+type SummaryRow = Omit<RunRow, "spec" | "trigger" | "author" | "approved">;
 
 type RunRow = {
 	number: number;
@@ -355,11 +361,12 @@ export class CiRuns {
 	}
 
 	private async secrets(): Promise<Record<string, string>> {
-		const out: Record<string, string> = {};
+		const out: [string, string][] = [];
 		for (const r of this.sql.exec<{ name: string; value: string }>("SELECT name, value FROM ci_secrets").toArray()) {
-			out[r.name] = await openSecret(this.apiKey, this.host.repoId(), r.value);
+			out.push([r.name, await openSecret(this.apiKey, this.host.repoId(), r.value)]);
 		}
-		return out;
+		// Own properties throughout, so secrets called __proto__ or constructor are ordinary names.
+		return Object.fromEntries(out);
 	}
 
 	private async depotCredentials(): Promise<DepotCredentials | null> {
@@ -387,7 +394,8 @@ export class CiRuns {
 	private async readWorkflows(repoName: string, sha: string): Promise<{ path: string; spec: WorkflowSpec | null; error: string | null }[]> {
 		using repo = await this.host.store.get(repoName);
 		const [commit] = await repo.log({ ref: sha, limit: 1 });
-		if (!commit) return [];
+		// Thrown, not an empty list, so the cache drops it and a store that lags the event is asked again.
+		if (!commit) throw new Error(`commit ${sha} isn't in ${repoName}`);
 		let hash = commit.treeHash;
 		for (const part of WORKFLOW_DIR.split("/")) {
 			const next = (await repo.readTree(hash))?.find((e) => e.name === part && e.type === "tree");
@@ -514,7 +522,8 @@ export class CiRuns {
 		const created: number[] = [];
 		const head = await this.workflowsAt(input.headRepo ?? this.host.repoId(), input.sha);
 		const required = await this.requiredFor(input.number, input.baseBranch, input.sha);
-		if (this.host.archived()) return [];
+		// Closed (or archived) while the files were read.
+		if (this.host.archived() || this.sql.exec<{ open: number }>("SELECT open FROM ci_pulls WHERE pull = ?", input.number).toArray()[0]?.open === 0) return [];
 		// Paths whose head version runs (or broken file fails) for this event; required ones not among them run from the base.
 		const covered = new Set<string>();
 		for (const w of head) {
@@ -616,7 +625,8 @@ export class CiRuns {
 
 	/** A pull request was closed or merged: its runs waiting for approval are cancelled, and if closed, the running ones too. */
 	async closePull(pull: number, merged: boolean): Promise<void> {
-		this.sql.exec("UPDATE ci_pulls SET open = 0 WHERE pull = ?", pull);
+		// Recorded even for a pull request CI hasn't seen yet, so its opening event, if late, starts nothing.
+		this.sql.exec("INSERT INTO ci_pulls (pull, sha, open) VALUES (?, '', 0) ON CONFLICT (pull) DO UPDATE SET open = 0", pull);
 		this.sql.exec("DELETE FROM ci_pull_queue WHERE pull = ?", pull);
 		const statuses = merged ? "('waiting')" : "('waiting', 'queued', 'in_progress')";
 		for (const { number } of this.sql.exec<{ number: number }>(`SELECT number FROM ci_runs WHERE pull = ? AND status IN ${statuses}`, pull).toArray()) {
@@ -632,8 +642,8 @@ export class CiRuns {
 	 */
 	async pullChecks(input: { number: number; base: string; headRepo: string | null; sha: string }): Promise<Omit<PullChecks, "required" | "canStart">> {
 		const short = input.sha.slice(0, 7);
-		const rows = this.sql.exec<RunRow>("SELECT * FROM ci_runs WHERE sha = ? AND (pull IS NULL OR pull = ?) ORDER BY number DESC", input.sha, input.number).toArray();
-		const latest = new Map<string, RunRow>();
+		const rows = this.sql.exec<SummaryRow>(`SELECT ${SUMMARY} FROM ci_runs WHERE sha = ? AND (pull IS NULL OR pull = ?) ORDER BY number DESC`, input.sha, input.number).toArray();
+		const latest = new Map<string, SummaryRow>();
 		for (const r of rows) if (!latest.has(`${r.path}\0${r.event}`)) latest.set(`${r.path}\0${r.event}`, r);
 		const runs = [...latest.values()].map((r) => this.summary(r));
 		let required: { path: string }[];
@@ -678,23 +688,26 @@ export class CiRuns {
 	}
 
 	/**
-	 * Runs a finished run again, from the workflow file at the same commit (or, for a workflow the base
-	 * branch required that the head doesn't have, the definition it ran with). Whoever asks can merge, so
-	 * it doesn't wait for approval again.
+	 * Runs a finished run again with the definition it ran with, which for a pull request can be the base
+	 * branch's rather than the head's. Only a run whose file didn't parse reads the file again. Whoever asks
+	 * can merge, so it doesn't wait for approval again.
 	 */
 	async rerun(number: number, actor: string | null): Promise<CiRun> {
 		if (this.host.archived()) throw new HttpError(403, "ARCHIVED", "This repository is archived, so nothing runs in it");
 		const old = this.runRow(number);
 		if (old.status !== "completed") throw new HttpError(409, "IN_PROGRESS", "That run is still going; cancel it first");
 		const trigger: Trigger = { ...(JSON.parse(old.trigger) as Trigger), actor };
-		let fresh;
-		try {
-			fresh = (await this.workflowsAt(trigger.headRepo ?? this.host.repoId(), trigger.sha)).find((x) => x.path === old.path);
-		} catch (err) {
-			throw new HttpError(409, "HEAD_GONE", `The commit can't be read any more: ${message(err)}`);
+		let spec = JSON.parse(old.spec) as WorkflowSpec | null;
+		if (!spec) {
+			let fresh;
+			try {
+				fresh = (await this.workflowsAt(trigger.headRepo ?? this.host.repoId(), trigger.sha)).find((x) => x.path === old.path);
+			} catch (err) {
+				throw new HttpError(409, "HEAD_GONE", `The commit can't be read any more: ${message(err)}`);
+			}
+			spec = fresh?.spec ?? null;
+			if (!spec) throw new HttpError(400, "INVALID_WORKFLOW", fresh?.error ?? `${old.path} is no longer at that commit`);
 		}
-		const spec = fresh?.spec ?? (fresh ? null : (JSON.parse(old.spec) as WorkflowSpec | null));
-		if (!spec) throw new HttpError(400, "INVALID_WORKFLOW", fresh?.error ?? `${old.path} is no longer at that commit`);
 		const created = this.createRun(old.path, spec, trigger, true, old.author);
 		await this.started([created]);
 		return this.getRun(created);
@@ -733,7 +746,7 @@ export class CiRuns {
 				runner === "depot" ? (job.runsOn.vcpus ?? 2) : null,
 				JSON.stringify(job.needs),
 				status,
-				JSON.stringify(job.steps.map((s): CiStep => ({ name: s.name, status: "pending", conclusion: null, startedAt: null, finishedAt: null }))),
+				JSON.stringify(jobSteps(job.steps.map((s) => s.name))),
 				job.timeoutMinutes,
 			);
 		}
@@ -818,6 +831,7 @@ export class CiRuns {
 
 	/** After runs are made: start what can start, and announce runs that were over at once (broken files). */
 	private async started(numbers: number[]) {
+		if (numbers.length) this.host.changed();
 		for (const n of numbers) {
 			const run = this.runRow(n);
 			if (run.status === "completed") this.announce(run);
@@ -859,6 +873,7 @@ export class CiRuns {
 			}
 			this.settleRuns();
 			if (!changed) break;
+			if (pass === 0) this.host.changed();
 		}
 		await this.wakeIfBusy();
 	}
@@ -884,6 +899,8 @@ export class CiRuns {
 		try {
 			await this.host.job(job.id).start(launch);
 			this.sql.exec("UPDATE ci_jobs SET dispatched = 1, reported_at = ? WHERE id = ?", Date.now(), job.id);
+			// Cancelled while it was being started: that cancel reached an object with nothing to stop yet.
+			if (this.jobRow(job.id)?.status === "completed") await this.host.job(job.id).cancel();
 		} catch (err) {
 			const attempts = job.dispatch_attempts + 1;
 			this.sql.exec("UPDATE ci_jobs SET dispatch_attempts = ? WHERE id = ?", attempts, job.id);
@@ -914,7 +931,8 @@ export class CiRuns {
 		// A fork's pull request runs the fork's code, so it never gets this repository's secrets.
 		const secrets = trigger.fromFork ? {} : await this.secrets();
 		// A value too short to hide in the log could end up in it: the job doesn't run with it.
-		const short = usedSecrets(workflow, spec).filter((name) => (secrets[name] ?? "").length > 0 && secrets[name].length < MIN_SECRET_LENGTH);
+		const secret = (name: string) => (Object.hasOwn(secrets, name) ? secrets[name] : "");
+		const short = usedSecrets(workflow, spec).filter((name) => secret(name).length > 0 && secret(name).length < MIN_SECRET_LENGTH);
 		if (short.length) {
 			throw new Error(`The secret${short.length === 1 ? "" : "s"} ${short.join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET_LENGTH} characters, so ${short.length === 1 ? "it" : "they"} can't be hidden in logs. Replace ${short.length === 1 ? "it" : "them"} in Settings → Actions.`);
 		}
@@ -968,7 +986,7 @@ export class CiRuns {
 			env: jobEnv,
 			// Only what this job can see: other secrets never reach the sandbox, not even as mask patterns.
 			mask: usedSecrets(workflow, spec)
-				.map((name) => secrets[name] ?? "")
+				.map(secret)
 				.filter((v) => v.length >= MIN_SECRET_LENGTH),
 			checkout: { url: cloneUrl, auth: btoa(`x:${token}`), ref: `refs/heads/${trigger.branch}`, sha: run.sha },
 		};
@@ -976,7 +994,12 @@ export class CiRuns {
 
 	private finishJob(job: Pick<JobRow, "id" | "steps">, conclusion: CiConclusion, error: string | null) {
 		const t = now();
-		const steps = (JSON.parse(job.steps) as CiStep[]).map((s) => (s.status === "completed" ? s : { ...s, status: "completed" as const, conclusion: conclusion === "cancelled" ? "cancelled" : "skipped" }));
+		// A job that fails before its machine reports failed in setup; the steps it never reached are skipped.
+		const steps = (JSON.parse(job.steps) as CiStep[]).map((s, i): CiStep => {
+			if (s.status === "completed") return s;
+			const failedSetup = i === 0 && s.status === "pending" && conclusion === "failure";
+			return { ...s, status: "completed", conclusion: conclusion === "cancelled" ? "cancelled" : failedSetup ? "failure" : "skipped" };
+		});
 		this.sql.exec(
 			"UPDATE ci_jobs SET status = 'completed', conclusion = ?, error = COALESCE(error, ?), steps = ?, started_at = COALESCE(started_at, ?), finished_at = ? WHERE id = ? AND status != 'completed'",
 			conclusion,
@@ -990,10 +1013,16 @@ export class CiRuns {
 
 	/** Completes runs whose jobs have all finished, and says so. */
 	private settleRuns() {
-		const open = this.sql.exec<RunRow>("SELECT * FROM ci_runs WHERE status IN ('queued', 'in_progress', 'waiting')").toArray();
-		for (const run of open) {
-			const jobs = this.sql.exec<{ status: CiStatus; conclusion: CiConclusion | null }>("SELECT status, conclusion FROM ci_jobs WHERE run = ?", run.number).toArray();
-			if (jobs.length === 0 || jobs.some((j) => j.status !== "completed")) continue;
+		// Only runs with jobs, all of them finished: one query, rather than one per unfinished run.
+		const done = this.sql
+			.exec<{ number: number }>(
+				`SELECT number FROM ci_runs r WHERE status IN ('queued', 'in_progress', 'waiting')
+					AND EXISTS (SELECT 1 FROM ci_jobs WHERE run = r.number)
+					AND NOT EXISTS (SELECT 1 FROM ci_jobs WHERE run = r.number AND status != 'completed')`,
+			)
+			.toArray();
+		for (const run of done) {
+			const jobs = this.sql.exec<{ conclusion: CiConclusion | null }>("SELECT conclusion FROM ci_jobs WHERE run = ?", run.number).toArray();
 			const conclusion: CiConclusion = jobs.some((j) => j.conclusion === "failure") ? "failure" : jobs.some((j) => j.conclusion === "cancelled") ? "cancelled" : "success";
 			const t = now();
 			this.sql.exec("UPDATE ci_runs SET status = 'completed', conclusion = ?, started_at = COALESCE(started_at, ?), finished_at = ? WHERE number = ? AND status != 'completed'", conclusion, t, t, run.number);
@@ -1132,6 +1161,7 @@ export class CiRuns {
 		if (run.status !== "waiting") throw new HttpError(409, "NOT_WAITING", "That run isn't waiting for approval");
 		this.sql.exec("UPDATE ci_runs SET status = 'queued', approved = 1 WHERE number = ? AND status = 'waiting'", number);
 		this.sql.exec("UPDATE ci_jobs SET status = 'queued' WHERE run = ? AND status = 'waiting'", number);
+		this.host.changed();
 		await this.schedule();
 		return this.getRun(number);
 	}
@@ -1148,7 +1178,7 @@ export class CiRuns {
 		return this.sql.exec<JobRow>("SELECT * FROM ci_jobs WHERE id = ?", id).toArray()[0];
 	}
 
-	private summary(r: RunRow): CiRunSummary {
+	private summary(r: SummaryRow): CiRunSummary {
 		return {
 			number: r.number,
 			workflow: r.workflow,
@@ -1177,7 +1207,7 @@ export class CiRuns {
 		if (filter.sha) (where.push("sha = ?"), args.push(filter.sha));
 		if (filter.before !== undefined) (where.push("number < ?"), args.push(filter.before));
 		const limit = Math.min(Math.max(filter.limit ?? 30, 1), 100);
-		const rows = this.sql.exec<RunRow>(`SELECT * FROM ci_runs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY number DESC LIMIT ?`, ...args, limit + 1).toArray();
+		const rows = this.sql.exec<SummaryRow>(`SELECT ${SUMMARY} FROM ci_runs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY number DESC LIMIT ?`, ...args, limit + 1).toArray();
 		return { runs: rows.slice(0, limit).map((r) => this.summary(r)), next: rows.length > limit ? rows[limit - 1].number : null };
 	}
 
@@ -1225,18 +1255,11 @@ export class CiRuns {
 		const more = logs.length < rows.length || rows.length === 2000;
 		return { logs, next: more || row.status !== "completed" ? last : null };
 	}
+}
 
-	/** Whether the latest run of each workflow for a commit passed (for "require Actions to pass"). */
-	checksFor(sha: string): { state: ChecksState; runs: CiRunSummary[] } {
-		const rows = this.sql.exec<RunRow>("SELECT * FROM ci_runs WHERE sha = ? ORDER BY number DESC", sha).toArray();
-		const latest = new Map<string, RunRow>();
-		for (const r of rows) if (!latest.has(r.path)) latest.set(r.path, r);
-		const runs = [...latest.values()].map((r) => this.summary(r));
-		if (runs.length === 0) return { state: "none", runs };
-		if (runs.some((r) => r.status === "completed" && r.conclusion !== "success")) return { state: "failure", runs };
-		if (runs.some((r) => r.status !== "completed")) return { state: "pending", runs };
-		return { state: "success", runs };
-	}
+/** A job's steps as its runner reports them: setup, the workflow's steps, then cleanup. Log step i is step i. */
+function jobSteps(names: string[]): CiStep[] {
+	return ["Set up job", ...names, "Complete job"].map((name) => ({ name, status: "pending", conclusion: null, startedAt: null, finishedAt: null }));
 }
 
 /** Secret names a job's expressions name (workflow env, job env, and its steps' env and scripts). */

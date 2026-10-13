@@ -354,7 +354,7 @@ const PROTECTED = new Set(["NODE_OPTIONS", "PATH", "GITHUB_ENV", "GITHUB_PATH", 
  * rather than guessed at.
  */
 export function parseEnvFile(text: string): { env: Record<string, string>; errors: string[] } {
-	const env: Record<string, string> = {};
+	const env = new Map<string, string>();
 	const errors: string[] = [];
 	const lines = text.split(/\r?\n/);
 	for (let i = 0; i < lines.length; i++) {
@@ -379,9 +379,10 @@ export function parseEnvFile(text: string): { env: Record<string, string>; error
 			continue;
 		}
 		if (PROTECTED.has(name)) errors.push(`$GITHUB_ENV can't set ${name}`);
-		else env[name] = value;
+		else env.set(name, value);
 	}
-	return { env, errors };
+	// fromEntries defines own properties, so a variable called __proto__ is kept rather than setting the prototype.
+	return { env: Object.fromEntries(env), errors };
 }
 
 export function parsePathFile(text: string): string[] {
@@ -412,14 +413,31 @@ export function completeUtf8(bytes: Uint8Array): [Uint8Array, Uint8Array] {
 export const MIN_MASKED_LENGTH = 3;
 const MIN_SECRET = MIN_MASKED_LENGTH;
 
-/** What to mask for a set of values: each value, and each line of a multi-line one (logs are read by line). */
+/**
+ * A value as shells and tools commonly escape it when printing it: bash's `set -x` trace (single-quoted,
+ * or $'…' for control characters), `printf %q`, and JSON. The raw value alone would miss these.
+ */
+function escapedForms(v: string): string[] {
+	const ansi = v.replace(/[\\']/g, "\\$&").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+	const backslashed = v.replace(/[^A-Za-z0-9_\-.,:/@%+=]/g, "\\$&");
+	return [v.replaceAll("'", `'\\''`), ansi, backslashed, JSON.stringify(v).slice(1, -1)];
+}
+
+/**
+ * What to mask for a set of values: each value, each line of a multi-line one (logs are read by line),
+ * and the escaped forms of both.
+ */
 export function maskValues(values: string[]): string[] {
 	const out = new Set<string>();
+	const add = (s: string) => {
+		if (s.length < MIN_SECRET) return;
+		out.add(s);
+		for (const e of escapedForms(s)) out.add(e);
+	};
 	for (const v of values) {
-		const trimmed = v.trim();
-		if (trimmed.length >= MIN_SECRET) out.add(trimmed);
-		if (v.length >= MIN_SECRET) out.add(v);
-		for (const line of v.split(/\r?\n/)) if (line.trim().length >= MIN_SECRET) out.add(line.trim());
+		add(v);
+		add(v.trim());
+		for (const line of v.split(/\r?\n/)) add(line.trim());
 	}
 	return [...out];
 }

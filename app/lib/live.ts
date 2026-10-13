@@ -52,6 +52,11 @@ export function useProjectLive(project: string): Live {
 			};
 			socket.onmessage = (msg) => {
 				if (msg.data === "pong") return;
+				// Runs were created or jobs started: not a feed event, just a cue to refresh.
+				if (msg.data === "ci") {
+					invalidate(["project", project, "actions", "runs"]);
+					return;
+				}
 				const event = JSON.parse(msg.data as string) as ProjectEvent;
 				if (event.seq <= lastSeq.current) return;
 				lastSeq.current = event.seq;
@@ -81,8 +86,9 @@ export function useProjectLive(project: string): Live {
 				if (event.type.startsWith("pull.") || event.type === "repo.pushed") {
 					invalidate(keys.pulls(project));
 				}
-				// Pushes and pull requests start workflow runs; ci.completed ends one.
-				if (event.type === "ci.completed" || event.type === "repo.pushed" || event.type === "pull.opened") {
+				// New runs arrive as a "ci" message (above). A new head can change a pull request's checks
+				// even when nothing runs; ci.completed ends a run.
+				if (event.type === "ci.completed" || event.type === "repo.pushed" || event.type.startsWith("pull.")) {
 					invalidate(["project", project, "actions", "runs"]);
 				}
 				if (event.type.startsWith("issue.")) {

@@ -40,9 +40,10 @@ export class CiJob extends DurableObject<Env> {
 		return launch && state ? { launch, state } : undefined;
 	}
 
-	/** Starts the job. Calling it again for the same job does nothing. */
+	/** Starts the job. Calling it again for the same job does nothing, even after it has settled. */
 	async start(launch: JobLaunch): Promise<void> {
-		if (await this.ctx.storage.get("state")) return;
+		const [state, settled] = await Promise.all([this.ctx.storage.get("state"), this.ctx.storage.get("settled")]);
+		if (state || settled) return;
 		await this.ctx.storage.put({ launch, state: newJobState(launch) });
 		await this.ctx.storage.setAlarm(Date.now());
 	}
@@ -60,8 +61,8 @@ export class CiJob extends DurableObject<Env> {
 			}
 			return;
 		}
-		state.cancelled = true;
-		await this.ctx.storage.put("state", state);
+		// Its own key: an alarm in progress holds the state in memory and would write over a flag set in it.
+		await this.ctx.storage.put("cancel", true);
 		await this.ctx.storage.setAlarm(Date.now());
 	}
 
@@ -78,11 +79,15 @@ export class CiJob extends DurableObject<Env> {
 			runner = new JobRunner(launch, state, { provision: () => Promise.reject(err), sandbox: () => { throw err; }, alive: async () => false, destroy: async () => {}, describe: () => "a machine" }, save);
 		}
 		for (let burst = 0; burst < BURST; burst++) {
+			if (!runner.done && (await this.ctx.storage.get<boolean>("cancel"))) runner.cancel();
 			const more = await runner.tick();
 			await save();
 			// Once the coordinator has everything, later wakes only retry stopping the machine.
-			const delivered = runner.reportsDue ? await this.report(runner, launch.repo, launch.jobId) : true;
-			await save();
+			let delivered = true;
+			if (runner.reportsDue) {
+				delivered = await this.report(runner, launch.repo, launch.jobId);
+				await save();
+			}
 			if (!more || !delivered) break;
 		}
 		if (runner.done) {
@@ -91,8 +96,13 @@ export class CiJob extends DurableObject<Env> {
 			await this.ctx.storage.put("launch", scrub(launch, !state.machineStopped));
 		}
 		const wake = runner.nextWake();
-		if (wake === null) await this.ctx.storage.deleteAlarm();
-		else await this.ctx.storage.setAlarm(wake);
+		if (wake === null) {
+			// Settled: the coordinator has everything and the machine is stopped. Only a marker stays, so a
+			// late start() still does nothing.
+			await this.ctx.storage.deleteAlarm();
+			await this.ctx.storage.deleteAll();
+			await this.ctx.storage.put("settled", true);
+		} else await this.ctx.storage.setAlarm(wake);
 	}
 
 	/** Sends progress and new log text to the coordinator; whatever doesn't get through is sent again next time. */
