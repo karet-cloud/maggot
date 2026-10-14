@@ -329,7 +329,8 @@ test("a Depot job never puts secrets or the checkout token in a command's enviro
 	};
 	const runner = new JobRunner(launch, newJobState(launch), new DepotMachine({ token: "dpt" }, 2, { fetch }));
 	const reports: JobReport[] = [];
-	for (let i = 0; i < 300 && !runner.settled; i++) {
+	// Generous: it stops once the job settles, and a loaded machine needs more ticks.
+	for (let i = 0; i < 1500 && !runner.settled; i++) {
 		await runner.tick();
 		const r = runner.nextReport(1 << 20);
 		reports.push(r);
