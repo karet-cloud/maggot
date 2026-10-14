@@ -208,7 +208,7 @@ app.onError((err, c) => {
 
 app.notFound((c) => c.json<ApiError>({ error: { code: "NOT_FOUND", message: `No route for ${c.req.method} ${c.req.path}` } }, 404));
 
-app.get("/api", (c) => c.json({ name: "megit", description: "A Git platform for people and many concurrent agents, on Cloudflare Artifacts." }));
+app.get("/api", (c) => c.json({ name: "maggot", description: "A Git platform for people and many concurrent agents, on Cloudflare Artifacts." }));
 
 // cloudflare.config.ts binds these by worker name, which the generated types can't resolve to a class.
 const projects = (env: Env) => env.PROJECT as DurableObjectNamespace<ProjectCoordinator>;
@@ -866,7 +866,7 @@ repo.get("/", async (c) => {
 	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
 	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row), await ownsRepo(c, row)) : null;
 	const state = await project(c).getProject();
-	// People reach user repositories through megit's own git URL; the storage remote stays internal.
+	// People reach user repositories through maggot's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
 });
 
@@ -1026,7 +1026,7 @@ repo.delete("/", async (c) => {
 });
 
 // Credentials for pushing to (or cloning) the project repo directly. Write by default.
-// Admin only: these are the storage backend's own credentials, so pushes with them skip megit's limits.
+// Admin only: these are the storage backend's own credentials, so pushes with them skip maggot's limits.
 repo.post("/credentials", async (c) => {
 	requireAdmin(c);
 	const { scope } = (await c.req.json().catch(() => ({}))) as { scope?: "read" | "write" };
@@ -1224,7 +1224,7 @@ repo.post("/contents", async (c) => {
 /** Who a web commit (to the code or the wiki) is by: the signed-in user, with a no-reply address. */
 function webAuthor(c: Context<App>): { name: string; email: string } {
 	const p = c.var.principal;
-	return p.kind === "user" ? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` } : { name: "megit", email: "admin@megit.dev" };
+	return p.kind === "user" ? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` } : { name: "maggot", email: "admin@maggot.dev" };
 }
 
 /**

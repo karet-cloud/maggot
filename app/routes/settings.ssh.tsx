@@ -8,7 +8,7 @@ import { api, keys } from "../lib/api.ts";
 import { useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/settings/ssh")({
-	head: () => ({ meta: [{ title: "SSH keys · megit" }] }),
+	head: () => ({ meta: [{ title: "SSH keys · maggot" }] }),
 	component: SshKeys,
 });
 
@@ -43,16 +43,16 @@ function SshKeys() {
 			</main>
 		);
 	}
-	const host = info.data?.host ?? "megit";
+	const host = info.data?.host ?? "maggot";
 	const origin = typeof location === "undefined" ? "" : location.origin;
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
 			<h1 className="text-lg font-semibold">Settings</h1>
 			<SettingsNav />
 			<p className="text-sm text-dim">
-				Clone and push with an SSH key instead of a token. megit runs on Cloudflare Workers, which can't take connections on port 22, so{" "}
+				Clone and push with an SSH key instead of a token. maggot runs on Cloudflare Workers, which can't take connections on port 22, so{" "}
 				<code className="font-mono text-fg">ssh</code> reaches it through a small proxy over HTTPS. The connection is still SSH, encrypted from your
-				machine to megit.
+				machine to maggot.
 			</p>
 
 			<Panel title="Add a key">
@@ -145,16 +145,16 @@ function SshKeys() {
 				{info.data ? (
 					<ol className="space-y-4 p-4 text-xs">
 						<Step n={1} title="Save the proxy (needs Node.js 22 or newer)">
-							<CopyField value={`curl -fsSo ~/.ssh/megit-proxy.mjs ${origin}/ssh-proxy.mjs`} />
+							<CopyField value={`curl -fsSo ~/.ssh/maggot-proxy.mjs ${origin}/ssh-proxy.mjs`} />
 						</Step>
 						<Step n={2} title="Add this to ~/.ssh/config">
-							<CopyBlock text={`Host ${host}\n  User git\n  ProxyCommand node ~/.ssh/megit-proxy.mjs ${info.data.url}`} />
+							<CopyBlock text={`Host ${host}\n  User git\n  ProxyCommand node ~/.ssh/maggot-proxy.mjs ${info.data.url}`} />
 						</Step>
 						<Step n={3} title="Check it works">
 							<CopyField value={`ssh -T git@${host}`} />
 							<p className="text-faint">
 								The first time, ssh asks whether to trust the server. Its key fingerprint is{" "}
-								<span className="break-all font-mono text-dim">{info.data.fingerprint}</span>. If it matches, type yes. megit
+								<span className="break-all font-mono text-dim">{info.data.fingerprint}</span>. If it matches, type yes. maggot
 								then greets you by name.
 							</p>
 						</Step>

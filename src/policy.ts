@@ -1,5 +1,5 @@
 // Abuse protection: request rate limits, per-account quotas, and whether accounts must verify their
-// email before they can create or push. Defaults suit a public instance; MEGIT_POLICY (JSON, set at
+// email before they can create or push. Defaults suit a public instance; MAGGOT_POLICY (JSON, set at
 // deploy time) overrides any of them.
 import { DurableObject } from "cloudflare:workers";
 import { HttpError } from "./errors.ts";
@@ -62,14 +62,14 @@ export const DEFAULT_POLICY: Policy = {
 const parsed = new Map<string, Policy>();
 
 export function policy(env: Env): Policy {
-	const raw = (env as { MEGIT_POLICY?: string }).MEGIT_POLICY ?? "";
+	const raw = (env as { MAGGOT_POLICY?: string }).MAGGOT_POLICY ?? "";
 	let found = parsed.get(raw);
 	if (!found) {
 		let overrides: Partial<Policy> = {};
 		try {
 			overrides = raw ? (JSON.parse(raw) as Partial<Policy>) : {};
 		} catch {
-			console.error("MEGIT_POLICY is not valid JSON; using the defaults");
+			console.error("MAGGOT_POLICY is not valid JSON; using the defaults");
 		}
 		found = { ...DEFAULT_POLICY, ...overrides };
 		parsed.set(raw, found);

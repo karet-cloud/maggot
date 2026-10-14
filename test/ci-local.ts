@@ -1,5 +1,5 @@
 // A Sandbox that runs commands on this machine, for testing the job scripts for real. The scripts use
-// fixed paths (/tmp/megit, /tmp/megit-inbox, /tmp/megit-user, /workspace); these are swapped for a temporary directory in every argument
+// fixed paths (/tmp/maggot, /tmp/maggot-inbox, /tmp/maggot-user, /workspace); these are swapped for a temporary directory in every argument
 // and environment value, so tests don't touch the real ones or each other.
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";

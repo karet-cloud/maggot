@@ -54,7 +54,7 @@ type Token =
 	| { t: "op"; v: string }
 	| { t: "end" };
 
-/** The longest expression megit reads; GitHub's own limit is about the same. */
+/** The longest expression maggot reads; GitHub's own limit is about the same. */
 const MAX_LENGTH = 21_000;
 /** How deeply expressions may nest, so a hostile one can't overflow the stack. */
 const MAX_DEPTH = 50;

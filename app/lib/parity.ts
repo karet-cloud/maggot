@@ -1,4 +1,4 @@
-// What GitHub does and how far megit is with it. The /parity page renders this; update it in the same
+// What GitHub does and how far maggot is with it. The /parity page renders this; update it in the same
 // commit as the feature it describes.
 
 export type ParityStatus = "done" | "partial" | "missing" | "different";
@@ -6,7 +6,7 @@ export type ParityStatus = "done" | "partial" | "missing" | "different";
 export interface ParityItem {
 	feature: string;
 	status: ParityStatus;
-	/** Where megit stands: what works, what's left, or why it differs. */
+	/** Where maggot stands: what works, what's left, or why it differs. */
 	comment: string;
 }
 
@@ -59,7 +59,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Branches page", status: "done", comment: "Ahead and behind counts, and delete." },
 			{ feature: "Tags and releases", status: "done", comment: "Tags from git or the web; releases with Markdown notes, pre-releases and source downloads. No uploaded release files yet." },
 			{ feature: "Commit graph", status: "done", comment: "History → Graph: recent commits across every branch in lanes, with branch and tag labels." },
-			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, only the merge queue, or only reviewed pull requests (an approval of the head commit). Enforced for HTTPS, SSH and the web. Can require megit Actions runs on the head commit to pass (pull requests only, then). No statuses from external CI yet." },
+			{ feature: "Branch protection rules", status: "done", comment: "Per branch or pattern: block force pushes (put back if one lands), block deletion, only the merge queue, or only reviewed pull requests (an approval of the head commit). Enforced for HTTPS, SSH and the web. Can require maggot Actions runs on the head commit to pass (pull requests only, then). No statuses from external CI yet." },
 			{ feature: "Verified (signed) commit badges", status: "missing", comment: "" },
 		],
 	},
@@ -102,10 +102,10 @@ export const PARITY: ParitySection[] = [
 				feature: "Actions / built-in CI",
 				status: "partial",
 				comment:
-					"Workflows in .megit/workflows: push, pull_request, workflow_dispatch and schedule triggers; matrices (include, exclude, fail-fast, max-parallel); job if and outputs; GitHub's expression language with steps, needs and hashFiles; JavaScript and composite actions from GitHub or the repository; built-in checkout, cache and artifact actions kept in R2. Jobs run in a Depot sandbox on your Depot token, or a Cloudflare container where the deploy enables it. Live logs, cancel, re-run, approval for readers' and forks' pull requests, and Run workflow. No services, containers, environments, concurrency, reusable workflows, dispatch inputs or Docker actions.",
+					"Workflows in .maggot/workflows: push, pull_request, workflow_dispatch and schedule triggers; matrices (include, exclude, fail-fast, max-parallel); job if and outputs; GitHub's expression language with steps, needs and hashFiles; JavaScript and composite actions from GitHub or the repository; built-in checkout, cache and artifact actions kept in R2. Jobs run in a Depot sandbox on your Depot token, or a Cloudflare container where the deploy enables it. Live logs, cancel, re-run, approval for readers' and forks' pull requests, and Run workflow. No services, containers, environments, concurrency, reusable workflows, dispatch inputs or Docker actions.",
 			},
 			{ feature: "Actions caches and artifacts", status: "done", comment: "actions/cache (restore, save, restore-keys, scoped by branch like GitHub's) and upload/download-artifact, stored in R2. Artifacts download from the run page; caches are listed and deletable on the Actions tab." },
-			{ feature: "Checks on commits and pull requests", status: "partial", comment: "megit Actions runs show on commit pages and pull requests. A branch rule can require the base branch's pull request workflows (and every other run on the head) to pass; missing ones can be started from the pull request. No status API for external CI to report into yet." },
+			{ feature: "Checks on commits and pull requests", status: "partial", comment: "maggot Actions runs show on commit pages and pull requests. A branch rule can require the base branch's pull request workflows (and every other run on the head) to pass; missing ones can be started from the pull request. No status API for external CI to report into yet." },
 			{ feature: "Actions secrets", status: "done", comment: "Per repository, encrypted, write-only, masked in logs, withheld from forks' runs. No organization or environment secrets." },
 			{ feature: "Self-hosted runners", status: "missing", comment: "Jobs run in a Cloudflare container or a Depot sandbox. Blacksmith isn't an option: it only runs GitHub Actions jobs for GitHub organizations." },
 			{ feature: "REST API", status: "partial", comment: "Everything the UI does goes through /api. No API reference page yet." },

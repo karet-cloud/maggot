@@ -115,7 +115,7 @@ test("a job checks out, runs steps with their environment, masks secrets and set
 	machine.ready = 2;
 	const steps = [
 		step("Check out", null),
-		step("Show", 'cat hello.txt; echo "key=$API_KEY"; echo "token $MEGIT_CLONE_AUTH"; git rev-parse --abbrev-ref HEAD; echo "FROM_STEP=yes" >> "$GITHUB_ENV"; echo /opt/extra >> "$GITHUB_PATH"'),
+		step("Show", 'cat hello.txt; echo "key=$API_KEY"; echo "token $MAGGOT_CLONE_AUTH"; git rev-parse --abbrev-ref HEAD; echo "FROM_STEP=yes" >> "$GITHUB_ENV"; echo /opt/extra >> "$GITHUB_PATH"'),
 		step("Env", 'echo "from=$FROM_STEP"; echo "$PATH" | cut -d: -f1; printf "héllo 🎉\\n"'),
 		step("Fails", "echo before; exit 4", { continueOnError: true }),
 		step("Fails hard", "exit 2"),
@@ -452,7 +452,7 @@ test("steps run as the machine's user, and can't reach the checkout token, the m
 		const UNUSED = "unused-secret-value-4321";
 		const launch = launchFor([
 			step("Who", 'id -u; umask; echo "TOK=$API_KEY" >> "$GITHUB_ENV"; echo started; sleep 2; touch built && stat -c %a built'),
-			step("Then", 'echo "tok-len=${#TOK}"; ls /tmp/megit 2>&1 | head -1 || true; git rev-parse --abbrev-ref HEAD'),
+			step("Then", 'echo "tok-len=${#TOK}"; ls /tmp/maggot 2>&1 | head -1 || true; git rev-parse --abbrev-ref HEAD'),
 		]);
 		launch.mask = [SECRET, UNUSED];
 		// The repository must be readable by the namespace's root, which it is (it's ours).

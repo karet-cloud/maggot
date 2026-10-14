@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-// QA against real repositories: mirrors small public GitHub repositories into megit with plain git,
+// QA against real repositories: mirrors small public GitHub repositories into maggot with plain git,
 // the way someone moving from GitHub would, then checks that nothing was lost and that the website
 // and API agree with git.
 //
-//   MEGIT_URL=http://127.0.0.1:8787 node scripts/qa-github.ts            # signs up a throwaway QA user
-//   MEGIT_URL=https://… MEGIT_USER=me MEGIT_TOKEN=megit_pat_… node scripts/qa-github.ts
+//   MAGGOT_URL=http://127.0.0.1:8787 node scripts/qa-github.ts            # signs up a throwaway QA user
+//   MAGGOT_URL=https://… MAGGOT_USER=me MAGGOT_TOKEN=maggot_pat_… node scripts/qa-github.ts
 //
 // For each repository it:
-//   1. clones it from GitHub (all branches and tags) and creates a megit repository
+//   1. clones it from GitHub (all branches and tags) and creates a maggot repository
 //   2. pushes every branch and tag with `git push` over HTTPS, a personal access token as the password
-//   3. compares every ref on megit with GitHub's
-//   4. clones it back from megit (anonymously when public; private must refuse that) and runs git fsck
+//   3. compares every ref on maggot with GitHub's
+//   4. clones it back from maggot (anonymously when public; private must refuse that) and runs git fsck
 //   5. checks the API: history, root tree, branch list, the README, a raw file, and a zip archive
 // One more repository goes through "Import from URL" instead of a push. All QA repositories are deleted
 // afterwards unless KEEP=1.
@@ -21,13 +21,13 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
-const BASE = (process.env.MEGIT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+const BASE = (process.env.MAGGOT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const KEEP = process.env.KEEP === "1";
 
 interface Case {
 	github: string;
 	visibility: "public" | "private";
-	/** Create the megit repository with "Import from URL" instead of pushing to it. */
+	/** Create the maggot repository with "Import from URL" instead of pushing to it. */
 	importUrl?: boolean;
 }
 
@@ -40,8 +40,8 @@ const CASES: Case[] = [
 	{ github: "octocat/git-consortium", visibility: "public", importUrl: true },
 ];
 
-let token = process.env.MEGIT_TOKEN ?? "";
-let user = process.env.MEGIT_USER ?? "";
+let token = process.env.MAGGOT_TOKEN ?? "";
+let user = process.env.MAGGOT_USER ?? "";
 const results: { repo: string; checks: string[]; failures: string[]; seconds: number }[] = [];
 
 async function api<T>(method: string, path: string, body?: unknown, auth = true): Promise<{ status: number; json: T; res: Response }> {
@@ -87,7 +87,7 @@ async function signUpQaUser() {
 	const signUp = await fetch(`${BASE}/api/auth/sign-up/email`, {
 		method: "POST",
 		headers: { "content-type": "application/json", origin: BASE },
-		body: JSON.stringify({ email: `${name}@qa.megit.invalid`, password: `qa-${crypto.randomUUID()}`, name: "QA", username: name }),
+		body: JSON.stringify({ email: `${name}@qa.maggot.invalid`, password: `qa-${crypto.randomUUID()}`, name: "QA", username: name }),
 	});
 	if (!signUp.ok) throw new Error(`sign-up failed: ${signUp.status} ${await signUp.text()}`);
 	const cookie = (signUp.headers.getSetCookie?.() ?? [signUp.headers.get("set-cookie") ?? ""]).map((c) => c.split(";")[0]).join("; ");
@@ -126,16 +126,16 @@ async function runCase(c: Case, work: string) {
 	const cloneUrl = create.json.repo.cloneUrl;
 
 	if (!c.importUrl) {
-		// What someone moving from GitHub runs: add megit as a remote, push everything.
+		// What someone moving from GitHub runs: add maggot as a remote, push everything.
 		await git(["push", "--quiet", "--all", authed(cloneUrl)], mirror);
 		await git(["push", "--quiet", "--tags", authed(cloneUrl)], mirror);
 		check(true, `git push --all/--tags (${githubRefs.length} refs)`);
 	}
 
-	const megitRefs = await refs(authed(cloneUrl));
+	const maggotRefs = await refs(authed(cloneUrl));
 	// Imports bring the default branch only, the way Artifacts imports work.
 	const expected = c.importUrl ? githubRefs.filter((r) => r.endsWith(`refs/heads/${defaultBranch}`)) : githubRefs;
-	const missing = expected.filter((r) => !megitRefs.includes(r));
+	const missing = expected.filter((r) => !maggotRefs.includes(r));
 	check(missing.length === 0, "every branch and tag matches GitHub", missing.length ? `${missing.length} differ, e.g. ${missing[0]}` : `${expected.length} refs`);
 
 	// Anonymous access: public clones work, private ones must be refused.
@@ -152,7 +152,7 @@ async function runCase(c: Case, work: string) {
 		() => "",
 		(e: Error) => e.message,
 	);
-	check(fsck === "", "clone back from megit passes git fsck", fsck.slice(0, 200));
+	check(fsck === "", "clone back from maggot passes git fsck", fsck.slice(0, 200));
 	const head = await git(["rev-parse", "HEAD"], back);
 	const githubHead = await git(["rev-parse", defaultBranch], mirror);
 	check(head === githubHead, `checked-out ${defaultBranch} matches GitHub`, head.slice(0, 7));
@@ -201,7 +201,7 @@ async function runCase(c: Case, work: string) {
 	}
 
 	// A follow-up push of new work, as day-to-day use would.
-	await git(["-c", "user.name=QA", "-c", "user.email=qa@megit.invalid", "commit", "--allow-empty", "-q", "-m", "QA follow-up commit"], back);
+	await git(["-c", "user.name=QA", "-c", "user.email=qa@maggot.invalid", "commit", "--allow-empty", "-q", "-m", "QA follow-up commit"], back);
 	await git(["push", "--quiet", "origin", `HEAD:${defaultBranch}`], back);
 	const after = await api<{ project: { head: string } }>("GET", path);
 	check(after.json.project?.head === (await git(["rev-parse", "HEAD"], back)), "follow-up push lands");
@@ -213,7 +213,7 @@ async function runCase(c: Case, work: string) {
 	results.push({ repo: c.github, checks, failures, seconds: (Date.now() - started) / 1000 });
 }
 
-const work = await mkdtemp(join(tmpdir(), "megit-qa-"));
+const work = await mkdtemp(join(tmpdir(), "maggot-qa-"));
 try {
 	if (!token) await signUpQaUser();
 	if (!user) user = ((await api<{ user: { username: string } }>("GET", "/me")).json.user?.username as string) ?? "";

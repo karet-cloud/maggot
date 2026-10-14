@@ -5,9 +5,9 @@ const ZERO = "0".repeat(40);
 
 function headers(remote: RemoteAccess, extra: Record<string, string> = {}) {
 	// No token: a public repository elsewhere (an action on GitHub), asked anonymously.
-	if (!remote.token) return { "user-agent": "git/megit", ...extra };
+	if (!remote.token) return { "user-agent": "git/maggot", ...extra };
 	const secret = remote.token.split("?expires=")[0];
-	return { authorization: `Basic ${btoa(`x:${secret}`)}`, "user-agent": "git/megit", ...extra };
+	return { authorization: `Basic ${btoa(`x:${secret}`)}`, "user-agent": "git/maggot", ...extra };
 }
 
 /** Branch name to head oid, as `git ls-remote --heads` reports them. */
@@ -24,7 +24,7 @@ export interface TagRef {
 }
 
 /** Branches holding pushes to protected branches while they're checked (see src/protection.ts); never listed. */
-const INCOMING_BRANCHES = "megit-incoming/";
+const INCOMING_BRANCHES = "maggot-incoming/";
 
 /**
  * Branches and tags, from one ref advertisement. Annotated tags are peeled to their commits.
@@ -118,7 +118,7 @@ export async function pushPack(remote: RemoteAccess, ref: string, from: string |
 export class RefUpdateRejected extends Error {}
 
 async function receivePack(remote: RemoteAccess, ref: string, from: string, to: string, pack: Uint8Array, what: string): Promise<void> {
-	const capabilities = to === ZERO ? "report-status delete-refs agent=megit" : "report-status agent=megit";
+	const capabilities = to === ZERO ? "report-status delete-refs agent=maggot" : "report-status agent=maggot";
 	const commands = new TextEncoder().encode(`${pkt(`${from} ${to} ${ref}\0${capabilities}\n`)}0000`);
 	const body = new Uint8Array(commands.length + pack.length);
 	body.set(commands);

@@ -23,7 +23,7 @@ export async function sh(cmd: string, args: string[], cwd?: string): Promise<str
 }
 
 export async function localArtifacts() {
-	const root = await mkdtemp(join(tmpdir(), "megit-test-"));
+	const root = await mkdtemp(join(tmpdir(), "maggot-test-"));
 	const server = await startLocalArtifacts({ root: join(root, "artifacts"), port: 0, quiet: true });
 	async function call<T = any>(method: string, path: string, body?: unknown): Promise<T> {
 		const res = await fetch(`${server.url}/api${path}`, {

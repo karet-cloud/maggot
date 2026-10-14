@@ -1,6 +1,6 @@
 import { HttpError } from "./errors.ts";
 
-/** The subset of a repo capability megit uses. Satisfied by the real `ArtifactsRepo`. */
+/** The subset of a repo capability maggot uses. Satisfied by the real `ArtifactsRepo`. */
 export interface RepoHandle extends Disposable {
 	info(): Promise<ArtifactsRepoInfo>;
 	createToken(scope?: "read" | "write", ttl?: number): Promise<ArtifactsCreateTokenResult>;
@@ -12,7 +12,7 @@ export interface RepoHandle extends Disposable {
 	readCommit(hash: string): Promise<ArtifactsCommitMetadata | null>;
 }
 
-/** The subset of the `Artifacts` namespace binding megit uses. */
+/** The subset of the `Artifacts` namespace binding maggot uses. */
 export interface RepoStore {
 	create(name: string, opts?: { description?: string; setDefaultBranch?: string }): Promise<ArtifactsCreateRepoResult>;
 	import(params: {

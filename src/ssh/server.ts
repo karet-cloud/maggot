@@ -39,7 +39,7 @@ const MSG = {
 
 const DISCONNECT_REASON = { PROTOCOL_ERROR: 2, KEY_EXCHANGE_FAILED: 3, NO_MORE_AUTH_METHODS: 14, BY_APPLICATION: 11 } as const;
 
-const SERVER_VERSION = "SSH-2.0-megit_1.0";
+const SERVER_VERSION = "SSH-2.0-maggot_1.0";
 // OpenSSH 10 prefers the hybrid and warns about anything that isn't post-quantum.
 const HYBRID_KEX = "mlkem768x25519-sha256";
 const KEX_ALGORITHMS = [HYBRID_KEX, "curve25519-sha256", "curve25519-sha256@libssh.org"];
@@ -390,7 +390,7 @@ export class SshServer<U extends SshUser> {
 		const cipherIn = ciphersIn.find((c) => c in CIPHERS);
 		const cipherOut = ciphersOut.find((c) => c in CIPHERS);
 		if (!chosenKex || !hostKey || !cipherIn || !cipherOut || !compressionIn.includes("none") || !compressionOut.includes("none")) {
-			throw new SshError("No common algorithms: megit's SSH needs curve25519-sha256, ssh-ed25519 and AES-GCM (any OpenSSH from the last ten years)");
+			throw new SshError("No common algorithms: maggot's SSH needs curve25519-sha256, ssh-ed25519 and AES-GCM (any OpenSSH from the last ten years)");
 		}
 		if (cipherIn !== cipherOut) throw new SshError("Use the same cipher in both directions");
 		this.chosenCipher = cipherIn;
@@ -595,7 +595,7 @@ export class SshServer<U extends SshUser> {
 		} catch (err) {
 			if (!channel.aborted) {
 				console.error("ssh command failed", err);
-				await channel.stderr("megit: something went wrong on the server; try again.\n").catch(() => {});
+				await channel.stderr("maggot: something went wrong on the server; try again.\n").catch(() => {});
 			}
 		}
 		channel.finish(status);

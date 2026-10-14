@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { branchMatches, compositeSteps, expandMatrix, fetchDepthFor, filterAllows, parseUses, parseWorkflow, runnerFor, typeAllows, WorkflowError } from "../src/ci/workflow.ts";
 
-const P = ".megit/workflows/ci.yml";
+const P = ".maggot/workflows/ci.yml";
 const parses = (source: string) => parseWorkflow(source, P);
 const rejects = (source: string, message: RegExp) => assert.throws(() => parses(source), (err: unknown) => err instanceof WorkflowError && message.test(err.message) && err.message.startsWith(`${P}: `));
 
@@ -75,7 +75,7 @@ test("`on` is a key, not YAML 1.1's boolean", () => {
 	assert.ok(parses("on: [push, workflow_dispatch]\njobs:\n  a:\n    steps:\n      - run: x\n").on.dispatch);
 });
 
-test("anything megit wouldn't honour is an error, naming where", () => {
+test("anything maggot wouldn't honour is an error, naming where", () => {
 	const job = (extra: string) => `on: push\njobs:\n  a:\n    runs-on: cloudflare\n${extra}    steps:\n      - run: x\n`;
 	const stepWith = (extra: string) => `on: push\njobs:\n  a:\n    steps:\n      - run: x\n${extra}`;
 	rejects("on: schedule\njobs:\n  a:\n    steps:\n      - run: x\n", /on.schedule is a list/);
@@ -117,7 +117,7 @@ test("anything megit wouldn't honour is an error, naming where", () => {
 	rejects("on: push\njobs: {}\n", /at least one job/);
 	rejects("on: push\njobs:\n  a:\n    steps: []\n", /at least one step/);
 	rejects("on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ nope.x }}\n", /nope isn't a context/);
-	rejects("on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ vars.X }}\n", /vars isn't in megit yet/);
+	rejects("on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ vars.X }}\n", /vars isn't in maggot yet/);
 	rejects("on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ success() }}\n", /can only be used in if/);
 	rejects("on: push\nenv:\n  X: ${{ hashFiles('a') }}\njobs:\n  a:\n    steps:\n      - run: x\n", /hashFiles\(\) can only be used in steps/);
 	rejects("on: push\njobs:\n  a:\n    steps:\n      - run: echo ${{ secrets.GITHUB_TOKEN }}\n", /GITHUB_TOKEN/);
@@ -134,7 +134,7 @@ test("runner labels", () => {
 	assert.throws(() => runnerFor("blacksmith-4vcpu-ubuntu-2404", "r"), /Blacksmith runners only take jobs from GitHub Actions/);
 	assert.throws(() => runnerFor("ubuntu-24.04-arm", "r"), /x64/);
 	assert.throws(() => runnerFor(["self-hosted", "linux"], "r"), /one runner label/);
-	assert.throws(() => runnerFor("macos-latest", "r"), /isn't a runner megit knows/);
+	assert.throws(() => runnerFor("macos-latest", "r"), /isn't a runner maggot knows/);
 });
 
 test("branch filters and pull request types", () => {

@@ -87,7 +87,7 @@ export interface JobStub {
 
 export interface CiHost {
 	sql: SqlStorage;
-	env: { MEGIT_API_KEY?: string; MEGIT_CI_CLOUDFLARE?: string; CI_BUCKET?: R2Bucket };
+	env: { MAGGOT_API_KEY?: string; MAGGOT_CI_CLOUDFLARE?: string; CI_BUCKET?: R2Bucket };
 	store: RepoStore;
 	/** Where actions on GitHub are read from (tests pass a stand-in). */
 	github?: Pick<GitHubActions, "resolve" | "readFile">;
@@ -303,8 +303,8 @@ export class CiRuns {
 	}
 
 	private get apiKey(): string {
-		const key = this.host.env.MEGIT_API_KEY;
-		if (!key) throw new HttpError(500, "MISCONFIGURED", "MEGIT_API_KEY is not set");
+		const key = this.host.env.MAGGOT_API_KEY;
+		if (!key) throw new HttpError(500, "MISCONFIGURED", "MAGGOT_API_KEY is not set");
 		return key;
 	}
 
@@ -319,9 +319,9 @@ export class CiRuns {
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('ci', ?)", JSON.stringify(s));
 	}
 
-	/** Whether this deployment attached a container to CiJob (MEGIT_CI_CLOUDFLARE is "on" only then). */
+	/** Whether this deployment attached a container to CiJob (MAGGOT_CI_CLOUDFLARE is "on" only then). */
 	cloudflareAvailable(): boolean {
-		return this.host.env.MEGIT_CI_CLOUDFLARE === "on";
+		return this.host.env.MAGGOT_CI_CLOUDFLARE === "on";
 	}
 
 	/** The repository's choice, or Cloudflare where it's available and Depot where it isn't. */
@@ -377,8 +377,8 @@ export class CiRuns {
 	}
 
 	async setSecret(name: string, value: unknown): Promise<CiSettings> {
-		if (!/^[A-Za-z_][A-Za-z0-9_]{0,99}$/.test(name) || /^(GITHUB|MEGIT|RUNNER)_/i.test(name)) {
-			throw new HttpError(400, "INVALID_INPUT", "Secret names are letters, digits and _, not starting with a digit, GITHUB_, MEGIT_ or RUNNER_");
+		if (!/^[A-Za-z_][A-Za-z0-9_]{0,99}$/.test(name) || /^(GITHUB|MAGGOT|RUNNER)_/i.test(name)) {
+			throw new HttpError(400, "INVALID_INPUT", "Secret names are letters, digits and _, not starting with a digit, GITHUB_, MAGGOT_ or RUNNER_");
 		}
 		if (typeof value !== "string") throw new HttpError(400, "INVALID_INPUT", "value is a string");
 		// Shorter values can't be hidden in logs reliably (they'd match ordinary text).
@@ -1049,7 +1049,7 @@ export class CiRuns {
 	/** The github context: what's fixed for a job of a run. */
 	private githubContext(run: RunRow, trigger: Trigger, job: string): Record<string, string> {
 		const repo = this.host.repository();
-		// A pull request's head is what's checked out (megit makes no merge commits to test), so its ref names that.
+		// A pull request's head is what's checked out (maggot makes no merge commits to test), so its ref names that.
 		const ref = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}/head` : `refs/heads/${trigger.branch}`;
 		return {
 			sha: run.sha,
@@ -1167,11 +1167,11 @@ export class CiRuns {
 		const contexts = { github, matrix: spec.matrix ?? {}, needs: this.needsContext(run.number, spec.needsGroups), strategy, inputs: {} };
 		const base: Record<string, string> = {
 			CI: "true",
-			MEGIT_ACTIONS: "true",
+			MAGGOT_ACTIONS: "true",
 			GITHUB_ACTIONS: "true",
 			RUNNER_OS: "Linux",
 			RUNNER_ARCH: "X64",
-			RUNNER_NAME: "megit",
+			RUNNER_NAME: "maggot",
 			...Object.fromEntries(Object.entries(github).map(([k, v]) => [`GITHUB_${k.toUpperCase()}`, v])),
 		};
 		// Workflow env, then job env, each filled in as GitHub does (job env sees the workflow's).

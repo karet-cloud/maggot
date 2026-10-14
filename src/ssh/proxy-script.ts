@@ -1,22 +1,22 @@
-// The ProxyCommand people run so ssh can reach megit: it carries the SSH connection over a WebSocket.
+// The ProxyCommand people run so ssh can reach maggot: it carries the SSH connection over a WebSocket.
 // Served at /ssh-proxy.mjs. Plain JavaScript with no dependencies, for Node.js 22 or newer.
 export const PROXY_SCRIPT_PATH = "/ssh-proxy.mjs";
 
 export const PROXY_SCRIPT = `#!/usr/bin/env node
-// megit SSH proxy: carries an SSH connection over a WebSocket, for ssh's ProxyCommand. In ~/.ssh/config:
+// maggot SSH proxy: carries an SSH connection over a WebSocket, for ssh's ProxyCommand. In ~/.ssh/config:
 //
-//   Host <megit host>
+//   Host <maggot host>
 //     User git
-//     ProxyCommand node ~/.ssh/megit-proxy.mjs %h
+//     ProxyCommand node ~/.ssh/maggot-proxy.mjs %h
 //
 // Give a ws:// or wss:// URL instead of the host name to reach a server on another port or path.
 const target = process.argv[2];
 if (!target) {
-	console.error("usage: megit-proxy.mjs <host or wss:// URL>");
+	console.error("usage: maggot-proxy.mjs <host or wss:// URL>");
 	process.exit(2);
 }
 if (typeof WebSocket !== "function") {
-	console.error("megit-proxy needs Node.js 22 or newer");
+	console.error("maggot-proxy needs Node.js 22 or newer");
 	process.exit(2);
 }
 const url = /^wss?:\\/\\//.test(target) ? target : \`wss://\${target}/_ssh\`;
@@ -41,7 +41,7 @@ ws.addEventListener("message", (event) => {
 ws.addEventListener("close", (event) => {
 	if (done) return;
 	done = true;
-	if (!open) console.error(\`megit-proxy: couldn't connect to \${url}\${event.reason ? \`: \${event.reason}\` : ""}\`);
+	if (!open) console.error(\`maggot-proxy: couldn't connect to \${url}\${event.reason ? \`: \${event.reason}\` : ""}\`);
 	process.stdout.end(() => process.exit(open ? 0 : 1));
 });
 

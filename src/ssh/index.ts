@@ -1,4 +1,4 @@
-// SSH over WebSocket. Workers can't listen on port 22, so SSH clients reach megit through a
+// SSH over WebSocket. Workers can't listen on port 22, so SSH clients reach maggot through a
 // ProxyCommand that carries the SSH byte stream over a WebSocket to this endpoint (see the SSH keys
 // page). Everything after that is ordinary SSH, encrypted end to end between git's ssh and the Worker.
 import { db, ensureSchema, touchSshKey, userForSshKey } from "../db.ts";
@@ -12,7 +12,7 @@ export { SSH_PATH } from "./keys.ts";
 
 export async function handleSsh(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
 	if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-		return new Response("This is megit's SSH endpoint. Connect with ssh through the ProxyCommand on the SSH keys page.\n", {
+		return new Response("This is maggot's SSH endpoint. Connect with ssh through the ProxyCommand on the SSH keys page.\n", {
 			status: 426,
 			headers: { "content-type": "text/plain" },
 		});

@@ -25,7 +25,7 @@ function Login() {
 	});
 	return (
 		<AuthForm
-			title="Sign in to megit"
+			title="Sign in to maggot"
 			subtitle="Browse, push and review your repositories."
 			onSubmit={() => signIn.mutate()}
 			busy={signIn.isPending}

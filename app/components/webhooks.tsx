@@ -21,9 +21,9 @@ export function Webhooks({ project, archived = false }: { project: string; archi
 		<Panel title="Webhooks" actions={<span className="text-[11px] text-faint">POSTed as JSON, signed with your secret</span>}>
 			<div className="space-y-4 p-4">
 				<p className="text-xs text-dim">
-					Each delivery carries <code className="font-mono text-fg">X-Megit-Event</code>,{" "}
-					<code className="font-mono text-fg">X-Megit-Delivery</code> and{" "}
-					<code className="font-mono text-fg">X-Megit-Signature-256: sha256=&lt;HMAC of the body&gt;</code>. Failed deliveries are retried
+					Each delivery carries <code className="font-mono text-fg">X-Maggot-Event</code>,{" "}
+					<code className="font-mono text-fg">X-Maggot-Delivery</code> and{" "}
+					<code className="font-mono text-fg">X-Maggot-Signature-256: sha256=&lt;HMAC of the body&gt;</code>. Failed deliveries are retried
 					five times over about nine hours.
 				</p>
 				{hooks.isPending ? <Spinner /> : <ErrorNote error={hooks.error} />}
@@ -72,7 +72,7 @@ function AddHook({ project }: { project: string }) {
 		>
 			<div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
 				<Field label="Payload URL">
-					<Input value={url} onChange={(e) => setUrl(e.target.value)} type="url" placeholder="https://ci.example.com/megit" required />
+					<Input value={url} onChange={(e) => setUrl(e.target.value)} type="url" placeholder="https://ci.example.com/maggot" required />
 				</Field>
 				<Field label="Secret" hint="At least 8 characters; your receiver checks each payload's signature with it.">
 					<Input value={secret} onChange={(e) => setSecret(e.target.value)} type="password" autoComplete="off" minLength={8} required />

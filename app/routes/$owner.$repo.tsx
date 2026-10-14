@@ -18,7 +18,7 @@ function ProjectLayout() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const live = useProjectLive(project);
-	// Pushes through megit's git URL emit events, but poll the head too (quickly while the repo is empty).
+	// Pushes through maggot's git URL emit events, but poll the head too (quickly while the repo is empty).
 	const info = useQuery({
 		queryKey: keys.project(project),
 		queryFn: () => api.project(project),

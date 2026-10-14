@@ -1,13 +1,13 @@
-# megit Actions
+# maggot Actions
 
-megit runs workflows from `.megit/workflows/*.yml` (or `.yaml`) in the repository, in GitHub Actions
+maggot runs workflows from `.maggot/workflows/*.yml` (or `.yaml`) in the repository, in GitHub Actions
 syntax: jobs of steps on a fresh Linux machine with the commit already checked out, ordered with `needs`,
-expanded by a `matrix`, using shell scripts, megit's built-in checkout, cache and artifact actions, and
-JavaScript and composite actions from GitHub or the repository itself. Anything megit doesn't do makes
-the workflow fail to load with a message naming the key; megit never silently skips it. The Actions tab
+expanded by a `matrix`, using shell scripts, maggot's built-in checkout, cache and artifact actions, and
+JavaScript and composite actions from GitHub or the repository itself. Anything maggot doesn't do makes
+the workflow fail to load with a message naming the key; maggot never silently skips it. The Actions tab
 lists each workflow file and why it can't run.
 
-An example that runs this repository's own tests is in [`.megit/workflows/ci.yml`](../.megit/workflows/ci.yml).
+An example that runs this repository's own tests is in [`.maggot/workflows/ci.yml`](../.maggot/workflows/ci.yml).
 
 ```yaml
 name: CI
@@ -68,7 +68,7 @@ jobs:
 
 ## Supported syntax
 
-| Key | What megit accepts |
+| Key | What maggot accepts |
 | --- | --- |
 | `on` | `push` with `branches` or `branches-ignore` (`*`, `**`, `?`, and `!` to exclude); `pull_request` with those plus `types` (`opened`, `synchronize`, `reopened`; all three by default); `workflow_dispatch` without inputs; `schedule` (a list of `cron:` entries). A string or list of event names also works. |
 | `name`, `env` | The workflow's name (defaults to the file name) and environment for every job. |
@@ -76,7 +76,7 @@ jobs:
 | `permissions` | Only read access: `read-all`, or scopes set to `read` or `none`. Jobs' checkout token is read-only anyway. |
 | `jobs.<id>` | `name`, `runs-on`, `needs` (string or list; cycles and unknown names are errors), `if`, `outputs`, `strategy`, `timeout-minutes` (1–360, default 30), `env`, `defaults`, `permissions`, `steps`. Up to 50 jobs per workflow, and 256 once matrices are expanded. |
 | `strategy` | `matrix` (named lists of values, plus `include` and `exclude`, as GitHub combines them; at most 256 combinations; not one built by an expression), `fail-fast` (default true: a failed job cancels the rest of its matrix), `max-parallel`. |
-| `runs-on` | `cloudflare` (or `megit`), `depot` (2 vCPUs), `depot-<n>` or `depot-ubuntu-<version>-<n>` with n = 2, 4, 8, 16, 32 or 64, or `ubuntu-latest`, `ubuntu-<version>`, `linux` and `default` for the repository's default runner. May use `${{ matrix.* }}`. x64 only: Arm labels are refused. |
+| `runs-on` | `cloudflare` (or `maggot`), `depot` (2 vCPUs), `depot-<n>` or `depot-ubuntu-<version>-<n>` with n = 2, 4, 8, 16, 32 or 64, or `ubuntu-latest`, `ubuntu-<version>`, `linux` and `default` for the repository's default runner. May use `${{ matrix.* }}`. x64 only: Arm labels are refused. |
 | `steps[]` | `run` (a script) or `uses` (an action) with `with`, plus `name`, `id`, `shell` (`bash`, the default, or `sh`), `working-directory` (inside the repository), `env`, `if`, `continue-on-error`, `timeout-minutes` (no longer than the job's). Up to 50 steps per job. |
 | `uses` | `actions/checkout` (built in: `fetch-depth`, default 50, 0 for all history; `clean: true`; `persist-credentials: false`), `actions/cache`, `actions/cache/restore` and `actions/cache/save` (built in, see [Caches](#caches)), `actions/upload-artifact` and `actions/download-artifact` (built in, see [Artifacts](#artifacts)), and any JavaScript or composite action from GitHub (`owner/repo@ref`, `owner/repo/path@ref`) or this repository (`./path`). See [Actions](#actions). |
 | `if` | Any expression, with or without `${{ }}`. Without a status function it means `success() && (…)`, as on GitHub. A job's `if` is checked once the jobs it `needs` are done. |
@@ -84,7 +84,7 @@ jobs:
 
 Steps' expressions are filled in on the machine as each step starts, so they see the outputs of the
 steps before (`$GITHUB_OUTPUT`), and `hashFiles` hashes the checkout as it is then. Jobs see the `github`
-values as environment variables (`GITHUB_SHA`, `GITHUB_REF_NAME`, …), plus `CI=true`, `MEGIT_ACTIONS=true`,
+values as environment variables (`GITHUB_SHA`, `GITHUB_REF_NAME`, …), plus `CI=true`, `MAGGOT_ACTIONS=true`,
 `GITHUB_ACTIONS=true`, `RUNNER_OS`, `RUNNER_ARCH`, `RUNNER_TEMP`, `RUNNER_TOOL_CACHE`, and the `$GITHUB_ENV`,
 `$GITHUB_PATH`, `$GITHUB_OUTPUT`, `$GITHUB_STATE` and `$GITHUB_STEP_SUMMARY` files. The workspace is
 `/workspace` and jobs have Internet access. A job's `outputs` are worked out when its steps are done; one
@@ -106,7 +106,7 @@ workflows, `workflow_dispatch` inputs, `vars`, a matrix built by an expression, 
 - **schedule**: at the times its `cron` entries name (five fields, UTC; lists, ranges, steps and
   names like `MON-FRI`), on the default branch's latest commit, as on GitHub. Schedules are read from the
   default branch's workflow files whenever it moves. Runs are at least 5 minutes apart; one that's more
-  than 15 minutes late (megit was busy) is skipped to the next time, and nothing is scheduled while the
+  than 15 minutes late (maggot was busy) is skipped to the next time, and nothing is scheduled while the
   repository has no runner set up.
 
 A pull request's runs wait as **Waiting for approval** unless whoever caused them can write to the
@@ -135,9 +135,9 @@ repository and 20 per author, so they can't push other runs out.
 
 `uses: owner/repo@ref` (or `owner/repo/path@ref`) runs an action from GitHub: a JavaScript action
 (`runs.using: node12` … `node24`, run with Node.js 20 or later) or a composite action. Before a job
-starts, megit pins each action to a commit (a tag first, then a branch; or a full commit hash) and reads
+starts, maggot pins each action to a commit (a tag first, then a branch; or a full commit hash) and reads
 its `action.yml`, so a job runs exactly what it resolved. A job whose actions can't be resolved fails
-before any machine starts, saying why. During setup the job downloads each action's files from megit,
+before any machine starts, saying why. During setup the job downloads each action's files from maggot,
 which keeps a copy of every action commit in R2 after fetching it from GitHub once; it also uses the
 machine's Node.js if it's 20 or later, and installs Node.js 24 if not.
 
@@ -150,7 +150,7 @@ one step; their `outputs` become that step's outputs. Actions may use actions, n
 `uses: ./path` runs an action from the repository at the run's commit, the same ways.
 
 Actions that talk to GitHub's own services (its cache or artifact services, its API with
-`GITHUB_TOKEN`) won't find them; megit doesn't hand jobs a `GITHUB_TOKEN`. Docker container actions
+`GITHUB_TOKEN`) won't find them; maggot doesn't hand jobs a `GITHUB_TOKEN`. Docker container actions
 aren't supported. Workflow commands written to the log (`::add-mask::`, `::set-output::`) aren't acted on;
 use the `$GITHUB_*` files.
 
@@ -161,7 +161,7 @@ when the job is succeeding and the key wasn't restored exactly); `actions/cache/
 `actions/cache/save` do the two halves. Inputs: `key`, `path` (lines, globs, `~`, `!` to exclude),
 `restore-keys` (prefixes, tried in order), `fail-on-cache-miss`, `lookup-only`; outputs: `cache-hit`
 (`true` only for an exact match on `key`), `cache-primary-key` and `cache-matched-key`. Caches are
-`.tar.gz` archives kept in R2, uploaded in parts through megit.
+`.tar.gz` archives kept in R2, uploaded in parts through maggot.
 
 As on GitHub, caches are scoped: a job saves to its branch (a pull request's job to the pull request)
 and restores from its own scope first, then its base branch's, then the default branch's, trying the key
@@ -186,7 +186,7 @@ Settings → Actions picks the **default runner**, which handles `ubuntu-latest`
 A job can also name a runner.
 
 - **Cloudflare container**: a Cloudflare Container attached to each job. It's off unless the server's
-  deploy sets `MEGIT_CI_CLOUDFLARE=on` (and `MEGIT_CI_DOCKERFILE=1` to build `container/ci/Dockerfile`
+  deploy sets `MAGGOT_CI_CLOUDFLARE=on` (and `MAGGOT_CI_DOCKERFILE=1` to build `container/ci/Dockerfile`
   rather than use Cloudflare's managed Debian image). Without it, Settings says it isn't available, Depot
   is the default runner, and `runs-on: cloudflare` jobs fail saying so.
 - **Depot sandbox**: a [Depot sandbox](https://depot.dev/docs/api/sandbox-sdk-reference) billed to
@@ -194,7 +194,7 @@ A job can also name a runner.
 
 Blacksmith isn't supported, and `runs-on: blacksmith-*` is refused with that reason. Its
 [documentation](https://docs.blacksmith.sh/introduction/quickstart) describes it only as a runner for
-GitHub Actions jobs in GitHub organizations, so it can't take megit's jobs.
+GitHub Actions jobs in GitHub organizations, so it can't take maggot's jobs.
 
 ### Connecting Depot
 
@@ -206,15 +206,15 @@ GitHub Actions jobs in GitHub organizations, so it can't take megit's jobs.
    `depot org show` prints the ID of the CLI's current organization; `depot org switch` changes which
    organization that is ([CLI reference](https://depot.dev/docs/cli/reference/overview)). A user token
    in a single organization doesn't need it.
-3. In megit, go to **Settings → Actions → Depot sandboxes** and paste the token (and the ID, if needed). Then click
-   **Connect Depot**. megit checks the token with Depot before saving it, then stores it encrypted.
+3. In maggot, go to **Settings → Actions → Depot sandboxes** and paste the token (and the ID, if needed). Then click
+   **Connect Depot**. maggot checks the token with Depot before saving it, then stores it encrypted.
    It's never shown again. To change it, paste a new one; to remove it, click Disconnect.
 4. Use `runs-on: depot` or `depot-<vcpus>`, or make Depot the default runner.
 
 ## Secrets
 
 Settings → Actions → Secrets (repository admins). Names use letters, digits and `_`, don't start
-with a digit, and can't start with `GITHUB_`, `MEGIT_` or `RUNNER_`. Each value can be up to 48 KB, and a
+with a digit, and can't start with `GITHUB_`, `MAGGOT_` or `RUNNER_`. Each value can be up to 48 KB, and a
 repository can have up to 100 secrets. A value is at least 3 characters, so it can be masked in logs (a
 job that uses a shorter one saved earlier fails, asking for it to be replaced). Values are encrypted,
 never returned by the API, and masked in logs. Use them as `${{ secrets.NAME }}`, usually through `env`.
@@ -248,7 +248,7 @@ As on GitHub's `pull_request` event, the head's own version of a workflow is wha
 can push to the head can change what a required workflow does; review workflow changes before approving
 or merging.
 
-megit doesn't have an API for external CI to report statuses yet. Only megit Actions runs count as checks.
+maggot doesn't have an API for external CI to report statuses yet. Only maggot Actions runs count as checks.
 
 ## API
 
@@ -287,7 +287,7 @@ a credential can always be revoked.
 
 The `workflow_run` webhook event is sent when a run completes.
 
-Jobs reach megit at `/api/ci` with their own short-lived token (not a person's): for caches, artifacts
+Jobs reach maggot at `/api/ci` with their own short-lived token (not a person's): for caches, artifacts
 and actions' files. It works only for the job's repository, run and cache scopes, and expires soon after
 the job's time limit. Caches, artifacts and actions' files are kept in the `CI_BUCKET` R2 bucket
-(`megit-ci`), which `cloudflare.config.ts` binds.
+(`maggot-ci`), which `cloudflare.config.ts` binds.

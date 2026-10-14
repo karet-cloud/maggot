@@ -1,6 +1,6 @@
 // Steps as jobs run them, on this machine (LocalSandbox): expressions filled in as each step starts,
 // outputs and hashFiles, actions in the repository (composite and JavaScript, with pre and post steps),
-// and caches and artifacts through megit's job API (src/ci/job-api.ts) to an in-memory R2.
+// and caches and artifacts through maggot's job API (src/ci/job-api.ts) to an in-memory R2.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -81,7 +81,7 @@ function launchFor(o: { repo: { url: string; sha: string }; steps: StepSpec[]; a
 		runner: { kind: "cloudflare" },
 		timeoutMinutes: 5,
 		plan: buildPlan(o.steps, o.actions ?? o.steps.map(() => null)),
-		env: { CI: "true", GITHUB_SHA: o.repo.sha, GITHUB_WORKSPACE: WORKSPACE, GITHUB_SERVER_URL: "https://megit.test", GITHUB_REPOSITORY: "alice/app", GITHUB_RUN_ID: "7" },
+		env: { CI: "true", GITHUB_SHA: o.repo.sha, GITHUB_WORKSPACE: WORKSPACE, GITHUB_SERVER_URL: "https://maggot.test", GITHUB_REPOSITORY: "alice/app", GITHUB_RUN_ID: "7" },
 		contexts: { github: { sha: o.repo.sha, ref: "refs/heads/master", event_name: "push" }, matrix: { node: 22 }, needs: {}, strategy: {}, inputs: {} },
 		secrets: {},
 		outputs: o.outputs ?? {},
@@ -196,7 +196,7 @@ console.log("main ran in " + process.cwd() + " from " + process.env.GITHUB_ACTIO
 	};
 	const steps = [
 		step("Check out", { kind: "checkout", run: null }),
-		step("Greet", { kind: "action", id: "c", with: { who: "megit" }, env: { CALLER_ENV: "the caller's env" }, uses: { kind: "local", path: ".github/actions/greet" } }),
+		step("Greet", { kind: "action", id: "c", with: { who: "maggot" }, env: { CALLER_ENV: "the caller's env" }, uses: { kind: "local", path: ".github/actions/greet" } }),
 		step("Show", { run: 'echo "said ${{ steps.c.outputs.msg }}"' }),
 		step("JS", { kind: "action", id: "j", with: { name: "Ada" }, uses: { kind: "local", path: ".github/actions/js" } }),
 		step("Show JS", { run: 'echo "js said ${{ steps.j.outputs.greeting }}"' }),
@@ -208,8 +208,8 @@ console.log("main ran in " + process.cwd() + " from " + process.env.GITHUB_ACTIO
 	assert.deepEqual(shown(final), ["Set up job: success", "Pre JS: success", "Check out: success", "Greet: success", "Show: success", "JS: success", "Show JS: success", "Post JS: success", "Complete job: success"]);
 	assert.match(logs.get(0)!, /Node\.js v\d+/);
 	assert.match(logs.get(1)!, /pre ran/);
-	assert.match(logs.get(3)!, new RegExp(`hi megit from ${box.workspace}/.github/actions/greet with the caller's env`), "a composite action's steps get the env of the step that used it");
-	assert.match(logs.get(4)!, /said hello-megit/);
+	assert.match(logs.get(3)!, new RegExp(`hi maggot from ${box.workspace}/.github/actions/greet with the caller's env`), "a composite action's steps get the env of the step that used it");
+	assert.match(logs.get(4)!, /said hello-maggot/);
 	assert.match(logs.get(5)!, new RegExp(`main ran in ${box.workspace} from ${box.workspace}/.github/actions/js`));
 	assert.match(logs.get(6)!, /js said hello Ada/);
 	assert.match(logs.get(7)!, /post saw 20/);
@@ -302,7 +302,7 @@ async function apiServer(): Promise<{ url: string; storage: CiStorage; bucket: M
 		ciUploadPart: (kind: "caches" | "artifacts", id: string, g: JobGrant, part: R2UploadedPart) => storage.recordPart(kind, id, g, part),
 		ciUploadCommit: (kind: "caches" | "artifacts", id: string, g: JobGrant) => storage.commit(kind, id, g),
 	};
-	const env = { MEGIT_API_KEY: API_KEY, CI_BUCKET: bucket, PROJECT: { getByName: () => coordinator } } as unknown as Env;
+	const env = { MAGGOT_API_KEY: API_KEY, CI_BUCKET: bucket, PROJECT: { getByName: () => coordinator } } as unknown as Env;
 	const server = createServer(async (req, res) => {
 		const chunks: Buffer[] = [];
 		for await (const c of req) chunks.push(c as Buffer);

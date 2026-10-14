@@ -568,7 +568,7 @@ export async function markRead(database: D1Database, userId: string, ids?: strin
 
 // ── Personal access tokens ───────────────────────────────────────────────────
 
-export const TOKEN_PREFIX = "megit_pat_";
+export const TOKEN_PREFIX = "maggot_pat_";
 
 export interface TokenInfo {
 	id: string;
@@ -648,7 +648,7 @@ export async function addSshKey(database: D1Database, userId: string, key: { nam
 			.run();
 		inserted = result.meta.changes > 0;
 	} catch (err) {
-		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", "That key is already in use on megit");
+		if (/unique/i.test(String(err))) throw new HttpError(409, "ALREADY_EXISTS", "That key is already in use on maggot");
 		throw err;
 	}
 	if (!inserted) throw new HttpError(403, "QUOTA_EXCEEDED", `An account can have at most ${MAX_SSH_KEYS} SSH keys`);

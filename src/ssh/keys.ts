@@ -41,7 +41,7 @@ export async function fingerprint(blob: Uint8Array): Promise<string> {
 export async function parsePublicKey(line: string): Promise<ParsedKey> {
 	const parts = line.trim().split(/\s+/);
 	const [type, data, ...comment] = parts;
-	const invalid = (why: string) => new HttpError(400, "INVALID_KEY", `That isn't a public key megit can use: ${why}`);
+	const invalid = (why: string) => new HttpError(400, "INVALID_KEY", `That isn't a public key maggot can use: ${why}`);
 	if (!type || !data) throw invalid("paste the whole line from your .pub file, starting with its type (for example ssh-ed25519)");
 	if (type.includes("PRIVATE")) throw invalid("that's a private key; paste the .pub file instead");
 	if (!KEY_TYPES[type]) throw invalid(`${type} keys aren't supported; use ssh-ed25519, ecdsa-sha2-nistp256/384/521 or ssh-rsa`);
@@ -136,13 +136,13 @@ export interface HostKey {
 const hostKeys = new Map<string, Promise<HostKey>>();
 
 /**
- * The server's Ed25519 host key. It's derived from MEGIT_API_KEY (or MEGIT_SSH_HOST_KEY_SEED, if set),
+ * The server's Ed25519 host key. It's derived from MAGGOT_API_KEY (or MAGGOT_SSH_HOST_KEY_SEED, if set),
  * so every isolate has the same key without storing a private key anywhere; rotating the secret
  * changes the host key, and clients will warn about it.
  */
 export function hostKey(env: Env): Promise<HostKey> {
-	const secret = (env as { MEGIT_SSH_HOST_KEY_SEED?: string }).MEGIT_SSH_HOST_KEY_SEED || env.MEGIT_API_KEY;
-	if (!secret) throw new HttpError(500, "MISCONFIGURED", "MEGIT_API_KEY is not set");
+	const secret = (env as { MAGGOT_SSH_HOST_KEY_SEED?: string }).MAGGOT_SSH_HOST_KEY_SEED || env.MAGGOT_API_KEY;
+	if (!secret) throw new HttpError(500, "MISCONFIGURED", "MAGGOT_API_KEY is not set");
 	let key = hostKeys.get(secret);
 	if (!key) {
 		key = deriveHostKey(secret);
@@ -154,7 +154,7 @@ export function hostKey(env: Env): Promise<HostKey> {
 
 async function deriveHostKey(secret: string): Promise<HostKey> {
 	const mac = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const seed = new Uint8Array(await crypto.subtle.sign("HMAC", mac, new TextEncoder().encode("megit-ssh-host-key-v1")));
+	const seed = new Uint8Array(await crypto.subtle.sign("HMAC", mac, new TextEncoder().encode("maggot-ssh-host-key-v1")));
 	// PKCS#8 for an Ed25519 private key is a fixed prefix and the 32-byte seed (RFC 8410).
 	const pkcs8 = concat([Uint8Array.from([0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20]), seed]);
 	const privateKey = await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, true, ["sign"]);

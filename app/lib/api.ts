@@ -1,4 +1,4 @@
-// Browser client for the megit API. Same origin; the session cookie set at login authenticates it.
+// Browser client for the maggot API. Same origin; the session cookie set at login authenticates it.
 import type {
 	Branches,
 	CodeSearch,
@@ -248,7 +248,7 @@ export const api = {
 	notifications: (unread = false) => call<{ notifications: Notification[]; unread: number }>("GET", `/notifications${unread ? "?unread" : ""}`),
 	markRead: (ids?: string[]) => call<{ ok: true }>("POST", "/notifications/read", ids ? { ids } : {}),
 
-	// Actions: workflow runs from .megit/workflows, their jobs and logs, and the repository's CI settings.
+	// Actions: workflow runs from .maggot/workflows, their jobs and logs, and the repository's CI settings.
 	/** A pull request's checks on its head, as the server judges them for merging. */
 	pullChecks: (project: string, number: number) => call<PullChecks>("GET", `${p(project)}/pulls/${number}/checks`),
 	/** Starts the pull request's missing runs (people who can merge). */
