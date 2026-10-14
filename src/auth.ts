@@ -1,5 +1,6 @@
 // Who is calling: a signed-in user (Better Auth session cookie), a user's personal access token, the
 // admin API key (agents, scripts, tests), or nobody. Repository permissions are decided from that.
+import { waitUntil } from "cloudflare:workers";
 import { betterAuth } from "better-auth";
 import { username } from "better-auth/plugins/username";
 import type { Viewer } from "./api.ts";
@@ -75,7 +76,16 @@ function createAuth(env: Env, origin: string, secret: string) {
 			},
 		},
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
-		advanced: { cookiePrefix: "maggot" },
+		advanced: {
+			cookiePrefix: "maggot",
+			// Emails go out after the response (the request's waitUntil), so signing up or asking for a reset
+			// doesn't wait on delivery, and a reset for an existing account takes as long as one for none.
+			// Links an admin is issuing are still captured, synchronously, before anything is sent.
+			backgroundTasks: { handler: (promise) => waitUntil(promise) },
+			// ensureSchema creates these tables; Better Auth's own check would introspect every table in
+			// the database (dozens of D1 queries) on each isolate's first auth request.
+			database: { validateSchema: false },
+		},
 		// Repository URLs start with the username, so it can't change (renames would have to move them all).
 		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername, immutableUsername: true })],
 	});

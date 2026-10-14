@@ -12,7 +12,8 @@ export const Route = createFileRoute("/settings/tokens")({ component: Tokens });
 function Tokens() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
-	const tokens = useQuery({ queryKey: keys.tokens, queryFn: api.tokens, enabled: Boolean(viewer.data) });
+	// Asked alongside the viewer rather than after it (only skipped once we know nobody's signed in).
+	const tokens = useQuery({ queryKey: keys.tokens, queryFn: api.tokens, enabled: viewer.data !== null });
 	const [name, setName] = useState("");
 	const create = useMutation({
 		mutationFn: () => api.createToken(name.trim()),

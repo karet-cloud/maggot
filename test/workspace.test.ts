@@ -115,3 +115,65 @@ test("read tokens cannot push", async () => {
 	await sh("git", ["commit", "--quiet", "-m", "x"], dir);
 	await assert.rejects(sh("git", ["push", "--quiet", "origin", "HEAD:main"], dir));
 });
+
+/**
+ * A repository with `count` commits on main, also cloned with the git CLI into `dir` for making branches
+ * off old commits: a workspace fetches only the last few dozen commits, so merging those needs more.
+ */
+async function deepRepo(name: string, count: number) {
+	const created = await artifacts.call("POST", "/repos", { name });
+	const remote = { url: created.remote, token: created.token };
+	const dir = join(artifacts.root, `${name}-clone`);
+	await sh("git", ["init", "--quiet", "-b", "main", dir]);
+	await sh("bash", ["-c", `for i in $(seq 1 ${count}); do echo "line $i" >> history.txt; git add history.txt; git commit --quiet -m "commit $i"; done`], dir);
+	await sh("git", ["push", "--quiet", authUrl(remote.url, remote.token), "main"], dir);
+	return { remote, dir };
+}
+
+test("merges a fork's branch that started long before the fetched history, and pushes all of it", async () => {
+	const { remote, dir } = await deepRepo("deep", 150);
+	// Off commit 30 of 150, far behind a shallow fetch of main, with more commits of its own than one fetches.
+	await sh("git", ["checkout", "--quiet", "-b", "long", "main~120"], dir);
+	await sh("bash", ["-c", `for i in $(seq 1 70); do echo "branch $i" >> branch.txt; git add branch.txt; git commit --quiet -m "branch $i"; done`], dir);
+	// The branch is in a fork, so the merge's push has to carry all 70 of its commits.
+	const fork = await artifacts.call("POST", "/repos/deep/fork", { name: "deep--fork" });
+	await sh("git", ["push", "--quiet", authUrl(fork.remote, fork.token), "long"], dir);
+
+	const ws = new Workspace("main", bot);
+	await ws.syncBase(remote);
+	const theirs = await ws.fetchTask({ url: fork.remote, token: fork.token }, "long");
+	const outcome = await ws.merge(theirs, "Merge long", bot, "merge-commit");
+	assert.equal(outcome.kind, "merged");
+	assert.deepEqual(outcome.kind === "merged" && outcome.changedFiles, ["branch.txt"]);
+	assert.equal(await ws.push(remote), true);
+
+	// A full clone of the result is intact and has both histories, joined at the real merge base.
+	const check = join(artifacts.root, "deep-check");
+	await sh("git", ["clone", "--quiet", authUrl(remote.url, remote.token), check]);
+	await sh("git", ["fsck", "--full", "--strict"], check);
+	assert.equal(await sh("git", ["rev-list", "--count", "HEAD"], check), String(150 + 70 + 1));
+	assert.equal(await sh("git", ["merge-base", "HEAD^1", "HEAD^2"], check), await sh("git", ["rev-parse", "main~120"], dir));
+});
+
+test("finds the real merge base behind the shallow cut, so an old branch merges cleanly", async () => {
+	const { remote, dir } = await deepRepo("deep2", 120);
+	// Main changed history.txt 110 times since this branch started; without the real merge base that
+	// would look like unrelated histories. The branch only adds a file.
+	await sh("git", ["checkout", "--quiet", "-b", "old", "main~110"], dir);
+	await writeFile(join(dir, "old.txt"), "old\n");
+	await sh("git", ["add", "old.txt"], dir);
+	await sh("git", ["commit", "--quiet", "-m", "old change"], dir);
+	await sh("git", ["push", "--quiet", authUrl(remote.url, remote.token), "old"], dir);
+
+	const ws = new Workspace("main", bot);
+	await ws.syncBase(remote);
+	const outcome = await ws.merge(await ws.fetchTask(remote, "old"), "Merge old", bot, "squash");
+	assert.equal(outcome.kind, "merged");
+	assert.deepEqual(outcome.kind === "merged" && outcome.changedFiles, ["old.txt"]);
+	assert.equal(await ws.push(remote), true);
+	const check = join(artifacts.root, "deep2-check");
+	await sh("git", ["clone", "--quiet", authUrl(remote.url, remote.token), check]);
+	await sh("git", ["fsck", "--full", "--strict"], check);
+	assert.equal(await sh("git", ["show", "HEAD:old.txt"], check), "old");
+	assert.equal((await sh("git", ["show", "HEAD:history.txt"], check)).split("\n").length, 120);
+});

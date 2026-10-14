@@ -271,6 +271,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (input.importDepth !== undefined && (!Number.isInteger(input.importDepth) || input.importDepth < 1 || input.importDepth > 10_000)) throw new HttpError(400, "INVALID_INPUT", "importDepth must be an integer from 1 to 10000");
 		if (this.metaOrNull()) throw new HttpError(409, "ALREADY_EXISTS", `Project ${input.name} already exists`);
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
+		// Made just now by this call (not imported, forked or adopted), so it's known to be empty.
+		let fresh = false;
 		try {
 			created = await retrying(async () => {
 				if (input.forked) {
@@ -279,12 +281,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					const [info, token] = await Promise.all([repo.info(), repo.createToken("write", INTERNAL_TOKEN_TTL)]);
 					return { ...info, token: token.plaintext };
 				}
-				return input.importUrl
-					? this.store.import({
-							source: { url: input.importUrl, branch: input.importBranch, depth: input.importDepth },
-							target: { name: input.name, opts: { description: input.description } },
-						})
-					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
+				if (input.importUrl) {
+					return this.store.import({
+						source: { url: input.importUrl, branch: input.importBranch, depth: input.importDepth },
+						target: { name: input.name, opts: { description: input.description } },
+					});
+				}
+				const made = await this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
+				fresh = true;
+				return made;
 			});
 		} catch (err) {
 			// The repo exists but this coordinator never recorded it: a previous create died partway
@@ -297,17 +302,19 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		}
 
 		await this.waitReady(created.name);
-		const empty = await (async () => {
-			using repo = await this.store.get(created.name);
-			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
-		})();
-		if (empty && !input.importUrl && !input.forked && input.readme !== false) {
-			const seed = new Workspace(created.defaultBranch, MERGE_IDENTITY);
-			await seed.seed(
-				{ url: created.remote, token: created.token },
-				{ "README.md": `# ${input.title ?? input.name}\n\n${input.description ?? ""}\n` },
-				"Initial commit",
-			);
+		const remote = { url: created.remote, token: created.token };
+		const seed = !input.importUrl && !input.forked && input.readme !== false;
+		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
+		// A fresh repository's are known without asking: none, or the README's commit.
+		let refs: Record<string, string> | null = null;
+		if (fresh) {
+			refs = seed ? { [created.defaultBranch]: await seedReadme(remote, created.defaultBranch, input) } : {};
+		} else {
+			const empty = await (async () => {
+				using repo = await this.store.get(created.name);
+				return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
+			})();
+			if (empty && seed) await seedReadme(remote, created.defaultBranch, input);
 		}
 
 		const meta: Meta = {
@@ -318,14 +325,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			createdAt: new Date().toISOString(),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
-		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
 		try {
-			const refs = await listBranches({ url: created.remote, token: created.token });
-			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(Object.fromEntries(refs)));
+			refs ??= Object.fromEntries(await listBranches(remote));
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(refs));
 		} catch (err) {
 			console.error("recording initial branches failed", err);
 		}
 		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forked) });
+		// A fresh repository's head is known too, so describing it needs no lookup.
+		if (fresh && refs) return this.describe(meta, refs[meta.defaultBranch] ?? null);
 		return this.getProject();
 	}
 
@@ -610,16 +618,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async getProject(): Promise<Project> {
 		const meta = this.meta();
-		const stats = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
-		for (const row of this.sql.exec<{ status: TaskStatus; n: number }>("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")) {
-			stats[row.status] = row.n;
-		}
 		let head: string | null = null;
 		try {
 			using repo = await this.store.get(meta.name);
 			head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
 		} catch {
 			// Repo still importing or temporarily unavailable; head is informational.
+		}
+		return this.describe(meta, head);
+	}
+
+	/** The project as the API shows it, with its default branch at `head`. */
+	private describe(meta: Meta, head: string | null): Project {
+		const stats = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
+		for (const row of this.sql.exec<{ status: TaskStatus; n: number }>("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")) {
+			stats[row.status] = row.n;
 		}
 		const queueLength = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM queue").one().n;
 		return { ...meta, head, stats, queueLength };
@@ -794,7 +807,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			try {
 				for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
 					await ws.syncBase(base);
-					const theirs = await ws.fetchTask(headAccess, input.headBranch);
+					const theirs = await ws.fetchTask(headAccess, input.headBranch).catch((err) => {
+						if (errorCode(err) === "NotFoundError") throw new HttpError(409, "HEAD_GONE", `${input.headBranch} no longer exists, so there's nothing to merge`);
+						throw err;
+					});
 					if (input.expectedHead && theirs !== input.expectedHead) {
 						throw new HttpError(409, "HEAD_MOVED", `${input.headBranch} has new commits since you looked; review them and merge again`);
 					}
@@ -2115,10 +2131,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { url: meta.remote, token: this.baseToken.token };
 	}
 
-	/** Fork and import are asynchronous in Artifacts; wait until the repo accepts Git traffic. */
+	/**
+	 * Fork and import are asynchronous in Artifacts; wait until the repo accepts Git traffic. Polls at
+	 * most every half second: a check is one cheap lookup, and a longer gap only adds to the wait
+	 * after the repository is ready (up to 2s each time, with the old cap).
+	 */
 	private async waitReady(repoName: string, timeoutMs = 30_000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
-		for (let delay = 100; ; delay = Math.min(delay * 2, 2000)) {
+		for (let delay = 50; ; delay = Math.min(delay * 2, 500)) {
 			try {
 				using _repo = await this.store.get(repoName);
 				return;
@@ -2267,6 +2287,25 @@ async function retrying<T>(fn: () => Promise<T>, delays = [250, 750, 2500]): Pro
 			await new Promise((r) => setTimeout(r, delays[attempt]));
 		}
 	}
+}
+
+/**
+ * Gives a new, empty repository its first commit, a README, pushed as one pack in one request (no
+ * clone, no ref discovery). Returns the commit.
+ */
+async function seedReadme(remote: RemoteAccess, branch: string, input: CreateProjectInput): Promise<string> {
+	const empty: ObjectReader = { readTree: async () => null, readBlob: async () => null, readCommit: async () => null };
+	const { commit } = await commitChanges(empty, remote, {
+		branch,
+		parent: null,
+		create: true,
+		changes: [{ path: "README.md", content: new TextEncoder().encode(`# ${input.title ?? input.name}\n\n${input.description ?? ""}\n`) }],
+		message: "Initial commit",
+		author: MERGE_IDENTITY,
+		time: Math.floor(Date.now() / 1000),
+		maxPackBytes: Number.POSITIVE_INFINITY,
+	});
+	return commit;
 }
 
 /** Runs one Artifacts call, naming the step in the error so failures are attributable. */

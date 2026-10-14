@@ -1,5 +1,5 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
-// The schema is created idempotently on first use in each isolate, so deploys need no migration step.
+// The schema is created idempotently when it changes (see ensureSchema), so deploys need no migration step.
 import type {
 	Issue,
 	IssueComment,
@@ -96,7 +96,16 @@ const COLUMNS = [
 /** Indexes on added columns, created once the columns exist. */
 const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`];
 
-const ready = new WeakMap<D1Database, Promise<void>>();
+/**
+ * Which schema the database has: a hash of every statement above, so a deploy that changes any of
+ * them runs them once, and every other cold start reads one row instead of rerunning ~60 statements
+ * (each a D1 write that queues behind everyone else's).
+ */
+const SCHEMA_VERSION = fnv1a([...AUTH_SCHEMA, ...APP_SCHEMA, ...COLUMNS, ...LATE_INDEXES].join("\n"));
+const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
+
+/** Databases known to be up to date in this isolate. */
+const migrated = new WeakSet<D1Database>();
 
 export function db(env: Env): D1Database {
 	const database = (env as { DB?: D1Database }).DB;
@@ -104,22 +113,39 @@ export function db(env: Env): D1Database {
 	return database;
 }
 
-/** Creates any missing tables. Cheap after the first call in an isolate. */
-export function ensureSchema(database: D1Database): Promise<void> {
-	let pending = ready.get(database);
-	if (!pending) {
-		pending = database
-			.batch([...AUTH_SCHEMA, ...APP_SCHEMA].map((sql) => database.prepare(sql)))
-			.then(() => Promise.all(COLUMNS.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn))))
-			.then(() => database.batch(LATE_INDEXES.map((sql) => database.prepare(sql))))
-			.then(() => undefined)
-			.catch((err) => {
-				ready.delete(database);
-				throw err;
-			});
-		ready.set(database, pending);
+/**
+ * Creates any missing tables. Free after the first success in an isolate; until then each request
+ * checks for itself rather than awaiting another request's check, because in Workers a promise whose
+ * I/O belongs to a request that was cancelled meanwhile may never settle, and every request waiting on
+ * it would hang with it.
+ */
+export async function ensureSchema(database: D1Database): Promise<void> {
+	if (migrated.has(database)) return;
+	const current = await database
+		.prepare(`select "version" from "maggot_schema" where "id" = 1`)
+		.first<{ version: string }>()
+		.catch(() => null);
+	if (current?.version !== SCHEMA_VERSION) await migrate(database);
+	migrated.add(database);
+}
+
+async function migrate(database: D1Database): Promise<void> {
+	await database.batch([...AUTH_SCHEMA, ...APP_SCHEMA, VERSION_TABLE].map((sql) => database.prepare(sql)));
+	await Promise.all(COLUMNS.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn)));
+	await database.batch([
+		...LATE_INDEXES.map((sql) => database.prepare(sql)),
+		database.prepare(`insert into "maggot_schema" ("id", "version") values (1, ?) on conflict ("id") do update set "version" = excluded."version"`).bind(SCHEMA_VERSION),
+	]);
+}
+
+/** FNV-1a, as hex: a cheap, stable fingerprint of the schema statements. */
+function fnv1a(text: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
 	}
-	return pending;
+	return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function ignoreDuplicateColumn(err: unknown) {
