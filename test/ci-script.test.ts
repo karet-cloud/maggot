@@ -173,7 +173,7 @@ async function waitForExit(box: LocalSandbox, id: string) {
 /** Kills one of this test's own step process groups, by the pid its launch recorded. */
 async function killOwnGroup(box: LocalSandbox, id: string) {
 	const pid = (await box.exec(["cat", `${box.state}/step-${id}.pid`])).stdout.trim();
-	if (/^\d+$/.test(pid)) await box.exec(["sh", "-c", `kill -KILL -- -${pid} 2>/dev/null || true`]);
+	if (/^\d+$/.test(pid)) await box.exec(["sh", "-c", `kill -KILL -${pid} 2>/dev/null || true`]);
 }
 
 test("the launch takes its script from the inbox, starts it once, and the poll reads its log and exit code", async () => {

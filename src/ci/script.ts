@@ -265,7 +265,7 @@ export const KILL_SCRIPT = `f=${STATE_DIR}/step-$MEGIT_ID
 [ -e "$f.exit" ] && exit 0
 pid=$(cat "$f.pid" 2>/dev/null) || exit 0
 [ -n "$pid" ] || exit 0
-kill -"$MEGIT_SIGNAL" -- "-$pid" 2>/dev/null || kill -"$MEGIT_SIGNAL" "$pid" 2>/dev/null || true
+kill -"$MEGIT_SIGNAL" "-$pid" 2>/dev/null || kill -"$MEGIT_SIGNAL" "$pid" 2>/dev/null || true
 if [ "$MEGIT_SIGNAL" = KILL ]; then
   sleep 1
   [ -e "$f.exit" ] || { echo 137 > "$f.exit.tmp" && mv "$f.exit.tmp" "$f.exit"; }
