@@ -339,6 +339,18 @@ test("people sign up, create public and private repositories, and push and clone
 	assert.equal(view.project.head, head);
 	assert.equal(view.repo.canWrite, true);
 	assert.ok(view.project.remote.startsWith(api), "the storage remote stays internal");
+	assert.equal((await as(ada)(`/repos/${ada.username}/priv/credentials`, { method: "POST", body: JSON.stringify({ ttlSeconds: 300 }) })).status, 401);
+	assert.equal((await as(ada)(`/repos/${ada.username}/priv/storage/recount`, { method: "POST", body: "{}" })).status, 401);
+	for (const ttlSeconds of [0, -1, 1.5, 2592001, "300"]) {
+		assert.equal((await call("POST", `/repos/${ada.username}/priv/credentials`, { ttlSeconds })).status, 400);
+	}
+	const short = await call<{ expiresAt: string }>("POST", `/repos/${ada.username}/priv/credentials`, { scope: "read", ttlSeconds: 300 });
+	assert.equal(short.status, 200);
+	assert.ok(new Date(short.json.expiresAt).getTime() <= Date.now() + 310_000);
+	const recounted = await call<{ bytes: number }>("POST", `/repos/${ada.username}/priv/storage/recount`, {});
+	assert.equal(recounted.status, 200);
+	assert.ok(recounted.json.bytes > 0);
+
 	const listed = (await (await as(null)(`/repos?owner=${ada.username}`)).json()) as { repos: { name: string }[] };
 	assert.deepEqual(listed.repos.map((r) => r.name), ["pub"]);
 
@@ -1549,6 +1561,14 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 	await json(as(ada)(`${repo}/wiki/pages/Setup`, { method: "DELETE" }));
 	assert.deepEqual((await json<Index>(as(null)(`${repo}/wiki`))).pages.map((p) => p.slug), ["Home", "Guide"]);
 
+
+	const codeAccess = await call<GitCredentials>("POST", `${repo}/credentials`, { scope: "read", ttlSeconds: 300 });
+	const { measureRepository } = await import("../../src/git/protocol.ts");
+	const codeBytes = await measureRepository({ url: codeAccess.json.remote, token: codeAccess.json.token }, POLICY.repoBytes);
+	const recount = await call<{ bytes: number }>("POST", `${repo}/storage/recount`, {});
+	assert.equal(recount.status, 200);
+	assert.ok(recount.json.bytes > codeBytes, "recount includes the populated wiki as well as code");
+
 	// A fork doesn't take the wiki along.
 	await json(as(bob)(`${repo}/forks`, { method: "POST", body: "{}" }), 201);
 	assert.deepEqual((await json<Index>(as(bob)(`/repos/${bob.username}/docs/wiki`))).pages, []);
@@ -1565,6 +1585,9 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 	assert.equal((await as(bob)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: false }) })).status, 403);
 	assert.equal((await json<{ repo: { hasWiki: boolean } }>(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: false }) }))).repo.hasWiki, false);
 	assert.equal((await as(ada)(`${repo}/wiki`)).status, 404);
+	const hiddenRecount = await call<{ bytes: number }>("POST", `${repo}/storage/recount`, {});
+	assert.equal(hiddenRecount.status, 200);
+	assert.equal(hiddenRecount.json.bytes, recount.json.bytes, "hidden wikis still count toward storage");
 	assert.equal((await as(ada)(`${repo}/wiki/pages/Home`)).status, 404);
 	await assert.rejects(exec("git", ["clone", "-q", wikiUrl(ada), join(root, "wiki-off")], { env }), /not found|404/);
 	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: true }) }));

@@ -327,6 +327,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET / POST / DELETE | `/repos/:owner/:repo/transfer` | `{ to }` | the pending offer; offer the repository to user `to`; cancel the offer (owner) |
 | GET | `/transfers` | | `{ transfers: RepoTransfer[] }`: offers made to you |
 | POST | `/transfers/:id/accept`, `/transfers/:id/decline` | `{ name? }` | take the repository (under `name` if given) → `{ repo }`, or turn it down |
+| POST | `/repos/:owner/:repo/storage/recount` | `{}` | recount code and wiki storage, enforce quotas and refresh refs (instance admin key only) |
 | GET | `/repos/:owner/:repo/paths` | `?ref=` | `FileList`: every file path at `ref` (up to 20,000), for the file finder |
 | GET | `/repos/:owner/:repo/history`, `/blame` | `?path=&ref=` (`&from=` to page history) | `FileHistory`, `Blame` |
 | GET / POST | `/repos/:owner/:repo/pulls` | `?state=`; `{ title, body?, base, head, headRepo? }` | `PullList`; open one (signed in, read access; `headRepo` is a fork, `owner/name`) |
@@ -381,7 +382,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | POST | `/projects/:p/tasks/:id/access` | | `TaskAccess` with fresh tokens (`fork: null` while provisioning) |
 | POST | `/projects/:p/tasks/:id/submit` | | `{ task }`, enqueues for merge (202) |
 | POST | `/projects/:p/tasks/:id/abandon` | | `{ task }`, deletes the fork |
-| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days (admin key only: pushes with them skip maggot's limits) |
+| POST | `/projects/:p/credentials` | `{ scope?, ttlSeconds? }` (`write`, 30 days default; TTL 1–2,592,000 seconds) | `GitCredentials` for the project repo itself (admin key only: direct pushes skip the proxy) |
 | GET | `/projects/:p/queue` | | `{ queue: QueueEntry[] }` |
 | GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }`: from `after` forward, or the newest `limit` without it |
 | WS | `/projects/:p/live` | `?key=&after=<seq>` | stream of `ProjectEvent` JSON; replays from `after`; send `ping` → `pong` |
@@ -498,8 +499,9 @@ npm run typecheck
 
 The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it with a shallow Git clone and push from
 `torvalds/linux` on `master` (depth 100) and the full source tree. The Artifacts URL import service
-currently fails for Linux. The production transfer limit is 512 MiB (`MAGGOT_POLICY.pushBytes`)
-to accommodate its pack. Set a stable
+currently fails for Linux. CI uses a five-minute storage Git token through the admin-only
+credentials endpoint, then calls `/api/repos/:owner/:repo/storage/recount` to restore quota
+accounting and refresh repository views. This avoids large uploads through the Worker proxy. Set a stable
 `MAGGOT_MIRROR_PASSWORD` production environment secret for the mirror service account. Existing
 mirrors are left unchanged; this is a demo snapshot, not continuous upstream synchronization.
 The repository creation API accepts optional `importDepth` (1–10,000) for shallow imports;

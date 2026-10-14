@@ -333,10 +333,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * Git credentials for the project repo itself, for people pushing to it directly (for example the
 	 * first push of an existing repository). Agents should use tasks instead, so the merge queue applies.
 	 */
-	async repoAccess(scope: "read" | "write" = "write"): Promise<GitCredentials> {
+	async repoAccess(scope: "read" | "write" = "write", ttl = REPO_TOKEN_TTL): Promise<GitCredentials> {
 		const meta = this.meta();
 		if (scope === "write") this.assertWritable();
-		return this.credentials(meta.name, meta.defaultBranch, scope, REPO_TOKEN_TTL);
+		return this.credentials(meta.name, meta.defaultBranch, scope, ttl);
 	}
 
 	/** Where the Git proxy sends a user's clone or push, with a cached short-lived Artifacts token. */
