@@ -84,15 +84,15 @@ async function settledTasks(project: string, n: number): Promise<Task[]> {
 }
 
 before(async () => {
-	root = await mkdtemp(join(tmpdir(), "megit-e2e-"));
+	root = await mkdtemp(join(tmpdir(), "maggot-e2e-"));
 	artifacts = await startLocalArtifacts({ root: join(root, "artifacts"), port: 0, quiet: true });
 	const port = await freePort();
 	// Its own process group, so after() can stop Vite and the workerd processes it starts in one go. Its
 	// output goes to a log that is kept when a test fails.
-	workerLog = await open(join(tmpdir(), `megit-e2e-${run}.log`), "w");
+	workerLog = await open(join(tmpdir(), `maggot-e2e-${run}.log`), "w");
 	worker = spawn("node_modules/.bin/vite", ["dev", "--mode", "offline"], {
 		// Its own local D1 and Durable Object state: a dev server already running in this checkout keeps its own.
-		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MEGIT_PORT: String(port), CF_QUIET: "1", MEGIT_POLICY: JSON.stringify(POLICY), MEGIT_STATE_DIR: join(root, "state") },
+		env: { ...process.env, LOCAL_ARTIFACTS_URL: artifacts.url, MAGGOT_PORT: String(port), CF_QUIET: "1", MAGGOT_POLICY: JSON.stringify(POLICY), MAGGOT_STATE_DIR: join(root, "state") },
 		stdio: ["ignore", workerLog.fd, workerLog.fd],
 		detached: true,
 	});
@@ -177,9 +177,9 @@ test("a project created without a README accepts an existing repository pushed w
 	const git = (...args: string[]) => promisify(execFile)("git", args, { cwd: dir });
 	await promisify(execFile)("git", ["init", "-q", "-b", "trunk", dir]);
 	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first");
-	await git("remote", "add", "megit", url.toString());
+	await git("remote", "add", "maggot", url.toString());
 	await git("branch", "-M", creds.branch);
-	await git("push", "-q", "-u", "megit", creds.branch);
+	await git("push", "-q", "-u", "maggot", creds.branch);
 	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "second");
 	await git("push", "-q");
 
@@ -347,7 +347,7 @@ test("people sign up, create public and private repositories, and push and clone
 	assert.equal((await as(ada)(`/repos/${ada.username}/pub`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
 	assert.equal((await as(null)(`/repos/${ada.username}/pub`)).status, 404);
 
-	// A push through megit's URL shows up in the repository's event feed.
+	// A push through maggot's URL shows up in the repository's event feed.
 	const events = (await (await as(ada)(`/repos/${ada.username}/priv/events`)).json()) as { events: { type: string; data: { to?: string } }[] };
 	assert.ok(events.events.some((e) => e.type === "repo.pushed" && e.data.to === head));
 
@@ -362,7 +362,7 @@ test("cookie sessions only write from the same origin, and repo files can't run 
 		fetch(`${api}/api/repos`, { method: "POST", body, ...init, headers: { cookie: ada.cookie, "content-type": "application/json", ...init.headers } });
 	assert.equal((await withCookie({ headers: { origin: "https://evil.example" } })).status, 403);
 	assert.equal((await withCookie({ headers: { origin: api } })).status, 201);
-	assert.equal((await fetch(`${api}/api/me`, { headers: { cookie: "megit.session_token=forged" } }).then((r) => r.json()) as { user: unknown }).user, null);
+	assert.equal((await fetch(`${api}/api/me`, { headers: { cookie: "maggot.session_token=forged" } }).then((r) => r.json()) as { user: unknown }).user, null);
 
 	const file = await fetch(`${api}/api/repos/${ada.username}/origin/tree`, { headers: { authorization: `Bearer ${ada.token}` } });
 	assert.equal(file.status, 200);
@@ -469,7 +469,7 @@ test("unverified accounts can't create repositories, and sign-ins, repository co
 	const raced = await Promise.all(Array.from({ length: 6 }, (_, i) => create(racer, `race-${i}`)));
 	assert.equal(raced.filter((r) => r.status === 201).length, POLICY.reposPerUser);
 
-	// The storage backend's own credentials are for the admin only; users go through megit's git URL.
+	// The storage backend's own credentials are for the admin only; users go through maggot's git URL.
 	const direct = await fetch(`${api}/api/repos/${fresh.username}/now-ok/credentials`, { method: "POST", headers: { ...json, authorization: `Bearer ${fresh.token}` } });
 	assert.equal(direct.status, 401);
 
@@ -492,8 +492,8 @@ test("unverified accounts can't create repositories, and sign-ins, repository co
 	// Guessing tokens is limited per address (one of its own here; in production the edge sets this header).
 	const address = `198.51.100.${Math.floor(Math.random() * 250)}`;
 	const as = (token: string) => fetch(`${api}/api/me`, { headers: { authorization: `Bearer ${token}`, "cf-connecting-ip": address } });
-	for (let i = 0; i < POLICY.authFailuresPerIp; i++) assert.equal((await as("megit_pat_wrong")).status, 401);
-	assert.equal((await as("megit_pat_wrong")).status, 429);
+	for (let i = 0; i < POLICY.authFailuresPerIp; i++) assert.equal((await as("maggot_pat_wrong")).status, 401);
+	assert.equal((await as("maggot_pat_wrong")).status, 429);
 	assert.equal((await as(fresh.token)).status, 429, "the address is refused before any lookup");
 });
 
@@ -640,7 +640,7 @@ test("code search, webhooks and notifications", async () => {
 		req.on("data", (chunk) => (body += chunk));
 		req.on("end", () => {
 			const expected = `sha256=${createHmac("sha256", "hush-hush").update(body).digest("hex")}`;
-			received.push({ event: String(req.headers["x-megit-event"]), valid: req.headers["x-megit-signature-256"] === expected, body: JSON.parse(body) });
+			received.push({ event: String(req.headers["x-maggot-event"]), valid: req.headers["x-maggot-signature-256"] === expected, body: JSON.parse(body) });
 			res.writeHead(200).end("ok");
 		});
 	});
@@ -795,7 +795,7 @@ test("git over SSH: keys, clone, push, permissions, branch protection and archiv
 	assert.equal((await as(bob)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: adaKey }) })).status, 409, "a key belongs to one account");
 	assert.equal((await as(bob)("/ssh/keys", { method: "POST", body: JSON.stringify({ key: bobKey }) })).status, 201);
 	const info = (await (await fetch(`${api}/api/ssh`)).json()) as { hostKey: string; url: string };
-	await writeFile(join(dir, "known_hosts"), `megit-test ${info.hostKey}\n`);
+	await writeFile(join(dir, "known_hosts"), `maggot-test ${info.hostKey}\n`);
 
 	const ssh = (who: string) =>
 		[
@@ -808,11 +808,11 @@ test("git over SSH: keys, clone, push, permissions, branch protection and archiv
 
 	// A key that isn't on any account gets nowhere; a known one is greeted by name.
 	await keyFor("stranger");
-	await assert.rejects(exec("sh", ["-c", `${ssh("stranger")} -T git@megit-test`]), /Permission denied/);
-	await assert.rejects(exec("sh", ["-c", `${ssh("ada")} -T git@megit-test`]), (err: { stderr: string }) => err.stderr.includes(`Hi ${ada.username}!`));
+	await assert.rejects(exec("sh", ["-c", `${ssh("stranger")} -T git@maggot-test`]), /Permission denied/);
+	await assert.rejects(exec("sh", ["-c", `${ssh("ada")} -T git@maggot-test`]), (err: { stderr: string }) => err.stderr.includes(`Hi ${ada.username}!`));
 
 	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "over-ssh", visibility: "private", readme: true }) })).status, 201);
-	const remote = `git@megit-test:${ada.username}/over-ssh.git`;
+	const remote = `git@maggot-test:${ada.username}/over-ssh.git`;
 	await git("ada", ["clone", "-q", remote, join(dir, "clone")]);
 	await writeFile(join(dir, "clone", "big.bin"), Buffer.alloc(150_000, 7));
 	await git("ada", ["add", "-A"], join(dir, "clone"));
@@ -832,8 +832,8 @@ test("git over SSH: keys, clone, push, permissions, branch protection and archiv
 	await writeFile(join(dir, "wiki", "Home.md"), "Hello over SSH\n");
 	await git("ada", ["add", "-A"], join(dir, "wiki"));
 	await git("ada", ["commit", "-q", "-m", "First page"], join(dir, "wiki"));
-	await git("ada", ["push", "-q", `git@megit-test:${ada.username}/over-ssh.wiki.git`, "master"], join(dir, "wiki"));
-	await git("ada", ["clone", "-q", `git@megit-test:${ada.username}/over-ssh.wiki.git`, join(dir, "wiki-clone")]);
+	await git("ada", ["push", "-q", `git@maggot-test:${ada.username}/over-ssh.wiki.git`, "master"], join(dir, "wiki"));
+	await git("ada", ["clone", "-q", `git@maggot-test:${ada.username}/over-ssh.wiki.git`, join(dir, "wiki-clone")]);
 	assert.equal((await git("ada", ["show", "HEAD:Home.md"], join(dir, "wiki-clone"))).stdout, "Hello over SSH\n");
 	const wikiPage = (await (await as(ada)(`/repos/${ada.username}/over-ssh/wiki/pages/Home`)).json()) as { page: { source: string } };
 	assert.equal(wikiPage.page.source, "Hello over SSH\n");
@@ -1267,9 +1267,9 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	const git = (cwd: string, ...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
 	const dir = join(root, "ci");
 	await exec("git", ["clone", "-q", url(ada, `${ada.username}/ci`), dir]);
-	await exec("mkdir", ["-p", join(dir, ".megit/workflows")]);
+	await exec("mkdir", ["-p", join(dir, ".maggot/workflows")]);
 	await writeFile(
-		join(dir, ".megit/workflows/build.yml"),
+		join(dir, ".maggot/workflows/build.yml"),
 		"name: Build\non:\n  push:\n    branches: [master]\n  pull_request:\n  workflow_dispatch:\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: echo hi\n",
 	);
 	await git(dir, "add", "-A");
@@ -1290,7 +1290,7 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.deepEqual(logs, { logs: [], next: null });
 	assert.equal((await as(null)(`${actions}/runs/999999`)).status, 404);
 	const workflows = await json<{ workflows: { path: string; dispatch: boolean; error: string | null }[] }>(as(null)(`${actions}/workflows?ref=master`));
-	assert.deepEqual(workflows.workflows.map((w) => [w.path, w.dispatch, w.error]), [[".megit/workflows/build.yml", true, null]]);
+	assert.deepEqual(workflows.workflows.map((w) => [w.path, w.dispatch, w.error]), [[".maggot/workflows/build.yml", true, null]]);
 	const events = await json<{ events: { type: string; data: { run?: { number: number } } }[] }>(as(ada)(`${repo}/events`));
 	assert.ok(events.events.some((e) => e.type === "ci.completed" && e.data.run?.number === pushed.number));
 
@@ -1306,8 +1306,8 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.deepEqual((await json<{ secrets: string[] }>(as(ada)(`${actions}/secrets/TOKEN`, { method: "DELETE" }))).secrets, []);
 
 	// Running by hand and re-running need write access.
-	assert.equal((await as(bob)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) })).status, 403);
-	const dispatched = await json<{ runs: Run[] }>(as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) }), 201);
+	assert.equal((await as(bob)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".maggot/workflows/build.yml", ref: "master" }) })).status, 403);
+	const dispatched = await json<{ runs: Run[] }>(as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".maggot/workflows/build.yml", ref: "master" }) }), 201);
 	assert.equal(dispatched.runs[0].event, "workflow_dispatch");
 	assert.equal((await as(bob)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" })).status, 403);
 	const rerun = await json<Run>(as(ada)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" }), 201);
@@ -1371,7 +1371,7 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: true }) }));
 	assert.equal((await as(ada)(`${actions}/secrets/MORE`, { method: "PUT", body: JSON.stringify({ value: "nope-123" }) })).status, 403);
 	assert.equal((await as(ada)(`${actions}/settings`, { method: "PUT", body: JSON.stringify({ defaultRunner: "depot" }) })).status, 403);
-	assert.equal((await as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".megit/workflows/build.yml", ref: "master" }) })).status, 403);
+	assert.equal((await as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path: ".maggot/workflows/build.yml", ref: "master" }) })).status, 403);
 	assert.equal((await as(ada)(`${actions}/runs/${pushed.number}/rerun`, { method: "POST" })).status, 403);
 	assert.deepEqual((await json<{ secrets: string[] }>(as(ada)(`${actions}/secrets/LEAKED`, { method: "DELETE" }))).secrets, []);
 	assert.equal((await json<{ depot: { configured: boolean } }>(as(ada)(`${actions}/depot`, { method: "DELETE" }))).depot.configured, false);
@@ -1402,9 +1402,9 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 
 	// A matrix makes a job per combination; a schedule shows on the workflow.
 	const matrix = "on:\n  push:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n  test:\n    strategy:\n      matrix:\n        n: [1, 2]\n    steps:\n      - run: echo ${{ matrix.n }}\n";
-	await json(as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", newBranch: "matrix", message: "Add a matrix", files: [{ path: ".megit/workflows/matrix.yml", content: matrix }] }) }), 201);
+	await json(as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", newBranch: "matrix", message: "Add a matrix", files: [{ path: ".maggot/workflows/matrix.yml", content: matrix }] }) }), 201);
 	const matrixRun = await until(async () => {
-		const list = await json<{ runs: (Run & { path: string })[] }>(as(null)(`${actions}/runs?workflow=.megit/workflows/matrix.yml`));
+		const list = await json<{ runs: (Run & { path: string })[] }>(as(null)(`${actions}/runs?workflow=.maggot/workflows/matrix.yml`));
 		return list.runs.find((r) => r.status === "completed");
 	});
 	const matrixJobs = (await json<{ jobs: { key: string; name: string }[] }>(as(null)(`${actions}/runs/${matrixRun.number}`))).jobs;

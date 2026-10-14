@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Local stand-in for Cloudflare Artifacts, for development and tests without a Cloudflare account.
 // Serves real Git smart HTTP via `git http-backend` with Artifacts-style repo tokens, plus a small
-// JSON control API that mirrors the subset of the Workers binding megit uses (see src/store.ts).
+// JSON control API that mirrors the subset of the Workers binding maggot uses (see src/store.ts).
 import { spawn, execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -61,7 +61,7 @@ export interface LocalArtifactsOptions {
 
 export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<{ url: string; server: Server; close(): Promise<void> }> {
 	const root = resolve(opts.root);
-	const namespace = opts.namespace ?? "megit";
+	const namespace = opts.namespace ?? "maggot";
 	const host = opts.host ?? "127.0.0.1";
 	const reposDir = join(root, "repos");
 	const statePath = join(root, "state.json");
@@ -391,7 +391,7 @@ function json(res: ServerResponse, status: number, body: unknown) {
 
 if (import.meta.main) {
 	const port = Number(process.env.LOCAL_ARTIFACTS_PORT ?? 8789);
-	const root = process.env.LOCAL_ARTIFACTS_ROOT ?? ".megit-local/artifacts";
+	const root = process.env.LOCAL_ARTIFACTS_ROOT ?? ".maggot-local/artifacts";
 	const { url } = await startLocalArtifacts({
 		root,
 		port,

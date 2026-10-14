@@ -44,7 +44,7 @@ test("[[links]] become relative links to pages, outside code", () => {
 	assert.equal(wikiLinks("See [[Getting Started]]."), "See [Getting Started](Getting-Started).");
 	assert.equal(wikiLinks("See [[the guide|Getting Started]]."), "See [the guide](Getting-Started).");
 	assert.equal(wikiLinks("[[Install#Upgrading from 1.x]]"), "[Install#Upgrading from 1.x](Install#upgrading-from-1x)", "the anchor the heading gets: punctuation dropped");
-	assert.equal(wikiLinks("[[megit|https://example.com/x]]"), "[megit](<https://example.com/x>)");
+	assert.equal(wikiLinks("[[maggot|https://example.com/x]]"), "[maggot](<https://example.com/x>)");
 	assert.equal(wikiLinks("[[A [b]]"), "[[A [b]]", "brackets inside aren't a link");
 	assert.equal(wikiLinks("[[C++ & You]]"), `[C++ & You](${encodeURIComponent("C++-&-You")})`);
 	assert.equal(wikiLinks("`[[Not a link]]` and [[Link]]"), "`[[Not a link]]` and [Link](Link)");

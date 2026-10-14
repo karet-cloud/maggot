@@ -1,9 +1,9 @@
 # Roadmap: Git hosting features
 
-Git-platform features megit doesn't have yet, compared with GitHub. AI assistant features are out of scope.
+Git-platform features maggot doesn't have yet, compared with GitHub. AI assistant features are out of scope.
 "Have" means already shipped. Effort: S is under a day, M is 1–3 days, L is more than that.
 
-## What megit has today
+## What maggot has today
 
 - User accounts (Better Auth: username, email, password), password change and reset, and personal access tokens.
 - Repositories at `/<owner>/<repo>`, public or private, created empty, with a README, or by importing a public Git URL.
@@ -31,7 +31,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | 7 | **Pull requests for humans** | Open a PR from any branch, show its diff, and merge it through the same merge queue the agents use. Reuses the task and queue machinery. | M |
 | 8 | **Code review** | Inline line comments on diffs, approve or request changes, and resolvable threads. | M |
 | 9 | **Compare view** | `base...head` for any two refs: commits plus diff. Becomes the "open PR" entry point. | S (after 1) |
-| 10 | **Branch protection** (done: no force pushes, no deletion, merge queue only, required reviews, and required megit Actions runs) | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
+| 10 | **Branch protection** (done: no force pushes, no deletion, merge queue only, required reviews, and required maggot Actions runs) | Block direct pushes to the default branch, require the queue or review, and require checks to pass. Enforced in the coordinator. | M |
 | 11 | **Issues** (done, with labels and "fixes #n"; agent task from an issue next) | Title, body, labels, open/closed, and a "fixes #n" link that closes the issue on merge. Can turn into an agent task in one click. | M |
 | 12 | **User accounts and permissions** (partly done: accounts, tokens, owner-only repos; password reset and change; email verification, rate limits and quotas; next: collaborators, orgs) | Better Auth with GitHub or email login. Per-project roles: read, write, admin. Per-user personal access tokens instead of one shared key. | L |
 | 13 | **Tags and releases** (done; uploaded release files next) | List tags. Create a release with notes and a downloadable archive. | S–M |
@@ -55,8 +55,8 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 | # | Feature | Notes | Effort |
 |---|---------|-------|--------|
 | 23 | **Webhooks** (done) | Push, task, merge, and PR events posted to a URL, HMAC-signed. The event log already exists. | S–M |
-| 24 | **Checks / CI status** (partly done: megit Actions runs show as checks on commits and PRs and can gate merges; an API for external CI is next) | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
-| 25 | **Built-in CI runner** (done: megit Actions on Cloudflare Containers or Depot sandboxes, with matrices, schedules, caches and artifacts in R2, and third-party actions; services and environments next) | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
+| 24 | **Checks / CI status** (partly done: maggot Actions runs show as checks on commits and PRs and can gate merges; an API for external CI is next) | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
+| 25 | **Built-in CI runner** (done: maggot Actions on Cloudflare Containers or Depot sandboxes, with matrices, schedules, caches and artifacts in R2, and third-party actions; services and environments next) | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
 | 26 | **Notifications** (in-app done; email next) | An in-app inbox plus email for review requests, mentions, and failed merges. | M |
 | 27 | **Organizations and teams** | Group projects and share permissions. | L |
 | 28 | **Mirror from or to GitHub** | Keep a GitHub repo in sync both ways. Useful for adoption. | M |
@@ -66,7 +66,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 ## Suggested order
 
 1. **Done:** Tier 1, plus the compare view (9).
-2. **Next:** 7 → 8 → 24 → 10. Human PRs, reviews, and checks reuse the merge queue, which is megit's distinguishing piece.
+2. **Next:** 7 → 8 → 24 → 10. Human PRs, reviews, and checks reuse the merge queue, which is maggot's distinguishing piece.
 3. **Then:** 12 (accounts) unlocks 11, 13, 26, 27 and 29.
 
 ## Review follow-ups
@@ -97,7 +97,7 @@ From the three-model review of 2026-10-13 (GPT-6.1-Sol, GPT-6-Astra, Claude Fabl
   Workers Rate Limiting binding would be colo-local.
 - **Real repository sizes**: quotas count accepted push bytes (force pushes add up) and agent merges
   aren't counted; reconcile with the stored size once Artifacts exposes it.
-- **Agent fork credentials**: tasks hand out Artifacts tokens directly; proxy them through megit so the
+- **Agent fork credentials**: tasks hand out Artifacts tokens directly; proxy them through maggot so the
   push limits and token revocation apply.
 - **Live sockets and revoked tokens**: a socket opened with a token stays open after the token is revoked.
 - **Webhook destinations**: URLs are checked by spelling (private IPs, localhost, IPv6 private and

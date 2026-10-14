@@ -5,11 +5,11 @@ import { cx } from "../components/ui.tsx";
 
 type Filter = ParityStatus | "all";
 
-// A checklist of GitHub's features and where megit is with each, from app/lib/parity.ts.
+// A checklist of GitHub's features and where maggot is with each, from app/lib/parity.ts.
 export const Route = createFileRoute("/parity")({
 	validateSearch: (s: Record<string, unknown>): { show?: ParityStatus } =>
 		s.show === "done" || s.show === "partial" || s.show === "missing" || s.show === "different" ? { show: s.show } : {},
-	head: () => ({ meta: [{ title: "GitHub feature parity · megit" }] }),
+	head: () => ({ meta: [{ title: "GitHub feature parity · maggot" }] }),
 	component: Parity,
 });
 
@@ -33,7 +33,7 @@ function Parity() {
 			<header className="space-y-3">
 				<h1 className="text-xl font-semibold tracking-tight">GitHub feature parity</h1>
 				<p className="text-sm text-dim">
-					Everything GitHub does, and how far megit has got with each. It's updated alongside the code. Last updated {PARITY_UPDATED}.
+					Everything GitHub does, and how far maggot has got with each. It's updated alongside the code. Last updated {PARITY_UPDATED}.
 				</p>
 				<div className="space-y-1.5">
 					<div className="flex h-2 overflow-hidden rounded-full bg-raised" aria-label={`${score}% of GitHub's features`}>

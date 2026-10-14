@@ -124,13 +124,13 @@ test("Connect errors become DepotErrors that say whether to retry", async () => 
 
 test("create asks for the resources and lifetime, and reads the sandbox back", async () => {
 	const { fetch, calls } = mockDepot({
-		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "megit-j", status: "SANDBOX_STATUS_CREATED" } }),
+		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "maggot-j", status: "SANDBOX_STATUS_CREATED" } }),
 		GetSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", status: "SANDBOX_STATUS_RUNNING" } }),
 	});
 	const api = new DepotApi({ token: "t" }, { fetch });
-	const created = await api.create({ name: "megit-j", vcpus: 4, timeoutMinutes: 45.5 });
-	assert.deepEqual(created, { id: "sb1", name: "megit-j", status: "created", errorMessage: null });
-	assert.deepEqual(calls[0].body, { name: "megit-j", resources: { vcpus: 4, memoryMb: 8192, diskGb: 100 }, env: {}, timeoutMinutes: 46, disableTailnet: true });
+	const created = await api.create({ name: "maggot-j", vcpus: 4, timeoutMinutes: 45.5 });
+	assert.deepEqual(created, { id: "sb1", name: "maggot-j", status: "created", errorMessage: null });
+	assert.deepEqual(calls[0].body, { name: "maggot-j", resources: { vcpus: 4, memoryMb: 8192, diskGb: 100 }, env: {}, timeoutMinutes: 46, disableTailnet: true });
 	assert.equal((await api.get("sb1")).status, "running");
 	assert.deepEqual(calls[1].body, { id: "sb1" });
 	await assert.rejects(api.create({ name: "x", vcpus: 3, timeoutMinutes: 1 }), /2, 4, 8/);
@@ -199,7 +199,7 @@ const launch = { jobId: "j1", timeoutMinutes: 10 } as JobLaunch;
 test("the Depot machine creates once, finds its sandbox again after a restart, and waits for it to run", async () => {
 	let status = "SANDBOX_STATUS_STARTING";
 	const { fetch, calls } = mockDepot({
-		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "megit-j1", status: "SANDBOX_STATUS_CREATED" } }),
+		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "maggot-j1", status: "SANDBOX_STATUS_CREATED" } }),
 		GetSandbox: (body) => Response.json({ sandbox: { sandboxId: body.id, status } }),
 		KillSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", status: "SANDBOX_STATUS_CANCELLED" } }),
 	});
@@ -210,7 +210,7 @@ test("the Depot machine creates once, finds its sandbox again after a restart, a
 	assert.equal(state.sandboxId, "sb1");
 	assert.equal(saves, 1, "the id is saved as soon as it's known");
 	const create = calls.find((c) => c.method === "CreateSandbox")!.body as { name: string; timeoutMinutes: number };
-	assert.equal(create.name, "megit-j1");
+	assert.equal(create.name, "maggot-j1");
 	assert.ok(create.timeoutMinutes >= 25 && create.timeoutMinutes <= 26, "the job's limit plus a margin");
 	status = "SANDBOX_STATUS_RUNNING";
 	assert.equal(await machine.provision(state, launch, async () => {}), true);
@@ -224,8 +224,8 @@ test("the Depot machine creates once, finds its sandbox again after a restart, a
 		ListSandboxes: (body) =>
 			Response.json(
 				body.pageToken
-					? { sandboxes: [{ sandboxId: "sb9", name: "megit-j1", status: "SANDBOX_STATUS_RUNNING" }] }
-					: { sandboxes: [{ sandboxId: "old", name: "megit-j1", status: "SANDBOX_STATUS_FINISHED" }, { sandboxId: "x", name: "other", status: 4 }], nextPageToken: "p2" },
+					? { sandboxes: [{ sandboxId: "sb9", name: "maggot-j1", status: "SANDBOX_STATUS_RUNNING" }] }
+					: { sandboxes: [{ sandboxId: "old", name: "maggot-j1", status: "SANDBOX_STATUS_FINISHED" }, { sandboxId: "x", name: "other", status: 4 }], nextPageToken: "p2" },
 			),
 		GetSandbox: (body) => Response.json({ sandbox: { sandboxId: body.id, status: "SANDBOX_STATUS_RUNNING" } }),
 	});
@@ -253,11 +253,11 @@ test("WriteFile is a client stream: Init, then the bytes in chunks, checked agai
 		},
 	});
 	const api = new DepotApi({ token: "t" }, { fetch });
-	await api.writeFile("sb1", "/tmp/megit-inbox/step-0.sh", content);
+	await api.writeFile("sb1", "/tmp/maggot-inbox/step-0.sh", content);
 	assert.equal(received, content);
 	const call = calls[0];
 	assert.equal(call.headers.get("content-type"), "application/connect+json");
-	assert.deepEqual(call.frames[0], { init: { sandbox: { id: "sb1" }, path: "/tmp/megit-inbox/step-0.sh", mode: 0o600, createDirectories: true } });
+	assert.deepEqual(call.frames[0], { init: { sandbox: { id: "sb1" }, path: "/tmp/maggot-inbox/step-0.sh", mode: 0o600, createDirectories: true } });
 	assert.equal(call.frames.length, 3, "two data chunks");
 	// A short write is an error worth retrying.
 	const short = mockDepot({ WriteFile: () => new Response(streamOf([frame({ bytesWritten: "1" }), frame({}, 0x02)])) });
@@ -282,7 +282,7 @@ function localDepot(box: LocalSandbox) {
 			const content = enc.encode(await box.readFile(body.path));
 			return new Response(streamOf([frame({ data: btoa(String.fromCharCode(...content)) }), frame({ eof: true }), frame({}, 0x02)]));
 		},
-		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "megit-j1", status: "SANDBOX_STATUS_CREATED" } }),
+		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", name: "maggot-j1", status: "SANDBOX_STATUS_CREATED" } }),
 		GetSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", status: "SANDBOX_STATUS_RUNNING" } }),
 		KillSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", status: "SANDBOX_STATUS_CANCELLED" } }),
 		WriteFile: async (_, call) => {
@@ -367,7 +367,7 @@ test("a Depot job never puts secrets or the checkout token in a command's enviro
 		for (const needle of [SECRET, TOKEN, AUTH]) assert.ok(!c.raw.includes(needle), `${c.method} request carries ${needle}`);
 	}
 	const runs = calls.filter((c) => c.method === "RunCommand").map((c) => c.body as { env: Record<string, string>; detached?: boolean; args: string[]; sudo?: boolean });
-	for (const r of runs) assert.ok(Object.keys(r.env).every((k) => ["MEGIT_ID", "MEGIT_ATTEMPT", "MEGIT_AS_USER", "MEGIT_INTERPRETER", "MEGIT_OFFSET", "MEGIT_MAX", "MEGIT_SIGNAL"].includes(k)), JSON.stringify(r.env));
+	for (const r of runs) assert.ok(Object.keys(r.env).every((k) => ["MAGGOT_ID", "MAGGOT_ATTEMPT", "MAGGOT_AS_USER", "MAGGOT_INTERPRETER", "MAGGOT_OFFSET", "MAGGOT_MAX", "MAGGOT_SIGNAL"].includes(k)), JSON.stringify(r.env));
 	assert.equal(runs.filter((r) => r.detached).length, 3, "every launch detached");
 	assert.ok(runs.every((r) => r.sudo === true), "control commands run as root");
 	assert.ok(calls.some((c) => c.method === "KillSandbox"), "the sandbox was stopped");
@@ -385,8 +385,8 @@ test("a Depot job never puts secrets or the checkout token in a command's enviro
 test("ReadFile streams a file's chunks back, refusing one that's too large", async () => {
 	const { fetch, calls } = mockDepot({ ReadFile: () => new Response(streamOf([frame({ data: btoa("TOK=") }), frame({ data: btoa("abc\n") }), frame({ eof: true }), frame({}, 0x02)])) });
 	const box = new DepotSandbox(new DepotApi({ token: "t" }, { fetch }), "sb1");
-	assert.equal(await box.readFile("/tmp/megit-user/collect-0.env"), "TOK=abc\n");
-	assert.deepEqual(calls[0].body, { sandbox: { id: "sb1" }, path: "/tmp/megit-user/collect-0.env" });
+	assert.equal(await box.readFile("/tmp/maggot-user/collect-0.env"), "TOK=abc\n");
+	assert.deepEqual(calls[0].body, { sandbox: { id: "sb1" }, path: "/tmp/maggot-user/collect-0.env" });
 	assert.equal(calls[0].headers.get("content-type"), "application/connect+json");
 	const big = mockDepot({ ReadFile: () => new Response(streamOf([frame({ data: btoa("x".repeat(20)) }), frame({}, 0x02)])) });
 	await assert.rejects(new DepotApi({ token: "t" }, { fetch: big.fetch }).readFile("sb1", "/x", 10), /larger than 10 bytes/);

@@ -12,7 +12,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 		meta: [
 			{ charSet: "utf-8" },
 			{ name: "viewport", content: "width=device-width, initial-scale=1" },
-			{ title: "megit" },
+			{ title: "maggot" },
 			{ name: "description", content: "Git hosting for people and many concurrent agents, on Cloudflare Artifacts." },
 		],
 		links: [
@@ -170,7 +170,7 @@ function TopBar() {
 			<div className="mx-auto flex h-12 max-w-[1600px] items-center gap-3 px-3 sm:px-5">
 				<Link to="/" className="flex shrink-0 items-center gap-2 text-sm font-semibold tracking-tight">
 					<img src="/favicon.svg" alt="" className="size-6" />
-					megit
+					maggot
 				</Link>
 				{params.owner && (
 					<nav className="flex min-w-0 items-center gap-1.5 font-mono text-sm">

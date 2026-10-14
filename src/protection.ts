@@ -47,7 +47,7 @@ export function checkPush(rules: BranchRule[], commands: RefCommand[]): { refuse
 	for (const c of commands) {
 		if (!c.ref.startsWith("refs/heads/")) continue;
 		if (c.ref.startsWith(INCOMING)) {
-			refused.set(c.ref, "megit uses this branch name for pushes being checked");
+			refused.set(c.ref, "maggot uses this branch name for pushes being checked");
 			continue;
 		}
 		const branch = c.ref.slice("refs/heads/".length);
@@ -189,7 +189,7 @@ export function mapReport(response: Uint8Array, capabilities: string[], map: (li
 // ── Quarantine ───────────────────────────────────────────────────────────────
 
 /** Where updates to fast-forward-only branches land first, to be checked before the branch moves. */
-export const INCOMING = "refs/heads/megit-incoming/";
+export const INCOMING = "refs/heads/maggot-incoming/";
 
 export interface Staged {
 	command: RefCommand;

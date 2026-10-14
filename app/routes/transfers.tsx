@@ -8,7 +8,7 @@ import { api, ApiError, keys, type Invitation, type RepoTransfer } from "../lib/
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/transfers")({
-	head: () => ({ meta: [{ title: "Invitations and transfers · megit" }] }),
+	head: () => ({ meta: [{ title: "Invitations and transfers · maggot" }] }),
 	component: Transfers,
 });
 

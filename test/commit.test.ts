@@ -39,7 +39,7 @@ const repo: ObjectReader = {
 };
 
 before(async () => {
-	root = await mkdtemp(join(tmpdir(), "megit-commit-"));
+	root = await mkdtemp(join(tmpdir(), "maggot-commit-"));
 	bare = join(root, "bare.git");
 	const work = join(root, "work");
 	await git(["init", "-q", "--bare", "-b", "master", bare], root);

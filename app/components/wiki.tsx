@@ -243,7 +243,7 @@ export function WikiEditor({ project, index, page, initialTitle = "", baseCommit
 	const navigate = useNavigate();
 	const needsVerification = useNeedsVerification();
 	// The text being written is kept in this tab's session storage, so a reload (after a conflict, say) doesn't lose it.
-	const draftKey = `megit-wiki-draft:${project}:${page?.slug ?? "_new"}`;
+	const draftKey = `maggot-wiki-draft:${project}:${page?.slug ?? "_new"}`;
 	const [draft] = useState(() => readDraft(draftKey));
 	const [restored, setRestored] = useState(draft !== null && (draft.title !== (page?.title ?? initialTitle) || draft.content !== (page?.source ?? "")));
 	const [title, setTitleState] = useState(restored ? draft!.title : (page?.title ?? initialTitle));

@@ -1,8 +1,8 @@
 /**
- * The actions steps `use` beyond megit's own: JavaScript and composite actions, from GitHub
+ * The actions steps `use` beyond maggot's own: JavaScript and composite actions, from GitHub
  * (`owner/repo[/path]@ref`) or from the repository itself (`./path`). Before a job starts, each is
  * pinned to a commit and its action.yml read, so the job runs exactly what was resolved; the files
- * themselves are downloaded onto the machine during setup, from megit, which keeps a copy of each
+ * themselves are downloaded onto the machine during setup, from maggot, which keeps a copy of each
  * action commit in R2 (see archiveFor).
  */
 
@@ -34,7 +34,7 @@ function relativeFile(value: unknown, where: string): string {
 	return file;
 }
 
-/** Reads an action.yml, as megit runs actions: JavaScript (any node version runs on Node.js 20+) or composite. */
+/** Reads an action.yml, as maggot runs actions: JavaScript (any node version runs on Node.js 20+) or composite. */
 export function parseActionMeta(source: string, where: string): ActionMeta {
 	let doc: unknown;
 	try {
@@ -88,8 +88,8 @@ export function parseActionMeta(source: string, where: string): ActionMeta {
 		};
 	}
 	if (using === "composite") return { name, inputs, outputs, runs: { using: "composite", steps: compositeSteps(runs.steps, `${where}: runs.steps`) } };
-	if (using === "docker") throw new WorkflowError(`${where} is a Docker container action, which megit Actions can't run (JavaScript and composite actions work)`);
-	throw new WorkflowError(`${where}: runs.using "${runs.using}" isn't something megit Actions can run`);
+	if (using === "docker") throw new WorkflowError(`${where} is a Docker container action, which maggot Actions can't run (JavaScript and composite actions work)`);
+	throw new WorkflowError(`${where}: runs.using "${runs.using}" isn't something maggot Actions can run`);
 }
 
 async function readMeta(read: (path: string) => Promise<string | null>, dir: string, where: string): Promise<ActionMeta> {
@@ -190,7 +190,7 @@ const REF_TTL_MS = 5 * 60_000;
 const resolved = new Map<string, { sha: string; at: number }>();
 /** Archives being copied from GitHub to R2 in this isolate, so jobs asking at once share the copy. */
 const copying = new Map<string, Promise<void>>();
-/** The biggest action archive megit keeps. */
+/** The biggest action archive maggot keeps. */
 const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 
 /**

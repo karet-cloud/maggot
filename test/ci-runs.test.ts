@@ -17,7 +17,7 @@ const SHA2 = "b".repeat(40);
 
 type Files = Record<string, string>;
 
-/** Repositories as commits (`sha` → workflow files in .megit/workflows) and branches (`refs[repo][branch]` → sha). */
+/** Repositories as commits (`sha` → workflow files in .maggot/workflows) and branches (`refs[repo][branch]` → sha). */
 function memoryStore(repos: Record<string, Record<string, Files>>, refs: Record<string, Record<string, string>>, failGet: { n: number }) {
 	return {
 		async get(name: string) {
@@ -35,8 +35,8 @@ function memoryStore(repos: Record<string, Record<string, Files>>, refs: Record<
 				async readTree(hash: string) {
 					const [kind, sha] = hash.split(":");
 					const files = commits[sha];
-					if (kind === "root") return [{ name: ".megit", type: "tree", hash: `megit:${sha}` }];
-					if (kind === "megit") return [{ name: "workflows", type: "tree", hash: `wf:${sha}` }];
+					if (kind === "root") return [{ name: ".maggot", type: "tree", hash: `maggot:${sha}` }];
+					if (kind === "maggot") return [{ name: "workflows", type: "tree", hash: `wf:${sha}` }];
 					// Keys starting with @ are other files in the commit (actions' metadata), not workflows.
 					if (kind === "wf") return Object.keys(files).filter((f) => !f.startsWith("@")).map((f) => ({ name: f, type: "blob", hash: `file:${sha}:${f}` }));
 					return null;
@@ -69,7 +69,7 @@ interface Harness {
 	archived: { on: boolean };
 }
 
-function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_CLOUDFLARE?: string } = {}, github?: CiHost["github"]): Harness {
+function harness(repos: Record<string, Record<string, Files>>, env: { MAGGOT_CI_CLOUDFLARE?: string } = {}, github?: CiHost["github"]): Harness {
 	const db = new DatabaseSync(":memory:");
 	db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
 	const h = {
@@ -101,11 +101,11 @@ function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_C
 	});
 	const host: CiHost = {
 		sql: sqlStorage(db),
-		env: { MEGIT_API_KEY: API_KEY, ...env },
+		env: { MAGGOT_API_KEY: API_KEY, ...env },
 		store: memoryStore(repos, h.refs, h.failGet) as unknown as CiHost["store"],
 		job,
 		repoId: () => REPO,
-		repository: () => ({ fullName: "alice/app", url: "https://megit.test/alice/app", cloneUrl: "https://megit.test/alice/app.git", defaultBranch: "main" }),
+		repository: () => ({ fullName: "alice/app", url: "https://maggot.test/alice/app", cloneUrl: "https://maggot.test/alice/app.git", defaultBranch: "main" }),
 		emit: (data) => h.events.push(data),
 		changed: () => {},
 		wake: async () => {},
@@ -173,7 +173,7 @@ test("settings: without a Cloudflare container Depot is the default runner, and 
 	assert.deepEqual(s.depot, { configured: false, orgId: null });
 	assert.throws(() => h.ci.setDefaultRunner("cloudflare"), (e: HttpError) => e.code === "CLOUDFLARE_UNAVAILABLE");
 	assert.throws(() => h.ci.setDefaultRunner("gpu"), (e: HttpError) => e.code === "INVALID_INPUT");
-	const on = harness({ [REPO]: {} }, { MEGIT_CI_CLOUDFLARE: "on" });
+	const on = harness({ [REPO]: {} }, { MAGGOT_CI_CLOUDFLARE: "on" });
 	assert.equal(on.ci.getSettings().defaultRunner, "cloudflare");
 	assert.equal(on.ci.setDefaultRunner("depot").defaultRunner, "depot");
 });
@@ -208,8 +208,8 @@ test("push: matching workflows run from the pushed commit, broken files fail vis
 	await h.ci.setSecret("TOKEN", "s3cret-value");
 	const runs = await h.ci.onPush("main", SHA, "alice");
 	assert.deepEqual(runs.map((r) => [r.path, r.status]).sort(), [
-		[".megit/workflows/bad.yml", "completed"],
-		[".megit/workflows/build.yml", "in_progress"],
+		[".maggot/workflows/bad.yml", "completed"],
+		[".maggot/workflows/build.yml", "in_progress"],
 	]);
 	const bad = runs.find((r) => r.path.endsWith("bad.yml"))!;
 	assert.equal(bad.conclusion, "failure");
@@ -229,7 +229,7 @@ test("push: matching workflows run from the pushed commit, broken files fail vis
 	assert.equal(launch.env.TOKEN, "s3cret-value");
 	assert.deepEqual(launch.mask, ["s3cret-value"]);
 	assert.equal(launch.checkout.sha, SHA);
-	assert.equal(launch.checkout.url, "https://megit.test/alice/app.git");
+	assert.equal(launch.checkout.url, "https://maggot.test/alice/app.git");
 	const token = atob(launch.checkout.auth).slice(2);
 	const grant = await verifyCheckoutToken(API_KEY, token);
 	assert.deepEqual(grant?.repos, [REPO], "the checkout token reads this repository only");
@@ -292,7 +292,7 @@ test("forks: a fork's pull request waits for approval and never gets secrets; a 
 	const h = harness({ [REPO]: {}, [FORK]: { [SHA]: { "build.yml": BUILD }, [SHA2]: { "build.yml": BUILD } } });
 	await withDepot(h);
 	await h.ci.setSecret("TOKEN", "s3cret-value");
-	const pull = { number: 7, headRepo: FORK, cloneUrl: "https://megit.test/mallory/app.git", branch: "feature", baseBranch: "main", fromFork: true, actor: "mallory", action: "opened" as const };
+	const pull = { number: 7, headRepo: FORK, cloneUrl: "https://maggot.test/mallory/app.git", branch: "feature", baseBranch: "main", fromFork: true, actor: "mallory", action: "opened" as const };
 	const [waiting] = await h.ci.onPull({ ...pull, sha: SHA });
 	assert.equal(waiting.status, "waiting");
 	assert.equal(waiting.fromFork, true);
@@ -395,7 +395,7 @@ const BASE = sha(0xb);
 const pr = (over: Partial<PullTrigger> & { sha: string }): PullTrigger => ({
 	number: 1,
 	headRepo: null,
-	cloneUrl: "https://megit.test/alice/app.git",
+	cloneUrl: "https://maggot.test/alice/app.git",
 	branch: "topic",
 	baseBranch: "main",
 	fromFork: false,
@@ -416,18 +416,18 @@ const checks = (h: Harness, head: string, number = 1, headRepo: string | null = 
 test("dispatch runs only workflows that allow it, and runs page newest first", async () => {
 	const h = harness({ [REPO]: { [SHA]: { "build.yml": BUILD, "push.yml": PUSH_ONLY } } });
 	await withDepot(h);
-	await assert.rejects(h.ci.dispatch(".megit/workflows/push.yml", "main", SHA, "alice"), (e: HttpError) => e.code === "INVALID_INPUT");
-	await assert.rejects(h.ci.dispatch(".megit/workflows/none.yml", "main", SHA, "alice"), (e: HttpError) => e.status === 404);
-	const [manual] = await h.ci.dispatch(".megit/workflows/build.yml", "main", SHA, "alice");
+	await assert.rejects(h.ci.dispatch(".maggot/workflows/push.yml", "main", SHA, "alice"), (e: HttpError) => e.code === "INVALID_INPUT");
+	await assert.rejects(h.ci.dispatch(".maggot/workflows/none.yml", "main", SHA, "alice"), (e: HttpError) => e.status === 404);
+	const [manual] = await h.ci.dispatch(".maggot/workflows/build.yml", "main", SHA, "alice");
 	assert.equal(manual.event, "workflow_dispatch");
 	assert.deepEqual(
 		(await h.ci.listWorkflows(SHA)).map((w) => [w.path, w.dispatch]),
 		[
-			[".megit/workflows/build.yml", true],
-			[".megit/workflows/push.yml", false],
+			[".maggot/workflows/build.yml", true],
+			[".maggot/workflows/push.yml", false],
 		],
 	);
-	const [second] = await h.ci.dispatch(".megit/workflows/build.yml", "main", SHA, "alice");
+	const [second] = await h.ci.dispatch(".maggot/workflows/build.yml", "main", SHA, "alice");
 	const list = h.ci.listRuns({ sha: SHA, limit: 1 });
 	assert.deepEqual([list.runs[0].number, list.next], [second.number, second.number]);
 	assert.equal(h.ci.listRuns({ before: list.next!, sha: SHA }).runs[0].number, manual.number);
@@ -452,7 +452,7 @@ test("pull request checks: a failing push run on the head shows and blocks; a pa
 	await h2.ci.onPush("topic", H, "alice");
 	await finishAll(h2, "success");
 	c = await checks(h2, H);
-	assert.deepEqual([c.state, c.missing], ["missing", [".megit/workflows/pr.yml"]]);
+	assert.deepEqual([c.state, c.missing], ["missing", [".maggot/workflows/pr.yml"]]);
 	assert.match(c.reason ?? "", /pr\.yml hasn't run/);
 	// A writer starts what's missing. The pull request's event never arrived, so nothing vouches for its
 	// code: the run waits for approval like a reader's would.
@@ -493,12 +493,12 @@ test("pull request checks: a head without the base's required workflow runs the 
 	assert.match((await checks(h, H, 1, FORK)).reason ?? "", /pr\.yml hasn't run/, "deleting the file doesn't satisfy the rule");
 	await h.ci.queuePull(pr({ sha: H, headRepo: FORK, fromFork: true, approved: false, author: "mallory" }));
 	const [run] = h.ci.listRuns({ pull: 1 }).runs;
-	assert.deepEqual([run.path, run.status, run.fromFork], [".megit/workflows/pr.yml", "waiting", true]);
+	assert.deepEqual([run.path, run.status, run.fromFork], [".maggot/workflows/pr.yml", "waiting", true]);
 	await h.ci.approve(run.number);
 	assert.equal(h.starts[0].checkout.sha, H, "the fork's commit, checked out under the base's workflow");
 	await finishAll(h, "success");
 	assert.equal((await checks(h, H, 1, FORK)).reason, null);
-	assert.equal((await h.ci.rerun(run.number, "alice")).path, ".megit/workflows/pr.yml", "a re-run uses the definition it ran with");
+	assert.equal((await h.ci.rerun(run.number, "alice")).path, ".maggot/workflows/pr.yml", "a re-run uses the definition it ran with");
 });
 
 test("pull request events: one that fails is retried by the alarm; a late one for an older head can't cancel the current head's runs", async () => {
@@ -592,7 +592,7 @@ test("archived: nothing new starts or dispatches, and cancelling still works", a
 	assert.deepEqual(await h.ci.onPush("main", BASE, null), []);
 	await h.ci.queuePull(pr({ sha: SHA }));
 	assert.equal(h.ci.listRuns({ pull: 1 }).runs.length, 0);
-	await assert.rejects(h.ci.dispatch(".megit/workflows/build.yml", "main", SHA, "alice"), (e: HttpError) => e.code === "ARCHIVED");
+	await assert.rejects(h.ci.dispatch(".maggot/workflows/build.yml", "main", SHA, "alice"), (e: HttpError) => e.code === "ARCHIVED");
 	await assert.rejects(h.ci.rerun(run.number, "alice"), (e: HttpError) => e.code === "ARCHIVED");
 	h.archived.on = false;
 	const [other] = await h.ci.onPush("main", BASE, null);
@@ -627,7 +627,7 @@ test("required fallback: a head that keeps the file but narrows its trigger runs
 	await withDepot(h);
 	await h.ci.queuePull(pr({ sha: H }));
 	const [run] = h.ci.listRuns({ pull: 1 }).runs;
-	assert.deepEqual([run.path, run.workflow, run.status], [".megit/workflows/pr.yml", "PR", "in_progress"], "the base's PR workflow, not nothing");
+	assert.deepEqual([run.path, run.workflow, run.status], [".maggot/workflows/pr.yml", "PR", "in_progress"], "the base's PR workflow, not nothing");
 	assert.equal((await checks(h, H)).state, "pending");
 
 	// R2: narrowed to types [opened], then a new push.
@@ -642,7 +642,7 @@ test("required fallback: a head that keeps the file but narrows its trigger runs
 	h2.refs[REPO].topic = H2;
 	await h2.ci.queuePull(pr({ sha: H2, action: "synchronize" }));
 	const [next] = h2.ci.listRuns({ sha: H2 }).runs;
-	assert.deepEqual([next?.workflow, next?.path], ["PR", ".megit/workflows/pr.yml"], "on synchronize the base's runs instead");
+	assert.deepEqual([next?.workflow, next?.path], ["PR", ".maggot/workflows/pr.yml"], "on synchronize the base's runs instead");
 	assert.deepEqual((await checks(h2, H2)).missing, []);
 });
 
@@ -754,13 +754,13 @@ test("Start missing checks creates only the listed workflows, waiting for approv
 	await h.ci.queuePull(pr({ number: 21, branch: "b20", sha: H, headRepo: FORK, fromFork: true, approved: false, author: "mallory" }));
 	assert.equal(h.ci.listRuns({ pull: 21 }).runs.length, 0, "past the author's cap, nothing was created");
 	const before = await checks(h, H, 21, FORK);
-	assert.deepEqual(before.missing, [".megit/workflows/pr.yml"]);
+	assert.deepEqual(before.missing, [".maggot/workflows/pr.yml"]);
 
 	await h.ci.startPull(pr({ number: 21, branch: "b20", sha: H, headRepo: FORK, fromFork: true, actor: "alice", author: "mallory" }), before.missing);
 	const runs = h.ci.listRuns({ pull: 21 }).runs;
 	assert.deepEqual(
 		runs.map((r) => [r.path, r.status]),
-		[[".megit/workflows/pr.yml", "waiting"]],
+		[[".maggot/workflows/pr.yml", "waiting"]],
 		"only the listed workflow, waiting for approval; extra.yml isn't created",
 	);
 	assert.equal(h.starts.length, 0, "nothing was dispatched");
@@ -774,8 +774,8 @@ test("Start missing checks creates only the listed workflows, waiting for approv
 	h2.db.prepare("INSERT INTO ci_pulls (pull, sha, open, approved) VALUES (1, ?, 1, 1)").run(W);
 	h2.db.prepare("INSERT INTO ci_pull_events (pull, sha, action) VALUES (1, ?, 'opened')").run(W);
 	const missing = (await checks(h2, W)).missing;
-	assert.deepEqual(missing, [".megit/workflows/late.yml", ".megit/workflows/pr.yml"]);
-	await h2.ci.startPull(pr({ sha: W }), [".megit/workflows/late.yml"]);
+	assert.deepEqual(missing, [".maggot/workflows/late.yml", ".maggot/workflows/pr.yml"]);
+	await h2.ci.startPull(pr({ sha: W }), [".maggot/workflows/late.yml"]);
 	assert.deepEqual(h2.ci.listRuns({ pull: 1 }).runs.map((r) => [r.workflow, r.status]), [["Late", "in_progress"]]);
 });
 
@@ -980,14 +980,14 @@ test("actions a job uses are pinned and read before it starts; its job token is 
 	assert.deepEqual(
 		launch.plan.actions.map((a) => [a.repository, a.dir, a.archive?.sha ?? null]),
 		[
-			["actions/setup-node", `/tmp/megit-user/actions/actions/setup-node/${PIN}`, PIN],
+			["actions/setup-node", `/tmp/maggot-user/actions/actions/setup-node/${PIN}`, PIN],
 			["alice/app", "/workspace/act", null],
-			["owner/tool", `/tmp/megit-user/actions/owner/tool/${PIN}/sub`, PIN],
+			["owner/tool", `/tmp/maggot-user/actions/owner/tool/${PIN}/sub`, PIN],
 		],
 	);
 	const grant = await verifyJobToken(API_KEY, launch.api.token);
 	assert.deepEqual([grant?.run, grant?.read, grant?.write], [1, ["refs/heads/topic", "refs/heads/main"], "refs/heads/topic"]);
-	assert.equal(launch.api.url, "https://megit.test");
+	assert.equal(launch.api.url, "https://maggot.test");
 
 	// An action that can't be resolved fails the job with the reason, before any machine starts.
 	const h2 = harness({ [REPO]: { [SHA]: { "a.yml": "on: push\njobs:\n  b:\n    steps:\n      - uses: someone/missing@v1\n" } } }, {}, github);

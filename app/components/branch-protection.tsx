@@ -9,7 +9,7 @@ const OPTIONS: { id: keyof Omit<BranchRule, "pattern" | "createdAt">; label: str
 	{ id: "blockDeletions", label: "Block deletion", hint: "Nobody can delete the branch, from git or the web" },
 	{ id: "requireMergeQueue", label: "No direct pushes", hint: "No pushes or web commits; work lands through pull requests or agent tasks" },
 	{ id: "requireReview", label: "Require an approving review", hint: "Changes land only through pull requests approved by someone who can merge (no changes requested): no direct pushes, web commits or merge queue" },
-	{ id: "requireChecks", label: "Require Actions to pass", hint: "Changes land only through pull requests whose latest run of every megit Actions workflow on the head commit succeeded: no direct pushes, web commits or merge queue" },
+	{ id: "requireChecks", label: "Require Actions to pass", hint: "Changes land only through pull requests whose latest run of every maggot Actions workflow on the head commit succeeded: no direct pushes, web commits or merge queue" },
 ];
 
 /** A repository's branch protection rules: add, change and remove them. */

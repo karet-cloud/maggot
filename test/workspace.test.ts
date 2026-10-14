@@ -5,7 +5,7 @@ import { after, before, test } from "node:test";
 import { Workspace } from "../src/git/workspace.ts";
 import { authUrl, localArtifacts, sh } from "./helpers.ts";
 
-const bot = { name: "megit", email: "bot@megit.dev" };
+const bot = { name: "maggot", email: "bot@maggot.dev" };
 let artifacts: Awaited<ReturnType<typeof localArtifacts>>;
 let main: { url: string; token: string };
 

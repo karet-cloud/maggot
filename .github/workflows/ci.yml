@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: production
-      url: https://megit.sarthak7u.workers.dev
+      url: https://maggot.sarthak7u.workers.dev
     # Never two deploys at once; a newer push waits for the running one instead of cancelling it.
     concurrency:
       group: deploy-production
@@ -38,9 +38,9 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       # Optional: a sender on a domain set up for Cloudflare Email Sending turns on password reset emails.
-      MEGIT_EMAIL_FROM: ${{ vars.MEGIT_EMAIL_FROM }}
+      MAGGOT_EMAIL_FROM: ${{ vars.MAGGOT_EMAIL_FROM }}
       # Optional: JSON overrides for the rate limits and quotas in src/policy.ts.
-      MEGIT_POLICY: ${{ vars.MEGIT_POLICY }}
+      MAGGOT_POLICY: ${{ vars.MAGGOT_POLICY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,12 +48,12 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
-      # MEGIT_API_KEY is already stored on the Worker; deploys keep it.
+      # Provision MAGGOT_API_KEY on the Worker before its first deployment; later deploys keep it.
       - run: npx cf deploy
       - name: Smoke test
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://megit.sarthak7u.workers.dev/api/me)
+            code=$(curl -s -o /dev/null -w '%{http_code}' https://maggot.sarthak7u.workers.dev/api/me)
             [ "$code" = 200 ] && echo "API up" && exit 0
             sleep 5
           done

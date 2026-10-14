@@ -1,6 +1,6 @@
-// Git smart HTTP at `<origin>/<owner>/<repo>.git`: plain `git clone`, `fetch` and `push` against megit
+// Git smart HTTP at `<origin>/<owner>/<repo>.git`: plain `git clone`, `fetch` and `push` against maggot
 // URLs. The Worker checks who may do what, then streams the exchange to the repository in Artifacts
-// with a short-lived internal token, so users only ever hold megit credentials.
+// with a short-lived internal token, so users only ever hold maggot credentials.
 import { apiKey, canRead, canWrite, resolvePrincipal, type Principal } from "./auth.ts";
 import { CHECKOUT_TOKEN_PREFIX, verifyCheckoutToken } from "./ci/token.ts";
 import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts";
@@ -29,7 +29,7 @@ export function matchGitPath(pathname: string): GitRoute | null {
 }
 
 const challenge = (message: string) =>
-	new Response(`${message}\n`, { status: 401, headers: { "www-authenticate": 'Basic realm="megit"', "content-type": "text/plain" } });
+	new Response(`${message}\n`, { status: 401, headers: { "www-authenticate": 'Basic realm="maggot"', "content-type": "text/plain" } });
 
 const deny = (status: number, message: string) => new Response(`${message}\n`, { status, headers: { "content-type": "text/plain" } });
 
@@ -82,7 +82,7 @@ export async function authorizeGit(env: Env, principal: Principal, owner: string
 	if (row.archivedAt) return { ok: false, status: 403, inProtocol: true, message: `${row.owner}/${row.name} is archived, so it's read-only.` };
 	if (principal.kind === "user") {
 		if (!principal.verified && verificationRequired(env)) {
-			return { ok: false, status: 403, inProtocol: true, message: `Verify your email address before pushing; the link is in the email megit sent when you signed up (${origin}).` };
+			return { ok: false, status: 403, inProtocol: true, message: `Verify your email address before pushing; the link is in the email maggot sent when you signed up (${origin}).` };
 		}
 		const blocked = await pushBlocked(env, db(env), row);
 		if (blocked) return { ok: false, status: 403, inProtocol: true, message: blocked };
@@ -143,7 +143,7 @@ export function upstreamFetch(
 ): Promise<Response> {
 	const headers = new Headers({ authorization: `Basic ${btoa(`x:${upstream.token.split("?expires=")[0]}`)}` });
 	for (const [name, value] of Object.entries(init.headers ?? {})) if (value) headers.set(name, value);
-	if (!headers.has("user-agent")) headers.set("user-agent", "git/megit");
+	if (!headers.has("user-agent")) headers.set("user-agent", "git/maggot");
 	return fetch(`${upstream.url}/${endpoint}`, { method: init.method, headers, body: init.body, signal: init.signal });
 }
 

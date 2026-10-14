@@ -1,6 +1,6 @@
 <img src="assets/icon.svg" width="64" height="64" alt="">
 
-# megit
+# maggot
 
 Git hosting for people, and for many agents working on the same codebase at once, built on
 [Cloudflare Artifacts](https://developers.cloudflare.com/artifacts/), Workers, Durable Objects and D1.
@@ -15,7 +15,7 @@ so anything it shows can be built against directly.
 ## The model
 
 GitHub's model (shared repo, branches, PRs, human review) breaks down when hundreds of agents
-push at once. megit replaces it with:
+push at once. maggot replaces it with:
 
 - **Task = fork.** Each unit of agent work gets its own Artifacts fork with a repo-scoped write
   token. Agents can never push to the project repo, so they can't race each other or clobber the default branch.
@@ -28,17 +28,17 @@ push at once. megit replaces it with:
   and pushes. If someone moved the default branch underneath it, it resyncs and retries.
 - **Conflicts are data, not a review thread.** A conflicting task goes to `conflict` with the
   conflicting files *and the already-merged tasks that touched them*. The agent runs
-  `megit sync`, resolves, and resubmits. Non-conflicting work never waits on a human.
+  `maggot sync`, resolves, and resubmits. Non-conflicting work never waits on a human.
 - **Advisory path claims.** Tasks can declare paths they intend to touch; creating a task returns
   any active tasks with overlapping claims so agents can coordinate before they collide.
 - **Everything is an event.** Every state change is appended to a per-project event log, available
   by polling (`/events?after=`) or live over a WebSocket, with replay on reconnect.
 
 ```
- agent ──megit start──▶ Worker ──▶ ProjectCoordinator (DO, SQLite) ──fork──▶ Artifacts: proj--t123
+ agent ──maggot start──▶ Worker ──▶ ProjectCoordinator (DO, SQLite) ──fork──▶ Artifacts: proj--t123
    │                                        │
    ├── git push (fork token) ──────────────────────────────────────────────▶ Artifacts: proj--t123
-   └──megit submit──▶ Worker ──▶ queue ──alarm──▶ fetch master + fork, merge, push ──▶ Artifacts: proj
+   └──maggot submit──▶ Worker ──▶ queue ──alarm──▶ fetch master + fork, merge, push ──▶ Artifacts: proj
                                             └──▶ events ──▶ WebSocket / polling
 ```
 
@@ -54,11 +54,11 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   in D1). Usernames are the first part of every repository URL, so they can't be changed.
 - **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
   works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
-  Emails go out through Cloudflare Email Sending when the deploy sets `MEGIT_EMAIL_FROM` (a sender on a
+  Emails go out through Cloudflare Email Sending when the deploy sets `MAGGOT_EMAIL_FROM` (a sender on a
   domain set up for it; a repository variable in CI). Without it the page says email isn't available, the
   link is logged, and an admin can issue one: `POST /api/admin/password-reset {"username": "…"}` with the
   admin key.
-- **Email verification**: when the server can send email (or `MEGIT_POLICY` sets
+- **Email verification**: when the server can send email (or `MAGGOT_POLICY` sets
   `requireVerifiedEmail`), sign-up sends a link that works for a day, and until it's opened the account
   can't create repositories or push (a banner offers to resend it). Without email, an admin issues the
   link: `POST /api/admin/verify-email {"username": "…"}`.
@@ -67,7 +67,7 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   Durable Object per address, user or account). Each account has a repository count and storage quota,
   each repository a size limit, and each push a size limit; a push is measured as it streams through and
   counted once the backend reports it accepted, and once a repository is full git prints why. Defaults are in [`src/policy.ts`](src/policy.ts); set
-  `MEGIT_POLICY` (JSON, a repository variable in CI) to change them. The admin key isn't limited.
+  `MAGGOT_POLICY` (JSON, a repository variable in CI) to change them. The admin key isn't limited.
   Wrong tokens count against the address that sent them, and an address past its budget is refused
   before any lookup. Auth endpoints take JSON only, so every limit sees the fields it keys on.
 - **Repositories**: `/<owner>/<repo>`, public (anyone can browse and clone; only the owner pushes) or
@@ -87,19 +87,19 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   repositories, needs the username plus a **personal access token** as the password (Tokens page, or
   "Add a token" in a repository's Clone / push dialog, which puts it straight into the commands). The
   Worker checks access, then streams Git's smart-HTTP exchange to Artifacts with a short-lived internal
-  token, so people only ever hold megit credentials. Each push emits a `repo.pushed` event.
+  token, so people only ever hold maggot credentials. Each push emits a `repo.pushed` event.
 - **Git over SSH**: `git clone git@<host>:<owner>/<repo>.git` with a key added under Settings → SSH
   keys (Ed25519, ECDSA or RSA). Workers can't listen on port 22, so ssh connects through a
   `ProxyCommand` that carries the SSH byte stream over a WebSocket to `/_ssh`
   ([`/ssh-proxy.mjs`](src/ssh/proxy-script.ts), Node.js 22+; the SSH keys page has the one-time
   `~/.ssh/config` entry). The Worker is the SSH server ([`src/ssh/`](src/ssh)): ML-KEM-768 + X25519
   (post-quantum, what OpenSSH 10 prefers) or curve25519 key exchange, AES-GCM, and an Ed25519 host key
-  derived from `MEGIT_API_KEY` (or `MEGIT_SSH_HOST_KEY_SEED`), so every isolate presents the same one.
+  derived from `MAGGOT_API_KEY` (or `MAGGOT_SSH_HOST_KEY_SEED`), so every isolate presents the same one.
   Fetches use Git protocol v2, whose requests are stateless and map one-to-one onto smart-HTTP requests
   to Artifacts; pushes stream the commands and pack as one receive-pack request. The same permission,
   verification, archive, quota and rate-limit checks apply as over HTTPS.
 - **Push an existing project**: an empty repository shows GitHub-style quick-setup commands
-  (`git remote add megit <url>`, `git branch -M <branch>`, `git push -u megit <branch>`, plus `--all` and
+  (`git remote add maggot <url>`, `git branch -M <branch>`, `git push -u maggot <branch>`, plus `--all` and
   `--tags`). The default branch is chosen at creation (`master` unless you change it).
 - **Agents**: the board: tasks in four columns (working, merge queue, needs attention, merged), updated live over
   the project WebSocket. Cards glow as events touch them; tasks still waiting for a fork show "Forking".
@@ -128,8 +128,8 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   file names), case-insensitively, with the matching lines. Queries are up to 100 characters and
   limited to 30 a minute; an update too large to apply file by file rebuilds the index instead.
 - **Webhooks**: in a repository's settings. Pushes (one delivery per branch moved, from git, the web
-  editor or a merge), merges and agent task events are POSTed as JSON with `X-Megit-Event`,
-  `X-Megit-Delivery` and `X-Megit-Signature-256: sha256=<HMAC-SHA256 of the body>`. Each hook gets a
+  editor or a merge), merges and agent task events are POSTed as JSON with `X-Maggot-Event`,
+  `X-Maggot-Delivery` and `X-Maggot-Signature-256: sha256=<HMAC-SHA256 of the body>`. Each hook gets a
   ping when it's added; deliveries are retried five times over about nine hours, kept (last 50) with
   their responses, and can be redelivered. A secret (8+ characters) is required. Pausing a hook drops
   what it had queued; at most 500 deliveries wait per repository. https only, no private addresses, no
@@ -150,7 +150,7 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 - **Branch protection**: rules per branch name or pattern (`*` within a segment, `**` across) in
   repository settings. "Block deletion" and "only the merge queue" are refused from the push's
   commands, before the pack is stored. "Block force pushes" needs the new commits to tell, so the push
-  goes through, megit checks the old head is an ancestor of the new one, and if not puts the branch
+  goes through, maggot checks the old head is an ancestor of the new one, and if not puts the branch
   back (a compare-and-swap ref update) and rewrites git's report so the client sees
   `! [remote rejected] … (protected branch: force pushes aren't allowed)`. The same rules apply to
   SSH pushes, web commits and branch deletes; the merge queue is never blocked.
@@ -195,7 +195,7 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   has no branch rules or Actions. Changes refresh open pages and send `gollum` webhooks. Read-only when
   archived; forks don't copy it; admins can turn it off in Settings (it answers 404, pages are kept).
   Repository names can't end in `.wiki`.
-- **Actions**: workflows in `.megit/workflows/*.yml` in GitHub Actions syntax (`run` steps, `needs`,
+- **Actions**: workflows in `.maggot/workflows/*.yml` in GitHub Actions syntax (`run` steps, `needs`,
   matrices, job `if` and outputs, GitHub's expressions, JavaScript and composite actions from GitHub or the
   repository, and built-in checkout, cache and artifact actions kept in R2), run on pushes, pull
   requests, schedules and by hand. Jobs run in a
@@ -223,27 +223,27 @@ npm run dev          # local Artifacts stand-in + Worker and UI (`vite dev --mod
 
 `npm run dev` prints the URL; open it in a browser and sign in with the key `dev`. The local stack uses `scripts/local-artifacts.ts`, which serves
 real Git smart HTTP (via `git http-backend`) with Artifacts-style tokens and mirrors the parts of the
-Workers binding megit uses, so the Worker code path is the same as production. State lives in
-`.megit-local/`. Set `HOST=0.0.0.0 PUBLIC_HOST=<your-tailscale-host>` to expose it to other machines.
+Workers binding maggot uses, so the Worker code path is the same as production. State lives in
+`.maggot-local/`. Set `HOST=0.0.0.0 PUBLIC_HOST=<your-tailscale-host>` to expose it to other machines.
 To reproduce Artifacts' concurrent-fork failures locally, set `LOCAL_ARTIFACTS_FORK_DELAY_MS=500`
 and `LOCAL_ARTIFACTS_FORK_FAIL_ABOVE=2` (forks fail while more than 2 of one repo are in flight).
 
 Then, in another shell:
 
 ```sh
-export MEGIT_URL=http://127.0.0.1:<port>      # from the dev output; API key defaults to "dev"
+export MAGGOT_URL=http://127.0.0.1:<port>      # from the dev output; API key defaults to "dev"
 npm run demo                                  # 6 concurrent agents + a deliberate conflict
 ```
 
 Or drive it by hand:
 
 ```sh
-node cli/megit.ts init myproj
-node cli/megit.ts start myproj "Add login" --agent claude-1 --paths src/auth/
+node cli/maggot.ts init myproj
+node cli/maggot.ts start myproj "Add login" --agent claude-1 --paths src/auth/
 cd myproj-t…   # a normal git checkout of the task's fork
 # …edit, commit (or not; submit commits for you)…
-node cli/megit.ts submit --wait
-node cli/megit.ts watch myproj               # live event stream
+node cli/maggot.ts submit --wait
+node cli/maggot.ts watch myproj               # live event stream
 ```
 
 ## Deploy to Cloudflare
@@ -257,7 +257,7 @@ npx cf auth login
 export CLOUDFLARE_ACCOUNT_ID=<account with Artifacts access>   # needed if your login has several accounts
 
 # First deploy: a new Worker's secrets have to ship with it.
-mkdir -p .secrets && echo "MEGIT_API_KEY=$(openssl rand -hex 24)" > .secrets/prod.env   # gitignored
+mkdir -p .secrets && echo "MAGGOT_API_KEY=$(openssl rand -hex 24)" > .secrets/prod.env   # gitignored
 npx cf deploy --secrets-file .secrets/prod.env
 
 # Later deploys keep the secret.
@@ -268,12 +268,12 @@ CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both te
 pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
 needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
 Workers" template, plus Artifacts edit and D1 edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
-The first deploy creates the `megit` D1 database; tables are created by the Worker on first use, so
-there's no migration step. Better Auth's secret is derived from `MEGIT_API_KEY` unless a
+The first deploy creates the `maggot` D1 database; tables are created by the Worker on first use, so
+there's no migration step. Better Auth's secret is derived from `MAGGOT_API_KEY` unless a
 `BETTER_AUTH_SECRET` secret is set.
 
-Point the CLI at it with `MEGIT_URL=https://megit.<subdomain>.workers.dev` and `MEGIT_API_KEY` from
-`.secrets/prod.env`. The "megit" Artifacts namespace is created on first use. A brand-new
+Point the CLI at it with `MAGGOT_URL=https://maggot.<subdomain>.workers.dev` and `MAGGOT_API_KEY` from
+`.secrets/prod.env`. The "maggot" Artifacts namespace is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
 
 `cloudflare.config.ts` is a function of the Vite mode: `offline` (used by `npm run dev`) binds the
@@ -286,8 +286,8 @@ local stand-in, and any other mode binds the real Artifacts namespace. Vite rese
 ## API
 
 All routes are under `/api`. Callers are a signed-in user (Better Auth session cookie; writes must come
-from the same origin), a user's personal access token (`Authorization: Bearer megit_pat_…`, or `?key=` for
-WebSockets), the admin key (`Bearer <MEGIT_API_KEY>`), or anonymous.
+from the same origin), a user's personal access token (`Authorization: Bearer maggot_pat_…`, or `?key=` for
+WebSockets), the admin key (`Bearer <MAGGOT_API_KEY>`), or anonymous.
 
 User repositories live at `/repos/:owner/:repo`, and every per-repository route below works there with
 the same suffix (`/repos/ada/hello/log`, `/repos/ada/hello/tasks`, …). Reads need read access (public, or
@@ -369,7 +369,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | POST | `/projects/:p/tasks/:id/access` | | `TaskAccess` with fresh tokens (`fork: null` while provisioning) |
 | POST | `/projects/:p/tasks/:id/submit` | | `{ task }`, enqueues for merge (202) |
 | POST | `/projects/:p/tasks/:id/abandon` | | `{ task }`, deletes the fork |
-| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days (admin key only: pushes with them skip megit's limits) |
+| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days (admin key only: pushes with them skip maggot's limits) |
 | GET | `/projects/:p/queue` | | `{ queue: QueueEntry[] }` |
 | GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }`: from `after` forward, or the newest `limit` without it |
 | WS | `/projects/:p/live` | `?key=&after=<seq>` | stream of `ProjectEvent` JSON; replays from `after`; send `ping` → `pong` |
@@ -391,19 +391,19 @@ Event types: `project.created`, `repo.pushed` (branch, from, to, moved, refs: ev
 
 ## QA against real repositories
 
-`npm run qa:github` mirrors six small public GitHub repositories into a running megit, the way someone
+`npm run qa:github` mirrors six small public GitHub repositories into a running maggot, the way someone
 moving over would: `git push --all` and `--tags` with a personal access token (one goes through
 "Import from URL" instead). Then it checks:
 
 - every branch and tag against GitHub's
-- a clone back from megit, which must pass `git fsck` and keep the full history
+- a clone back from maggot, which must pass `git fsck` and keep the full history
 - that anonymous clones work for public repositories and are refused for private ones
 - that the API agrees with git: head, history, root tree, branches, README, a raw file, and a zip
   archive with every file
 - that a follow-up push lands
 
-It signs up a throwaway user unless `MEGIT_USER` and `MEGIT_TOKEN` are set, deletes what it creates
-(`KEEP=1` keeps it), and works against production with `MEGIT_URL`.
+It signs up a throwaway user unless `MAGGOT_USER` and `MAGGOT_TOKEN` are set, deletes what it creates
+(`KEEP=1` keeps it), and works against production with `MAGGOT_URL`.
 
 ## Layout
 
@@ -434,18 +434,18 @@ src/orgs.ts           Organizations, teams, collaborators and invitations
 src/git/history.ts    File history and blame
 src/store.ts          Artifacts binding interface + local stand-in client
 src/api.ts            Public API types (no runtime deps; import from a UI)
-cli/megit.ts          Agent CLI
+cli/maggot.ts          Agent CLI
 scripts/              local Artifacts server, dev launcher, demo
 test/                 merge engine tests against real git
 docs/actions.md       Actions workflow syntax, actions, caches and artifacts, runners, Depot, secrets, API
-.megit/workflows/     This repository's own megit Actions workflow
+.maggot/workflows/     This repository's own maggot Actions workflow
 test/e2e/             the Worker under vite dev against the local stand-in with simulated fork failures
 ```
 
 ```sh
 npm test             # merge engine (needs git)
 npm run test:e2e     # end to end: accounts, git push/clone permissions, fork throttling, retries (~25s)
-npm run qa:github    # mirrors small public GitHub repos into a running megit and checks everything (see below)
+npm run qa:github    # mirrors small public GitHub repos into a running maggot and checks everything (see below)
 npm run typecheck
 ```
 
@@ -476,7 +476,7 @@ npm run typecheck
 - Pull request niceties: suggested changes, threaded replies to line comments, and draft pull requests.
 - Actions: no services, containers, environments, concurrency, reusable workflows or Docker actions, and
   no status API for external CI to report into (see [`docs/actions.md`](docs/actions.md)).
-- Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's
+- Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through maggot's
   Git URL already emit `repo.pushed`.
 - Per-agent identities: agents act as their owner's personal access token (or the admin key), not as
   accounts of their own.

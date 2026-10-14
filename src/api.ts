@@ -236,7 +236,7 @@ export interface RepoInfo {
 	visibility: Visibility;
 	defaultBranch: string;
 	createdAt: string;
-	/** HTTPS clone URL served by megit; push with a personal access token as the password. */
+	/** HTTPS clone URL served by maggot; push with a personal access token as the password. */
 	cloneUrl: string;
 	/** Whether the caller may push, change settings, and run tasks. */
 	canWrite: boolean;
@@ -297,7 +297,7 @@ export interface SshKey {
 	lastUsedAt: string | null;
 }
 
-/** How to reach megit over SSH. */
+/** How to reach maggot over SSH. */
 export interface SshInfo {
 	/** The host key, in known_hosts form (`ssh-ed25519 AAAA...`). */
 	hostKey: string;
@@ -431,7 +431,7 @@ export interface BranchRule {
 	requireMergeQueue: boolean;
 	/** Pull requests into it need an approving review from someone who can merge, and no changes requested. */
 	requireReview: boolean;
-	/** Pull requests into it need their megit Actions runs on the head commit to have passed. */
+	/** Pull requests into it need their maggot Actions runs on the head commit to have passed. */
 	requireChecks: boolean;
 	createdAt: string;
 }

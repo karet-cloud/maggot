@@ -54,18 +54,18 @@ export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }
 	return (
 		<div className="space-y-4 text-xs">
 			<Section title="Push an existing repository">
-				<CopyField value={`git remote add megit ${remote}`} secret={secret} />
+				<CopyField value={`git remote add maggot ${remote}`} secret={secret} />
 				<CopyField value={`git branch -M ${branch}`} />
-				<CopyField value={`git push -u megit ${branch}`} />
+				<CopyField value={`git push -u maggot ${branch}`} />
 				<p className="text-faint">
-					Other branches and tags: <code className="font-mono text-dim">git push megit --all && git push megit --tags</code>
+					Other branches and tags: <code className="font-mono text-dim">git push maggot --all && git push maggot --tags</code>
 				</p>
 			</Section>
 			{empty ? (
 				<Section title="Or start a new one">
 					<CopyField value={`git init -b ${branch} ${dir} && cd ${dir}`} />
 					<CopyField value={`echo ${sh(`# ${repo.name}`)} > README.md && git add . && git commit -m "Initial commit"`} />
-					<CopyField value={`git remote add megit ${remote} && git push -u megit ${branch}`} secret={secret} />
+					<CopyField value={`git remote add maggot ${remote} && git push -u maggot ${branch}`} secret={secret} />
 				</Section>
 			) : (
 				<Section title="Clone">
@@ -119,7 +119,7 @@ function SshSection({ repo }: { repo: RepoInfo }) {
 	);
 }
 
-const CLONE_KIND = "megit.cloneKind";
+const CLONE_KIND = "maggot.cloneKind";
 
 /** The repository's clone URL, HTTPS or SSH; the choice is remembered in this browser. */
 export function CloneUrl({ repo }: { repo: RepoInfo }) {
