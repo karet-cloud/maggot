@@ -25,7 +25,7 @@ export function ssrContext(): SsrContext {
 }
 
 /** The visitor's headers the API looks at: who they are (session cookie, token) and where they're from (rate limits). */
-const FORWARD = ["cookie", "authorization", "user-agent", "accept-language", "cf-connecting-ip", "x-forwarded-for", "x-real-ip"];
+const FORWARD = ["cookie", "authorization", "user-agent", "accept-language", "cf-connecting-ip"];
 
 /** `fetch("/api" + path)` as the visitor, answered by the API in this Worker. */
 export function serverFetch(path: string, init: RequestInit = {}): Promise<Response> {

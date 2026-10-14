@@ -73,6 +73,37 @@ export class ApiError extends Error {
 	}
 }
 
+/** Whether asking again gets the same answer: a 4xx other than a timeout or a rate limit. */
+export const isTerminal = (err: unknown) => err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
+
+/** Content a server render leaves to the browser (too big to send with the page); transient, so it's never kept. */
+export const tooBigToRender = () => new ApiError(503, "TOO_BIG_TO_RENDER", "Loaded in the browser");
+
+/** A response's text, or tooBigToRender past `max` bytes or for binary content; stops reading at the cap. */
+async function cappedText(res: Response, max: number): Promise<string> {
+	const reader = res.body?.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const chunk = await reader?.read();
+		if (!chunk || chunk.done) break;
+		size += chunk.value.byteLength;
+		if (size > max) {
+			await reader?.cancel();
+			throw tooBigToRender();
+		}
+		chunks.push(chunk.value);
+	}
+	const bytes = new Uint8Array(size);
+	let at = 0;
+	for (const c of chunks) {
+		bytes.set(c, at);
+		at += c.byteLength;
+	}
+	if (bytes.subarray(0, 8000).includes(0)) throw tooBigToRender();
+	return new TextDecoder().decode(bytes);
+}
+
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
 	const res = await apiFetch(path, {
 		method,
@@ -331,14 +362,15 @@ export const api = {
 		),
 	tree: (project: string, path: string, ref?: string) =>
 		call<{ tree: Tree }>("GET", `${p(project)}/tree?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`).then((r) => r.tree),
-	file: async (project: string, path: string, ref?: string) => {
+	/** `maxBytes` caps what's read (a server render's limit), else it's the whole file. */
+	file: async (project: string, path: string, ref?: string, maxBytes?: number) => {
 		const q = ref ? `?${new URLSearchParams({ ref })}` : "";
 		const res = await apiFetch(`${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
 		if (!res.ok) {
 			const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
 			throw new ApiError(res.status, json?.error?.code ?? "HTTP_ERROR", json?.error?.message ?? res.statusText);
 		}
-		return res.text();
+		return maxBytes === undefined ? res.text() : cappedText(res, maxBytes);
 	},
 	commit: (project: string, hash: string, ref?: string) =>
 		call<{ commit: CommitDetail; diff: Diff }>("GET", `${p(project)}/commits/${hash}${ref ? `?${new URLSearchParams({ ref })}` : ""}`),

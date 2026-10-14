@@ -6,19 +6,28 @@ import { DiffView } from "../components/diff.tsx";
 import { ErrorNote, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
-import { preload } from "../lib/queries.ts";
+import { dropIfTooBig, preload } from "../lib/queries.ts";
 
 type Search = { ref?: string };
 
 export const Route = createFileRoute("/$owner/$repo/commit/$hash")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ ref: typeof s.ref === "string" && s.ref ? s.ref : undefined }),
 	loaderDeps: ({ search }) => ({ ref: search.ref }),
-	loader: ({ context, params, deps }) => preload(context.queryClient, commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref)),
+	loader: async ({ context, params, deps }) => {
+		const query = commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref);
+		await preload(context.queryClient, query);
+		// A big diff is too much to highlight on the server and send with the page: the browser loads it.
+		dropIfTooBig(context.queryClient, query, ({ diff }) => diff.truncated || diff.files.length > SERVER_DIFF_FILES || diff.additions + diff.deletions > SERVER_DIFF_LINES);
+	},
 	component: CommitPage,
 });
 
 const commitQuery = (project: string, hash: string, ref?: string) =>
 	queryOptions({ queryKey: [...keys.commit(project, hash), ref ?? ""], queryFn: () => api.commit(project, hash, ref), staleTime: Infinity });
+
+/** The biggest commit diff a server render shows. */
+const SERVER_DIFF_FILES = 50;
+const SERVER_DIFF_LINES = 1000;
 
 const TASK_MERGE = /^Merge task (t[0-9a-f]+): /;
 

@@ -4,13 +4,13 @@ import { FileCode2, Search as SearchIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Empty, ErrorNote, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
-import { preload } from "../lib/queries.ts";
+import { browserOnly, preload } from "../lib/queries.ts";
 
 // Code search in the repository's default branch (indexed after each change to it).
 export const Route = createFileRoute("/$owner/$repo/search")({
 	validateSearch: (s: Record<string, unknown>): { q?: string } => ({ q: typeof s.q === "string" && s.q ? s.q : undefined }),
 	loaderDeps: ({ search }) => ({ q: search.q }),
-	loader: ({ context, params, deps }) => preload(context.queryClient, Boolean(deps.q) && searchQuery(`${params.owner}/${params.repo}`, deps.q as string)),
+	loader: ({ context, params, deps }) => preload(context.queryClient, Boolean(deps.q) && browserOnly(false, searchQuery(`${params.owner}/${params.repo}`, deps.q as string))),
 	component: CodeSearchPage,
 });
 

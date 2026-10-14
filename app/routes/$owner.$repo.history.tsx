@@ -7,7 +7,7 @@ import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/ref
 import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type GraphCommit } from "../lib/api.ts";
 import { layoutGraph, type GraphRow } from "../lib/graph-layout.ts";
-import { preload } from "../lib/queries.ts";
+import { browserOnly, preload } from "../lib/queries.ts";
 
 type Search = { ref?: string; view?: "graph"; path?: string };
 
@@ -23,7 +23,8 @@ export const Route = createFileRoute("/$owner/$repo/history")({
 		if (deps.view === "graph") return preload(context.queryClient, graphQuery(project));
 		return preload(
 			context.queryClient,
-			deps.path ? fileHistoryQuery(project, deps.path, deps.ref) : logQuery(project, deps.ref),
+			// A file's history walks the log for it: the browser fetches it.
+			deps.path ? browserOnly(false, fileHistoryQuery(project, deps.path, deps.ref)) : logQuery(project, deps.ref),
 			branchNamesQuery(project),
 			tagNamesQuery(project),
 		);

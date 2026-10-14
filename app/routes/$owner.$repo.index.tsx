@@ -1,5 +1,5 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, useHydrated, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
@@ -10,7 +10,7 @@ import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/ref
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
-import { preload, projectQuery } from "../lib/queries.ts";
+import { preload, projectQuery, SERVER_FILE_BYTES } from "../lib/queries.ts";
 import { isServer } from "../lib/ssr.ts";
 
 type Search = { ref?: string; path?: string; file?: string };
@@ -42,7 +42,11 @@ export const Route = createFileRoute("/$owner/$repo/")({
 const treeQuery = (project: string, ref: string | undefined, path: string) =>
 	queryOptions({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
 const fileQuery = (project: string, ref: string | undefined, path: string) =>
-	queryOptions({ queryKey: [...keys.code(project), "file", ref ?? "", path], queryFn: () => api.file(project, path, ref) });
+	queryOptions({
+		queryKey: [...keys.code(project), "file", ref ?? "", path],
+		// A server render reads small files only (SERVER_FILE_BYTES); the browser loads the rest.
+		queryFn: () => api.file(project, path, ref, isServer ? SERVER_FILE_BYTES : undefined),
+	});
 
 const findReadme = (entries: TreeEntry[] | undefined) => entries?.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name));
 
@@ -250,7 +254,9 @@ function FileView({
 	const [blaming, setBlaming] = useState(false);
 	const navigate = useNavigate({ from: Route.fullPath });
 	const hash = useRouterState({ select: (s) => s.location.hash });
-	const selected = parseLines(hash);
+	// The server never sees the hash: highlight linked lines from hydration on, so both renders agree.
+	const hydrated = useHydrated();
+	const selected = hydrated ? parseLines(hash) : null;
 	const { copied, copy } = useCopy();
 	const binary = file.data?.slice(0, 8000).includes("\0") ?? false;
 	const lines = useMemo(() => {
