@@ -1120,6 +1120,42 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.deepEqual(mergeDetail.diff.files.map((f) => f.path), ["CONTRIBUTING.md"]);
 	const list = (await (await as(null)(`${repo}/pulls?state=all`)).json()) as { pulls: { number: number; pullState: string }[]; open: number };
 	assert.deepEqual(list.pulls.map((p) => p.pullState).sort(), ["merged", "merged", "open"]);
+
+	// From a fork of the fork, named as on GitHub (owner:branch). The network lists what each caller can read.
+	const cy = await newUser("prc");
+	const cyFork = await as(cy)(`/repos/${bob.username}/prs/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(cyFork.status, 201, await cyFork.clone().text());
+	const cyDir = join(root, "prs-fork-of-fork");
+	await exec("git", ["clone", "-q", url(cy, `${cy.username}/prs`), cyDir]);
+	await writeFile(join(cyDir, "CONDUCT.md"), "Be patient.\n");
+	await git(cyDir, "add", "-A");
+	await git(cyDir, "commit", "-q", "-m", "Add a code of conduct");
+	await git(cyDir, "push", "-q", "origin", "HEAD:conduct");
+	const network = async (who: { token: string } | null) => ((await (await as(who)(`${repo}/network`)).json()) as { repos: { fullName: string }[] }).repos.map((r) => r.fullName);
+	const everyone = [`${ada.username}/prs`, `${bob.username}/prs`, `${cy.username}/prs`];
+	assert.deepEqual(await network(null), everyone);
+	const preview = await as(null)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`);
+	assert.equal(preview.status, 200, await preview.clone().text());
+	assert.deepEqual(((await preview.json()) as { comparison: { diff: { files: { path: string }[] } } }).comparison.diff.files.map((f) => f.path), ["CONDUCT.md"]);
+	const fromCy = await as(cy)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Conduct", base: "master", head: `${cy.username}:conduct` }) });
+	assert.equal(fromCy.status, 201, await fromCy.clone().text());
+	const cyPull = ((await fromCy.json()) as { pull: { number: number; headRepo: string; head: string } }).pull;
+	assert.deepEqual([cyPull.headRepo, cyPull.head], [`${cy.username}/prs`, "conduct"]);
+	// A repository outside the network can't be the head.
+	assert.equal((await as(bob)("/repos", { method: "POST", body: JSON.stringify({ name: "elsewhere", visibility: "public", readme: true }) })).status, 201);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=master&headRepo=${bob.username}/elsewhere`)).status, 400);
+	// Gone private, cy's fork drops out of everyone else's network, and owner:branch finds nothing for them.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
+	assert.deepEqual(await network(null), everyone.slice(0, 2));
+	assert.deepEqual(await network(cy), everyone);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`)).status, 404);
+	assert.equal((await as(bob)(`${repo}/pulls/${cyPull.number}/files`)).status, 403);
+	// Public again: ada merges into her master with write on it alone, none on cy's fork.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
+	const viaForkOfFork = await as(ada)(`${repo}/pulls/${cyPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(viaForkOfFork.status, 200, await viaForkOfFork.clone().text());
+	const { tree } = (await (await as(null)(`${repo}/tree`)).json()) as { tree: { entries: { name: string }[] } };
+	assert.ok(tree.entries.some((e) => e.name === "CONDUCT.md"), "merged into the base repository's branch");
 });
 
 test("organizations, teams and collaborators: invitations, read for members, write and admin by grant, reviews that count", async () => {

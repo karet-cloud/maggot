@@ -453,6 +453,54 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 	return results;
 }
 
+/** How far up or down a fork network is followed: far deeper than real networks go, and a bound on the walk. */
+const NETWORK_DEPTH = 16;
+
+/** The repositories `id` was forked from, nearest first, with the network's root last (as far as NETWORK_DEPTH). */
+const NETWORK_UP = `up("id", "forkOf", "depth") as (
+	select "id", "forkOf", 0 from "repo" where "id" = ?2
+	union all select r."id", r."forkOf", up."depth" + 1 from "repo" r join up on r."id" = up."forkOf" where up."depth" < ${NETWORK_DEPTH}
+)`;
+
+/**
+ * The root of `id`'s fork network: the repository everything in it was forked from, directly or not.
+ * A deleted fork in the middle splits a network, as its forks lose their `forkOf`.
+ */
+export async function networkRoot(database: D1Database, id: string): Promise<string> {
+	const row = await database
+		.prepare(`with recursive ${NETWORK_UP} select "id" from up order by "depth" desc limit 1`)
+		.bind("", id)
+		.first<{ id: string }>();
+	return row?.id ?? id;
+}
+
+/** Whether two repositories are in the same fork network (so pull requests can go between them). */
+export async function sameNetwork(database: D1Database, a: string, b: string): Promise<boolean> {
+	if (a === b) return true;
+	const [ra, rb] = await Promise.all([networkRoot(database, a), networkRoot(database, b)]);
+	return ra === rb;
+}
+
+/**
+ * Every repository in `id`'s fork network that `viewerId` can see (the root and its forks, forks of
+ * forks included), `id` itself among them: where a pull request into `id` can come from. Oldest first.
+ */
+export async function listNetwork(database: D1Database, id: string, viewerId: string | null, limit = 100): Promise<RepoListing[]> {
+	const { results } = await database
+		.prepare(
+			`with recursive ${NETWORK_UP},
+			down("id", "depth") as (
+				select * from (select "id", 0 from up order by "depth" desc limit 1)
+				union all select r."id", down."depth" + 1 from "repo" r join down on r."forkOf" = down."id" where down."depth" < ${NETWORK_DEPTH}
+			)
+			${LISTING} where r."id" in (select "id" from down) and (r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)
+			order by r."id" = ?2 desc, r."createdAt" limit ?3`,
+		)
+		.bind(viewerId ?? "", id, limit)
+		.all<RepoListing>();
+	return results;
+}
+
 /** Stars or unstars; returns whether anything changed. */
 export async function setStar(database: D1Database, userId: string, repoId: string, starred: boolean): Promise<boolean> {
 	const result = starred

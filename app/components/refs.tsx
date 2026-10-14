@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { api, keys } from "../lib/api.ts";
+import { api, keys, type RepoInfo } from "../lib/api.ts";
 
 /**
  * Picks a branch of the project repo or a task fork (`task:<id>`). An unlisted value (a commit, or
@@ -64,5 +64,99 @@ export function BranchSelect({
 				</optgroup>
 			)}
 		</select>
+	);
+}
+
+/** A pull request's head as a URL gives it: `head` is a branch here, `owner:branch` (GitHub's syntax), or a branch of `headRepo`. */
+export interface HeadSearch {
+	head?: string;
+	headRepo?: string;
+}
+
+const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+const ownerOf = (repo: string) => repo.split("/")[0].toLowerCase();
+
+/**
+ * Resolves a head from the URL against `project`'s fork network (`repo` is `owner/name`; `fork` is set when
+ * that isn't `project`). `repo` is undefined while the network loads; `unknown` is an `owner:` with nothing
+ * in the network the caller can read.
+ */
+export function usePullHead(project: string, search: HeadSearch) {
+	const network = useQuery({ queryKey: keys.network(project), queryFn: () => api.network(project), staleTime: 60_000 });
+	const colon = search.head?.indexOf(":") ?? -1;
+	const owner = colon >= 0 ? search.head?.slice(0, colon).toLowerCase() : undefined;
+	const branch = (colon >= 0 ? search.head?.slice(colon + 1) : search.head) || undefined;
+	let repo: string | undefined = search.headRepo ?? project;
+	if (!search.headRepo && owner && owner !== ownerOf(project)) repo = network.data?.find((r) => r.owner.toLowerCase() === owner)?.fullName;
+	return {
+		repo,
+		fork: repo && !same(repo, project) ? repo : undefined,
+		branch,
+		unknown: !repo && network.data ? owner : undefined,
+		network: network.data ?? [],
+		error: network.error,
+	};
+}
+
+/** The URL for a head: `branch` here, `owner:branch` when that owner has one repository in the network, else `headRepo` too. */
+export function headSearch(project: string, network: RepoInfo[], repo: string, branch: string | undefined): HeadSearch {
+	if (same(repo, project)) return { head: branch, headRepo: undefined };
+	const owner = ownerOf(repo);
+	const unique = owner !== ownerOf(project) && network.filter((r) => r.owner.toLowerCase() === owner).length === 1;
+	return unique ? { head: `${repo.split("/")[0]}:${branch ?? ""}`, headRepo: undefined } : { head: branch, headRepo: repo };
+}
+
+/**
+ * Picks where a pull request's changes come from: `project` or another repository in its fork network
+ * that the caller can read, then a branch of it. Another repository starts on its own default branch.
+ */
+export function HeadPicker({
+	project,
+	network,
+	repo,
+	branch,
+	onChange,
+	branchesOnly,
+}: {
+	project: string;
+	network: RepoInfo[];
+	repo: string | undefined;
+	branch: string | undefined;
+	onChange: (head: HeadSearch) => void;
+	branchesOnly?: boolean;
+}) {
+	const crossRepo = Boolean(repo && !same(repo, project));
+	return (
+		<>
+			{(network.length > 1 || crossRepo) && (
+				<select
+					value={repo ?? ""}
+					aria-label="Head repository"
+					onChange={(e) => {
+						const next = network.find((r) => r.fullName === e.target.value);
+						if (next) onChange(headSearch(project, network, next.fullName, same(next.fullName, project) ? undefined : next.defaultBranch));
+					}}
+					className="max-w-72 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 font-mono text-xs text-fg focus:border-accent focus:outline-none"
+				>
+					{!repo && <option value="">…</option>}
+					{repo && !network.some((r) => r.fullName === repo) && <option value={repo}>{repo}</option>}
+					{network.map((r) => (
+						<option key={r.fullName} value={r.fullName}>
+							{r.fullName}
+							{same(r.fullName, project) ? "" : r.visibility === "private" ? " (private)" : ""}
+						</option>
+					))}
+				</select>
+			)}
+			{repo && (
+				<BranchSelect
+					project={repo}
+					value={branch}
+					onChange={(b) => onChange(headSearch(project, network, repo, b))}
+					placeholder="Pick a branch"
+					branchesOnly={branchesOnly || crossRepo}
+				/>
+			)}
+		</>
 	);
 }

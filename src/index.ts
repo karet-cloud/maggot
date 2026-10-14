@@ -13,6 +13,7 @@ import {
 	findRepo,
 	getListing,
 	insertRepo,
+	listNetwork,
 	listRepos,
 	listTokens,
 	addRepoBytes,
@@ -59,6 +60,7 @@ import {
 	notifyUser,
 	revokeToken,
 	setRepoBytes,
+	sameNetwork,
 	setStar,
 	toRepoInfo,
 	updateRepo,
@@ -939,6 +941,14 @@ repo.get("/forks", async (c) => {
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
+// The fork network the caller can see (this repository, what it was forked from, and forks of any of them):
+// where a pull request into this repository can come from.
+repo.get("/network", async (c) => {
+	const p = c.var.principal;
+	const rows = await listNetwork(db(c.env), userRepo(c).id, viewerId(p), intParam(c.req.query("limit"), 100, 500));
+	return c.json({ repos: rows.filter((r) => canRead(p, r)).map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
+});
+
 // Forks into the caller's account; the name defaults to the source's.
 repo.post("/forks", async (c) => {
 	const source = userRepo(c);
@@ -1714,18 +1724,32 @@ repo.delete("/issues/:number/comments/:id", async (c) => {
 // ── Pull requests and code review ────────────────────────────────────────────
 
 /**
- * Where a pull request's changes come from: a branch of this repository, or of `headRepo`
- * ("owner/name"), which has to be a fork of it that the caller can read.
+ * Where a pull request's changes come from: a branch of this repository, or of `headRepo` ("owner/name"),
+ * which has to be in its fork network (forked from it, or from what it was forked from, at any depth) and
+ * readable by the caller. `head` may also say `owner:branch`, as on GitHub: that owner's repository in the network.
  */
-async function pullHead(c: Context<App>, headRepo: unknown): Promise<RepoRow | null> {
+async function pullHead(c: Context<App>, headRepo: unknown, head: unknown): Promise<{ fork: RepoRow | null; branch: string }> {
 	const row = userRepo(c);
-	if (headRepo === undefined || headRepo === null || headRepo === "" || headRepo === `${row.owner}/${row.name}`) return null;
-	if (typeof headRepo !== "string" || !headRepo.includes("/")) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
-	const [owner, name] = headRepo.split("/");
-	const fork = await findRepo(db(c.env), owner, name, viewerId(c.var.principal));
-	if (!fork || !canRead(c.var.principal, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
-	if (fork.forkOf !== row.id) throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't a fork of ${row.owner}/${row.name}`);
-	return fork;
+	const p = c.var.principal;
+	const colon = typeof head === "string" ? head.indexOf(":") : -1;
+	const owner = colon >= 0 ? (head as string).slice(0, colon).toLowerCase() : null;
+	const branch = pullBranch(colon >= 0 ? (head as string).slice(colon + 1) : head, "head");
+	if (headRepo === undefined || headRepo === null || headRepo === "") {
+		if (owner === null || owner === row.owner) return { fork: null, branch };
+		const theirs = (await listNetwork(db(c.env), row.id, viewerId(p), 500)).find((r) => r.owner === owner && canRead(p, r));
+		if (!theirs) throw new HttpError(404, "NOT_FOUND", `${owner} has no fork of ${row.owner}/${row.name} that you can see`);
+		return { fork: theirs, branch };
+	}
+	if (typeof headRepo !== "string" || !/^[^/]+\/[^/]+$/.test(headRepo)) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
+	const [forkOwner, name] = headRepo.split("/");
+	if (owner !== null && owner !== forkOwner.toLowerCase()) throw new HttpError(400, "INVALID_INPUT", `head names ${owner} but headRepo is ${headRepo}`);
+	const fork = await findRepo(db(c.env), forkOwner, name, viewerId(p));
+	if (!fork || !canRead(p, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
+	if (fork.id === row.id) return { fork: null, branch };
+	if (!(await sameNetwork(db(c.env), row.id, fork.id))) {
+		throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't in the fork network of ${row.owner}/${row.name}`);
+	}
+	return { fork, branch };
 }
 
 function pullBranch(name: unknown, what: string): string {
@@ -1860,12 +1884,11 @@ repo.get("/pulls", async (c) => {
 	);
 });
 
-// What a pull request from `head` (of `headRepo`) into `base` would bring, before opening it.
+// What a pull request from `head` (of `headRepo`, or `owner:branch`) into `base` would bring, before opening it.
 repo.get("/pulls/compare", async (c) => {
 	userRepo(c);
 	const base = pullBranch(c.req.query("base"), "base");
-	const head = pullBranch(c.req.query("head"), "head");
-	const fork = await pullHead(c, c.req.query("headRepo"));
+	const { fork, branch: head } = await pullHead(c, c.req.query("headRepo"), c.req.query("head"));
 	return c.json({ comparison: await project(c).pullCompare(base, fork?.id ?? null, head) });
 });
 
@@ -1875,8 +1898,7 @@ repo.post("/pulls", async (c) => {
 	const input = await body<{ title?: string; body?: string; base?: string; head?: string; headRepo?: string }>(c);
 	const text = issueText(input, true);
 	const base = pullBranch(input.base, "base");
-	const head = pullBranch(input.head, "head");
-	const fork = await pullHead(c, input.headRepo);
+	const { fork, branch: head } = await pullHead(c, input.headRepo, input.head);
 	if (!fork && base === head) throw new HttpError(400, "INVALID_INPUT", "The head and base branches are the same");
 	const comparison = await project(c).pullCompare(base, fork?.id ?? null, head);
 	if (comparison.commits.length === 0) throw new HttpError(422, "NOTHING_TO_COMPARE", `${head} has nothing that ${base} doesn't`);
@@ -1884,7 +1906,7 @@ repo.post("/pulls", async (c) => {
 		.prepare(`select i."number" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and p."headRepoId" is ? and p."headBranch" = ? and p."baseBranch" = ? and i."state" = 'open'`)
 		.bind(row.id, fork?.id ?? row.id, head, base)
 		.first<{ number: number }>();
-	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${head}`);
+	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${fork ? `${fork.owner}:${head}` : head}`);
 	const user = await canPost(c);
 	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", [], { headRepoId: fork?.id ?? row.id, headBranch: head, baseBranch: base });
 	const pull = (await getPull(db(c.env), row.id, issue.number)) as PullRow;
