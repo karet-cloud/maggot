@@ -265,7 +265,8 @@ npm run deploy
 ```
 
 CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
-pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
+pull request, and on every push to `master` runs them again and then `cf deploy` to https://maggot.karet.cloud. The custom domain is declared in
+`cloudflare.config.ts`, and CI checks it before seeding the demo. It
 needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
 Workers" template, plus Artifacts edit and D1 edit), a stable `MAGGOT_API_KEY` secret, and a
 `CLOUDFLARE_ACCOUNT_ID` repository variable. Secrets can be scoped to the GitHub `production`
@@ -283,7 +284,7 @@ The first deploy creates the `maggot` D1 database; tables are created by the Wor
 there's no migration step. Better Auth's secret is derived from `MAGGOT_API_KEY` unless a
 `BETTER_AUTH_SECRET` secret is set.
 
-Point the CLI at it with `MAGGOT_URL=https://maggot.<subdomain>.workers.dev` and `MAGGOT_API_KEY` from
+Point the CLI at it with `MAGGOT_URL=https://maggot.karet.cloud` and `MAGGOT_API_KEY` from
 `.secrets/prod.env`. The "maggot" Artifacts namespace is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
 

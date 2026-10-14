@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 15
     environment:
       name: production
-      url: https://maggot.sarthak7u.workers.dev
+      url: https://maggot.karet.cloud
     # Never two deploys at once; a newer push waits for the running one instead of cancelling it.
     concurrency:
       group: deploy-production
@@ -67,8 +67,8 @@ jobs:
           npx cf deploy --secrets-file "$secret_file"
       - name: Smoke test
         run: |
-          for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://maggot.sarthak7u.workers.dev/api/me)
+          for i in $(seq 1 30); do
+            code=$(curl --connect-timeout 5 --max-time 10 -s -o /dev/null -w '%{http_code}' https://maggot.karet.cloud/api/me) || code=000
             [ "$code" = 200 ] && echo "API up" && exit 0
             sleep 5
           done
@@ -78,5 +78,5 @@ jobs:
         env:
           MAGGOT_API_KEY: ${{ secrets.MAGGOT_API_KEY }}
           MAGGOT_MIRROR_PASSWORD: ${{ secrets.MAGGOT_MIRROR_PASSWORD }}
-          MAGGOT_URL: https://maggot.sarthak7u.workers.dev
+          MAGGOT_URL: https://maggot.karet.cloud
         run: node scripts/seed-linux-demo.ts

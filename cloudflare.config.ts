@@ -23,9 +23,12 @@ const ciContainer =
 export default defineConfig(({ mode }) => {
 	const offline = mode === "offline";
 	return {
+		// This account owns karet.cloud and the production Worker resources.
+		accountId: "38a254c9234a2bf01164bc3ee9157f85",
 		...(ciContainer ? { containers: [ciContainer] } : {}),
 		worker: {
 			name: "maggot",
+			...(offline ? {} : { domains: ["maggot.karet.cloud"] }),
 			compatibilityDate: "2026-10-07",
 			compatibilityFlags: ["nodejs_compat"],
 			entrypoint,
