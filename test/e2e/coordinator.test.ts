@@ -191,6 +191,45 @@ test("a project created without a README accepts an existing repository pushed w
 	assert.equal(task.json.task.baseOid, head);
 });
 
+test("a push that goes around the Git proxy is listed at once, and the index catches up to it", async () => {
+	await control("POST", "/simulate", {});
+	const project = name("around");
+	await call("POST", "/projects", { name: project });
+	type Listing = { tree: { commit: string; entries: { path: string; size?: number | null }[] } };
+	const tree = async () => (await call<Listing>("GET", `/projects/${project}/tree`)).json.tree;
+	// Sizes only come from the index: wait until it lists the default branch.
+	const indexed = await until(async () => {
+		const t = await tree();
+		return t.entries.some((e) => typeof e.size === "number") ? t : undefined;
+	});
+
+	// Storage credentials push straight to Artifacts, so nothing here records the new head.
+	const { json: creds } = await call<GitCredentials>("POST", `/projects/${project}/credentials`, {});
+	const url = new URL(creds.remote);
+	url.username = "x";
+	url.password = creds.token.split("?expires=")[0];
+	const dir = join(root, "around");
+	const git = (...args: string[]) => promisify(execFile)("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir });
+	await promisify(execFile)("git", ["clone", "-q", url.toString(), dir]);
+	await writeFile(join(dir, "around.txt"), "went around\n");
+	await git("add", "-A");
+	await git("commit", "-q", "-m", "Around the proxy");
+	await git("push", "-q", "origin", creds.branch);
+	const head = (await git("rev-parse", "HEAD")).stdout.trim();
+	assert.notEqual(head, indexed.commit);
+
+	const now = await tree();
+	assert.equal(now.commit, head, "the old indexed commit isn't served as current");
+	assert.ok(now.entries.some((e) => e.path === "around.txt"));
+	const caughtUp = await until(async () => {
+		const t = await tree();
+		return t.entries.find((e) => e.path === "around.txt")?.size === 12 ? t : undefined;
+	});
+	assert.equal(caughtUp.commit, head);
+	const paths = await call<{ commit: string; paths: string[] }>("GET", `/projects/${project}/paths`);
+	assert.deepEqual([paths.json.commit, paths.json.paths.includes("around.txt")], [head, true]);
+});
+
 test("branches, task changes, commit diffs, raw files and archives", async () => {
 	await control("POST", "/simulate", {});
 	const project = name("browse");
@@ -1120,6 +1159,14 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.equal((await as(null)(`${repo}/pulls/${forkPull.number}/files`)).status, 403);
 	assert.equal((await as(ada)(`${repo}/pulls/${forkPull.number}/merge`, { method: "POST", body: "{}" })).status, 403, "nor merged blind");
 	assert.equal((await as(bob)(`${repo}/pulls/${forkPull.number}/files`)).status, 200);
+	// One file on its own ("Load diff") reads the fork too, so it's refused the same way, even with the right trees.
+	const forkStream = await (await as(bob)(`${repo}/pulls/${forkPull.number}/files`, { headers: { accept: "application/x-ndjson" } })).text();
+	const forkTrees = (JSON.parse(forkStream.split("\n")[0]) as { trees: { from: string; to: string } }).trees;
+	const oneFile = `${repo}/pulls/${forkPull.number}/files?${new URLSearchParams({ path: "CONTRIBUTING.md", ...forkTrees })}`;
+	assert.equal((await as(null)(oneFile)).status, 403);
+	const contributing = await as(bob)(oneFile);
+	assert.equal(contributing.status, 200);
+	assert.equal(((await contributing.json()) as { file: { status: string } }).file.status, "added");
 	assert.equal((await as(bob)(`/repos/${bob.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
 	const viaFork = await as(ada)(`${repo}/pulls/${forkPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
 	assert.equal(viaFork.status, 200, await viaFork.clone().text());

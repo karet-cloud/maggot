@@ -99,9 +99,14 @@ function CommitPage() {
 			{c.parents.length > 1 && (
 				<p className="text-xs text-faint">Showing changes against the first parent ({shortOid(c.parents[0])}), the branch this was merged into.</p>
 			)}
-			{/* A stream that broke partway keeps the files it got. */}
-			<ErrorNote error={result.error} />
-			<DiffView diff={diff} source={commitDiff(project, hash, ref)} project={project} viewRef={ref?.startsWith("task:") ? ref : c.hash} />
+			<DiffView
+				diff={diff}
+				source={commitDiff(project, hash, ref)}
+				project={project}
+				viewRef={ref?.startsWith("task:") ? ref : c.hash}
+				error={result.error}
+				onRetry={() => void result.refetch()}
+			/>
 		</div>
 	);
 }

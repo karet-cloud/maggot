@@ -154,8 +154,6 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly store: RepoStore;
 	private readonly code: CodeIndex;
 	private readonly index: TreeIndex;
-	/** Index steps that failed in a row, and when to try again. */
-	private indexRetry = { failures: 0, at: 0 };
 	private readonly hooks: Webhooks;
 	private readonly ci: CiRuns;
 	private readonly wiki: Wiki;
@@ -505,18 +503,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Asks the alarm to bring the tree index (and code search with it) up to the default branch. */
 	private async requestIndex(): Promise<void> {
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('indexWanted', '1')");
-		await this.scheduleAlarm(Date.now());
+		await this.scheduleAlarm(Date.now(), false);
 	}
 
 	/**
 	 * The alarm's share of indexing: where the default branch is now, if asked, then steps of the
 	 * update for up to INDEX_SLICE_MS; the alarm comes back for the rest. A failing step is retried
-	 * later, waiting longer each time; one that keeps failing drops the index, which the next push or
-	 * visit starts over.
+	 * later, waiting longer each time; one that keeps failing drops the index (see TreeIndex.failed),
+	 * which the next push or visit starts over.
 	 */
 	private async indexIfWanted(): Promise<void> {
 		const wanted = this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0;
-		if (!wanted && (!this.index.busy() || Date.now() < this.indexRetry.at)) return;
+		if (!wanted && (!this.index.busy() || Date.now() < this.index.retryAt())) return;
 		this.sql.exec("DELETE FROM meta WHERE key = 'indexWanted'");
 		const meta = this.meta();
 		try {
@@ -527,37 +525,37 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			}
 			const until = Date.now() + INDEX_SLICE_MS;
 			while (Date.now() < until && (await this.index.step(repo))) {}
-			this.indexRetry = { failures: 0, at: 0 };
+			this.index.succeeded();
 		} catch (err) {
 			console.error("indexing failed", err);
-			const failures = this.indexRetry.failures + 1;
-			if (failures >= 5) {
-				this.index.reset();
-				this.indexRetry = { failures: 0, at: 0 };
-			} else this.indexRetry = { failures, at: Date.now() + 5_000 * 2 ** failures };
+			this.index.failed();
 		}
 	}
 
 	/**
-	 * The commit `ref` names if the tree index might describe it (the default branch's recorded head,
-	 * or a commit hash), and whether it's the default branch, which a stale index should catch up to.
+	 * The commit `ref` names if the tree index might describe it, and whether it's the default branch
+	 * (which a stale index should catch up to). The branch's head is read from storage, one cheap
+	 * lookup, rather than taken from the refs recorded here: a push that went around the Git proxy
+	 * (or whose recording failed) would otherwise leave an old commit listed as current.
 	 */
-	private indexable(ref: string | undefined): { commit: string | null; head: boolean } {
+	private async indexable(ref: string | undefined): Promise<{ commit: string | null; head: boolean }> {
 		const meta = this.meta();
-		if (ref === undefined || ref === meta.defaultBranch) return { commit: this.knownRefs(meta)[meta.defaultBranch] ?? null, head: true };
+		if (ref === undefined || ref === meta.defaultBranch) {
+			using repo = await this.store.get(meta.name);
+			return { commit: (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null, head: true };
+		}
 		return { commit: /^[0-9a-f]{40}$/.test(ref) ? ref : null, head: false };
 	}
 
-	/** Starts indexing the default branch's head unless that's already under way or done. */
-	private async catchUp(commit: string | null): Promise<void> {
-		const state = this.index.state();
-		if (commit !== null && (state.update?.commit === commit || state.next?.commit === commit)) return;
+	/** Starts indexing the default branch's head unless that's done, under way, or known to be too big. */
+	private async catchUp(commit: string): Promise<void> {
+		if (this.index.settled(commit) || this.index.state().next?.commit === commit) return;
 		await this.requestIndex();
 	}
 
 	/** Every file path at `ref`, from the tree index; null if it can't answer (the caller reads storage). */
 	async indexedPaths(ref?: string): Promise<FileList | null> {
-		const at = this.indexable(ref);
+		const at = await this.indexable(ref);
 		const listed = at.commit ? this.index.paths(at.commit, MAX_LISTED_PATHS) : null;
 		if (listed && at.commit) return { commit: at.commit, ...listed };
 		if (at.head && at.commit) await this.catchUp(at.commit);
@@ -724,8 +722,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const meta = this.meta();
 		const parts = path.split("/").filter(Boolean);
 		const dir = parts.join("/");
-		// The default branch's head (or a commit) the tree index describes is listed with no reads from storage.
-		const at = this.indexable(ref);
+		// The default branch's head (or a commit) the tree index describes is listed with no tree reads from storage.
+		const at = await this.indexable(ref);
 		const listing = at.commit ? this.index.listing(at.commit, dir) : null;
 		if (listing && "missing" in listing) throw new HttpError(404, "NOT_FOUND", `${listing.missing} is not a directory`);
 		if (listing && at.commit) return { commit: at.commit, path: dir, entries: listing.entries };
@@ -1318,15 +1316,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async alarm(): Promise<void> {
 		// Each job fails on its own: one broken webhook or index update mustn't stall merges, or each other.
 		const run = (name: string, job: () => Promise<void>) => job().catch((err) => console.error(`alarm: ${name} failed`, err));
-		await Promise.all([
-			run("merges", () => this.drainMerges()),
-			run("provisioning", () => this.resumeProvisioning()),
-			run("webhooks", () => this.deliverHooks()),
-			run("actions", async () => {
-				await this.drainCiPushes();
-				await this.ci.tick();
-			}),
-		]);
+		// The index wakes the alarm every few seconds while it works; the other jobs (whose retries
+		// count attempts) run only when they asked to, not on each of those wake-ups.
+		const jobsDue = this.jobsDue();
+		if (jobsDue === null || jobsDue <= Date.now()) {
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('jobsDue', ?)", String(Number.MAX_SAFE_INTEGER));
+			await Promise.all([
+				run("merges", () => this.drainMerges()),
+				run("provisioning", () => this.resumeProvisioning()),
+				run("webhooks", () => this.deliverHooks()),
+				run("actions", async () => {
+					await this.drainCiPushes();
+					await this.ci.tick();
+				}),
+			]);
+		}
 		await run("indexing", () => this.indexIfWanted());
 		const pending = this.sql.exec<{ n: number }>(
 			"SELECT (SELECT COUNT(*) FROM tasks WHERE status = 'provisioning') + (SELECT COUNT(*) FROM cleanup) AS n",
@@ -1334,9 +1338,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (pending > 0) await this.scheduleAlarm(Date.now() + 5_000);
 		const due = this.hooks.nextDue();
 		if (due !== null) await this.scheduleAlarm(Math.max(due, Date.now() + 1_000));
-		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0) await this.scheduleAlarm(Date.now() + 1_000);
-		// An index update left over: the next slice soon, with room for requests (and other jobs) between.
-		if (this.metaOrNull() && this.index.busy()) await this.scheduleAlarm(Math.max(Date.now() + 250, this.indexRetry.at));
+		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0) await this.scheduleAlarm(Date.now() + 1_000, false);
+		// An index update left over: the next slice soon, with room for requests between.
+		if (this.metaOrNull() && this.index.busy()) await this.scheduleAlarm(Math.max(Date.now() + 250, this.index.retryAt()), false);
 		if (this.sql.exec("SELECT 1 FROM ci_pushes LIMIT 1").toArray().length > 0) await this.scheduleAlarm(Date.now() + 5_000);
 		if (this.metaOrNull() && this.ci.busy()) await this.scheduleAlarm(Date.now() + 30_000);
 		const expiry = this.metaOrNull() ? this.ci.waitingExpiry() : null;
@@ -1447,8 +1451,19 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		await this.scheduleAlarm(Date.now() + 1_000);
 	}
 
+	/** When the alarm's regular jobs next need to run; null if unknown (they run). */
+	private jobsDue(): number | null {
+		const row = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'jobsDue'").toArray()[0];
+		return row ? Number(row.value) : null;
+	}
+
 	/** Moves the alarm earlier if needed; never postpones one that is already due sooner. */
-	private async scheduleAlarm(at: number): Promise<void> {
+	private async scheduleAlarm(at: number, jobs = true): Promise<void> {
+		// `jobs`: the alarm's regular jobs are due by then. The index's own wake-ups pass false.
+		if (jobs) {
+			const due = this.jobsDue();
+			if (due === null || at < due) this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('jobsDue', ?)", String(at));
+		}
 		const current = await this.ctx.storage.getAlarm();
 		if (current === null || current > at) await this.ctx.storage.setAlarm(at);
 	}

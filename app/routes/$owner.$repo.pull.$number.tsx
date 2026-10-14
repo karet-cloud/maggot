@@ -430,8 +430,6 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 	if (!files.data || !head) return <ErrorNote error={files.error} />;
 	return (
 		<div className="space-y-3">
-			{/* A stream that broke partway keeps the files it got. */}
-			<ErrorNote error={files.error} />
 			{canReview && (
 				<div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
 					<span className="text-dim">Hover a line and press + to comment on it. {drafts.length > 0 && <b className="text-amber-300">{drafts.length} pending</b>}</span>
@@ -440,7 +438,7 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 					</Button>
 				</div>
 			)}
-			<DiffView diff={files.data} source={pullDiff(project, pull.number)} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} viewRef={pull.mergedAt ? undefined : pull.head} notes={notes} />
+			<DiffView diff={files.data} source={pullDiff(project, pull.number)} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} viewRef={pull.mergedAt ? undefined : pull.head} notes={notes} error={files.error} onRetry={() => void files.refetch()} />
 			<Modal open={finishing} onClose={() => setFinishing(false)} title="Finish your review">
 				<FinishReview
 					project={project}

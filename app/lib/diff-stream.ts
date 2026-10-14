@@ -36,6 +36,13 @@ export function completeDiff(diff: Diff): StreamedDiff<never> {
 
 export class StreamError extends Error {}
 
+/**
+ * The query key for one file of a streamed diff loaded on its own: under the diff's key, and by the
+ * trees compared, so a diff that moved on (a push) loads the file afresh instead of showing the old one.
+ */
+export const fileDiffKey = (diffKey: readonly unknown[], trees: { from: string | null; to: string }, path: string) =>
+	[...diffKey, "file", trees.from ?? "", trees.to, path] as const;
+
 /** Folds a batch of events into the diff, without changing `acc`. An error line throws. */
 export function reduceDiff<M>(acc: StreamedDiff<M>, events: DiffEvent<M>[]): StreamedDiff<M> {
 	let next = acc;

@@ -3,9 +3,9 @@ import { Link } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight, Columns2, FileCode2, Rows2 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { api, repoParams, type Diff, type DiffEntry, type DiffHunk, type FileDiff } from "../lib/api.ts";
-import { completeDiff, type StreamedDiff } from "../lib/diff-stream.ts";
+import { completeDiff, fileDiffKey, type StreamedDiff } from "../lib/diff-stream.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
-import { cx, ErrorNote, Panel, Spinner } from "./ui.tsx";
+import { Button, cx, ErrorNote, Panel, Spinner } from "./ui.tsx";
 
 type Layout = "unified" | "split";
 const LAYOUT_KEY = "maggot.diff.layout";
@@ -66,7 +66,8 @@ export interface DiffSource {
  * A full diff: a summary with a file index, then each file's hunks. `diff` is a whole diff, or one
  * streaming in: files show as they arrive, and with `source`, collapsed large ones load on demand.
  * A file renders its lines only once scrolled near, so hundreds of files stay quick. `viewRef` is
- * where "View file" links point (the new side of the diff).
+ * where "View file" links point (the new side of the diff). `error` is a stream that broke partway:
+ * it shows with what arrived, and `onRetry` fetches the diff again.
  */
 export function DiffView({
 	diff,
@@ -75,6 +76,8 @@ export function DiffView({
 	viewRef,
 	title,
 	notes,
+	error,
+	onRetry,
 }: {
 	diff: Diff | StreamedDiff<unknown>;
 	source?: DiffSource;
@@ -82,6 +85,8 @@ export function DiffView({
 	viewRef?: string;
 	title?: ReactNode;
 	notes?: DiffNotes;
+	error?: unknown;
+	onRetry?: () => void;
 }) {
 	const view = useMemo(() => ("list" in diff ? diff : completeDiff(diff)), [diff]);
 	const [layout, setLayout] = useLayout();
@@ -96,6 +101,7 @@ export function DiffView({
 	}
 	const arrived = Object.keys(view.files).length;
 	const showIndex = indexOpen ?? view.list.length <= 12;
+	const streaming = !view.done && !error;
 	return (
 		<div className="space-y-3">
 			<Panel
@@ -103,7 +109,7 @@ export function DiffView({
 				actions={
 					<div className="flex items-center gap-3">
 						<span className="flex items-center gap-1 text-xs text-dim">
-							{!view.done && <Spinner className="size-3.5" />}
+							{streaming && <Spinner className="size-3.5" />}
 							{view.list.length}
 							{view.truncated ? "+" : ""} {view.list.length === 1 ? "file" : "files"}{" "}
 							<span className="font-mono text-emerald-300">+{view.additions}</span>{" "}
@@ -151,6 +157,18 @@ export function DiffView({
 						Only the first {view.list.length} files are shown. Clone the repository to see the full diff.
 					</p>
 				)}
+				{Boolean(error) && (
+					<div className="flex flex-wrap items-center gap-2 border-t border-line/60 px-4 py-2">
+						<div className="min-w-0 flex-1">
+							<ErrorNote error={error} />
+						</div>
+						{onRetry && (
+							<Button className="text-xs" onClick={onRetry}>
+								Retry
+							</Button>
+						)}
+					</div>
+				)}
 			</Panel>
 			{view.list.map((entry) => (
 				<FileSection
@@ -163,6 +181,7 @@ export function DiffView({
 					notes={notes}
 					commented={commented.has(entry.path)}
 					load={source && view.trees ? { source, trees: view.trees } : undefined}
+					stalled={!streaming && !view.done}
 				/>
 			))}
 		</div>
@@ -220,6 +239,7 @@ function FileSection({
 	notes,
 	commented,
 	load,
+	stalled,
 }: {
 	entry: DiffEntry;
 	/** Undefined until it arrives. */
@@ -231,6 +251,8 @@ function FileSection({
 	/** A review comment is on one of its lines, so it opens (and loads) by itself. */
 	commented: boolean;
 	load?: { source: DiffSource; trees: { from: string | null; to: string } };
+	/** The stream stopped; a file that hasn't arrived won't. */
+	stalled: boolean;
 }) {
 	const section = useRef<HTMLElement>(null);
 	const near = useNearViewport(section);
@@ -240,7 +262,7 @@ function FileSection({
 	// Hunks the stream left out (or couldn't fit), fetched for this one file once it's opened.
 	const missing = Boolean(streamed && !streamed.binary && (streamed.deferred || streamed.tooLarge));
 	const loaded = useQuery({
-		queryKey: [...(load?.source.key ?? []), "file", entry.path],
+		queryKey: fileDiffKey(load?.source.key ?? [], load?.trees ?? { from: null, to: "" }, entry.path),
 		queryFn: () => api.diffFile(load?.source.path ?? "", entry.path, load?.trees ?? { from: null, to: "" }),
 		enabled: missing && open && Boolean(load),
 		staleTime: Number.POSITIVE_INFINITY,
@@ -251,11 +273,13 @@ function FileSection({
 	const note = (text: ReactNode) => <p className="flex items-center gap-2 px-4 py-3 text-xs text-faint">{text}</p>;
 	let body: ReactNode;
 	if (!file) {
-		body = note(
-			<>
-				<Spinner className="size-3.5" /> Loading…
-			</>,
-		);
+		body = stalled
+			? note("Not loaded: the diff stopped before this file.")
+			: note(
+					<>
+						<Spinner className="size-3.5" /> Loading…
+					</>,
+				);
 	} else if (!open) {
 		body =
 			missing && !load ? (

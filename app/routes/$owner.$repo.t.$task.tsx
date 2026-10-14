@@ -192,7 +192,17 @@ function TaskPage() {
 				</Panel>
 			</div>
 
-			{comparison && changes.data && <DiffView diff={changes.data} source={taskDiff(project, id)} project={project} viewRef={fileRef} title="Files changed" />}
+			{comparison && changes.data && (
+				<DiffView
+					diff={changes.data}
+					source={taskDiff(project, id)}
+					project={project}
+					viewRef={fileRef}
+					title="Files changed"
+					error={changes.error}
+					onRetry={() => void changes.refetch()}
+				/>
+			)}
 			{!comparison && t.changedFiles.length > 0 && (
 				<Panel title={`Changed files${t.changedFiles.length ? ` (${t.changedFiles.length})` : ""}`}>
 					{t.changedFiles.length === 0 ? (

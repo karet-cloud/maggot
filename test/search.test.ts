@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { CommitObject, ObjectReader, TreeEntry } from "../src/git/diff.ts";
 import { CodeIndex, type Sql } from "../src/search.ts";
-import { TreeIndex } from "../src/tree-index.ts";
+import { TreeIndex, type IndexLimits } from "../src/tree-index.ts";
 
 /** A Durable Object's `exec`, on Node's SQLite: bound parameters, rows back. */
 function sqlStorage(db: DatabaseSync): Sql {
@@ -19,7 +19,7 @@ function sqlStorage(db: DatabaseSync): Sql {
 
 const sha = (s: string) => createHash("sha1").update(s).digest("hex");
 
-type Content = string | Uint8Array | { exec: string };
+type Content = string | Uint8Array | { exec: string } | { link: string };
 
 /** Trees from `{ path: content }` maps, content-addressed like git. Counts the reads an index makes. */
 class Store implements ObjectReader {
@@ -35,11 +35,12 @@ class Store implements ObjectReader {
 			if (rest.length) dirs.set(head, { ...dirs.get(head), [rest.join("/")]: content });
 			else {
 				const exec = typeof content === "object" && "exec" in content;
-				const raw = exec ? content.exec : content;
+				const link = typeof content === "object" && "link" in content;
+				const raw = exec ? content.exec : link ? content.link : (content as string | Uint8Array);
 				const bytes = typeof raw === "string" ? new TextEncoder().encode(raw) : raw;
 				const hash = sha(`blob ${Buffer.from(bytes).toString("base64")}`);
 				this.blobs.set(hash, bytes);
-				entries.push({ name: head, mode: exec ? "100755" : "100644", type: exec ? "exec" : "blob", hash });
+				entries.push({ name: head, mode: exec ? "100755" : link ? "120000" : "100644", type: exec ? "exec" : link ? "symlink" : "blob", hash });
 			}
 		}
 		for (const [name, sub] of dirs) entries.push({ name, mode: "40000", type: "tree", hash: this.tree(sub) });
@@ -61,11 +62,12 @@ class Store implements ObjectReader {
 	}
 }
 
-function setup() {
+function setup(limits: Partial<IndexLimits> = {}) {
 	const sql = sqlStorage(new DatabaseSync(":memory:"));
 	const code = new CodeIndex(sql);
 	assert.ok(code.available, "this SQLite has FTS5");
-	return { code, index: new TreeIndex(sql, code), store: new Store() };
+	const count = () => (sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM tree_entries").one() as { n: number }).n;
+	return { code, index: new TreeIndex(sql, code, limits), store: new Store(), count };
 }
 
 /** Runs the index to `commit` the way the alarm does, step by step; returns how many steps it took. */
@@ -183,4 +185,115 @@ test("the same tree under a new commit needs no reads", async () => {
 	await update(index, store, "c2", tree);
 	assert.equal(store.treeReads, 0);
 	assert.equal(index.current("c2"), true);
+});
+
+test("files becoming directories and back, and symlinks becoming files with the same content, index like a fresh build", async () => {
+	const { code, index, store, count } = setup();
+	const one = store.tree({ "a/inner.ts": "apple\n", b: "banana\n", link: { link: "cherry" }, file: "durian\n" });
+	await update(index, store, "c1", one);
+	assert.deepEqual(paths(code, "cherry"), [], "a symlink's target isn't searchable text");
+	const two = store.tree({ a: "apple file\n", "b/inner.ts": "banana dir\n", link: "cherry", file: { link: "durian\n" } });
+	await update(index, store, "c2", two);
+	const fresh = setup();
+	await update(fresh.index, store, "c2", two);
+	for (const dir of ["", "b"]) assert.deepEqual(index.listing("c2", dir), fresh.index.listing("c2", dir), `"${dir}"`);
+	assert.deepEqual(index.listing("c2", "a"), { missing: "a" }, "the old directory is gone with its contents");
+	assert.deepEqual(paths(code, "cherry"), ["link"], "a symlink that became a file with the same blob is read and indexed");
+	assert.deepEqual(paths(code, "durian"), [], "a file that became a symlink with the same blob leaves search");
+	assert.deepEqual(paths(code, "banana"), ["b/inner.ts"]);
+	assert.equal(index.state().entries, count(), "the running entry count matches the table");
+	assert.equal(index.state().entries, fresh.count());
+});
+
+test("one huge directory is written a bounded number of entries per step", async () => {
+	const files: Record<string, string> = {};
+	for (let i = 0; i < 95; i++) files[`flat/f${String(i).padStart(3, "0")}.txt`] = `n${i}\n`;
+	const { index, store, count } = setup({ entriesPerStep: 10 });
+	const tree = store.tree(files);
+	index.target("c1", tree);
+	let walkSteps = 0;
+	let before = count();
+	while (index.state().update?.walking) {
+		await index.step(store);
+		walkSteps++;
+		assert.ok(count() - before <= 10, "no step writes more than entriesPerStep entries");
+		before = count();
+	}
+	assert.ok(walkSteps >= 10, `the directory took ${walkSteps} steps`);
+	while (await index.step(store)) {}
+	assert.equal(index.paths("c1", 1000)?.paths.length, 95);
+	assert.equal(index.state().entries, 96);
+});
+
+test("an index too big to list gives partial search, and isn't rebuilt for the same commit", async () => {
+	const files: Record<string, string> = {};
+	// The root's own files (a*, sorting first) are queued before its directories pass the cap.
+	for (let i = 0; i < 10; i++) files[`a${i}.txt`] = `word${i} kiwi\n`;
+	for (let i = 0; i < 30; i++) files[`d${i}/f.txt`] = `word${i} kiwi\n`;
+	const { code, index, store } = setup({ maxEntries: 20, dirsPerStep: 4 });
+	const tree = store.tree(files);
+	await update(index, store, "c1", tree);
+	assert.equal(index.listing("c1", ""), null, "nothing is listed");
+	assert.equal(index.state().overflow, "c1");
+	assert.equal(code.state()?.commit, "c1");
+	assert.equal(code.state()?.partial, true);
+	assert.ok(paths(code, "kiwi").length > 0, "the files queued before the overflow are searchable");
+	store.treeReads = 0;
+	index.target("c1", tree);
+	assert.equal(index.busy(), false, "asking again for the same commit starts nothing");
+	assert.equal(store.treeReads, 0);
+	assert.equal(index.settled("c1"), true);
+});
+
+test("an overflow partway through an update starts that commit over, leaving no deleted file searchable", async () => {
+	const { code, index, store } = setup({ maxEntries: 12, dirsPerStep: 1 });
+	const one = store.tree({ "a/x.txt": "x\n", "z/gone.txt": "zebra\n" });
+	await update(index, store, "c1", one);
+	assert.deepEqual(paths(code, "zebra"), ["z/gone.txt"]);
+	// "a" (walked first) grows past the cap; "z", where the deletion is, is never reached by that walk.
+	const files: Record<string, string> = { "z/kept.txt": "kept\n" };
+	for (let i = 0; i < 20; i++) files[`a/n${i}.txt`] = `new ${i}\n`;
+	await update(index, store, "c2", store.tree(files));
+	assert.deepEqual(paths(code, "zebra"), [], "the deleted file is out of search");
+	assert.equal(code.state()?.commit, "c2");
+	assert.equal(code.state()?.partial, true);
+	assert.equal(index.state().overflow, "c2");
+	assert.equal(index.listing("c2", ""), null);
+});
+
+test("a head that moves away and back while walking doesn't leave the index heading elsewhere", async () => {
+	const { index, store } = setup({ dirsPerStep: 1 });
+	const files: Record<string, string> = {};
+	for (let d = 0; d < 5; d++) files[`dir${d}/f.txt`] = `f${d}\n`;
+	const b = store.tree(files);
+	const c = store.tree({ ...files, "c.txt": "c\n" });
+	index.target("B", b);
+	await index.step(store);
+	assert.equal(index.state().update?.walking, true);
+	index.target("C", c);
+	assert.equal(index.state().next?.commit, "C");
+	index.target("B", b);
+	assert.equal(index.state().next, null, "back to B: C is no longer where the branch is");
+	while (await index.step(store)) {}
+	assert.equal(index.current("B"), true);
+	assert.equal(index.current("C"), false);
+});
+
+test("failed steps back off, and after five in a row the index is dropped", async () => {
+	const { code, index, store } = setup();
+	await update(index, store, "c1", store.tree({ "a.txt": "apricot\n" }));
+	const now = 1_000_000;
+	index.failed(now);
+	const first = index.retryAt();
+	assert.ok(first > now);
+	index.failed(now);
+	assert.ok(index.retryAt() > first, "each failure waits longer");
+	index.succeeded();
+	assert.equal(index.retryAt(), 0, "a success clears it");
+	for (let i = 0; i < 4; i++) index.failed(now);
+	assert.equal(index.current("c1"), true, "four failures keep the index");
+	index.failed(now);
+	assert.equal(index.current("c1"), false, "the fifth drops it");
+	assert.equal(index.retryAt(), 0);
+	assert.equal(code.state(), null, "code search with it");
 });

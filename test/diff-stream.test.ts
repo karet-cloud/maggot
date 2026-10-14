@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { completeDiff, emptyDiff, readDiff, reduceDiff, StreamError, type StreamedDiff } from "../app/lib/diff-stream.ts";
+import { QueryClient } from "@tanstack/query-core";
+import { completeDiff, emptyDiff, fileDiffKey, readDiff, reduceDiff, StreamError, type StreamedDiff } from "../app/lib/diff-stream.ts";
 import type { DiffEvent } from "../src/api.ts";
 import { DEFER_ABOVE, diffList, diffPath, diffStream, diffTrees, type CommitObject, type ObjectReader, type TreeEntry } from "../src/git/diff.ts";
 
@@ -136,6 +137,58 @@ test("a streamed diff arrives as the same files as the whole diff, with large an
 	assert.equal((await diffPath(store, null, head, "new.md"))?.status, "added");
 	assert.equal(await diffPath(store, base, head, "nowhere.txt"), null);
 	assert.equal(await diffPath(store, base, head, "src"), null, "a directory isn't a file of the diff");
+});
+
+test("a file that fails partway ends the stream with an error line, keeping the files before it", async () => {
+	const store = new Store();
+	const base = store.tree({ "a.txt": "1\n", "b.txt": "2\n", "c.txt": "3\n" });
+	const head = store.tree({ "a.txt": "1!\n", "b.txt": "2!\n", "c.txt": "3!\n" });
+	const list = await diffList(store, base, head);
+	const broken = store.blobs.get(sha("blob 2!\n")) ?? "";
+	assert.ok(broken, "b.txt's new blob is in the store");
+	const failing: ObjectReader = {
+		readTree: (hash) => store.readTree(hash),
+		readCommit: () => store.readCommit(),
+		readBlob: async (hash) => {
+			if (store.blobs.get(hash) === "2!\n") throw new Error("Storage went away");
+			return store.readBlob(hash);
+		},
+	};
+	let disposed = 0;
+	const text = await new Response(diffStream(failing, list, { meta: null, trees: { from: base, to: head } }, () => disposed++)).text();
+	const events = text.trim().split("\n").map((l) => JSON.parse(l) as DiffEvent);
+	assert.deepEqual(
+		events.map((e) => (e.type === "file" ? e.file.path : e.type)),
+		["header", "a.txt", "error"],
+		"files up to the failure, then the error; nothing after it",
+	);
+	assert.equal(disposed, 1);
+	let partial = emptyDiff();
+	await assert.rejects(async () => {
+		for await (const batch of readDiff(chunked(text, 11))) partial = reduceDiff(partial, batch);
+	}, /Storage went away/);
+	assert.deepEqual(Object.keys(partial.files), ["a.txt"], "what arrived before the error is kept for the page");
+});
+
+test("a file loaded on its own is fetched again once the diff's trees change, not served from the old ones", async () => {
+	const client = new QueryClient();
+	const calls: string[] = [];
+	const load = (trees: { from: string | null; to: string }) =>
+		client.fetchQuery({
+			queryKey: fileDiffKey(["project", "o/r", "pulls", 1, "files"], trees, "big.txt"),
+			queryFn: () => {
+				calls.push(trees.to);
+				return trees.to;
+			},
+			staleTime: Number.POSITIVE_INFINITY,
+		});
+	assert.equal(await load({ from: "t0", to: "t1" }), "t1");
+	assert.equal(await load({ from: "t0", to: "t1" }), "t1");
+	assert.deepEqual(calls, ["t1"], "the same trees are the same diff: cached");
+	assert.equal(await load({ from: "t0", to: "t2" }), "t2", "a push moved the head: the new trees' file");
+	assert.equal(await load({ from: "t9", to: "t2" }), "t2");
+	assert.deepEqual(calls, ["t1", "t2", "t2"]);
+	client.clear();
 });
 
 test("a whole diff takes the streamed shape, complete", async () => {
