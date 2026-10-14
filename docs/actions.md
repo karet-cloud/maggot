@@ -95,7 +95,7 @@ workflows, `workflow_dispatch` inputs, `vars`, a matrix built by an expression, 
 
 ## When workflows run
 
-- **push**: each branch a push (HTTPS, SSH, web edit or merge) moves, using the workflow files at the new commit.
+- **push**: each branch a push (HTTPS, SSH, web edit or merge) moves, using the workflow files at the new commit. Pushes and edits to the wiki start nothing.
 - **pull_request**: when a pull request is opened or reopened, and on new pushes to its head
   (`synchronize`), filtered by the workflow's `branches` (matched against the base branch) and
   `types`. The head commit's workflow files are used, as on GitHub. A workflow the base branch has

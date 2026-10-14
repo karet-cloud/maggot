@@ -39,3 +39,11 @@ export function claimsOverlap(a: string[], b: string[]): boolean {
 		b.some((y) => x === y || x === "" || y === "" || x.startsWith(`${y}/`) || y.startsWith(`${x}/`)),
 	);
 }
+
+/**
+ * Artifacts repo name for a repository's wiki. Like task forks it uses `--`, which never appears in
+ * project names; task ids start with "t", so it can't be a fork's name either.
+ */
+export function wikiRepoName(project: string): string {
+	return `${project}--wiki`;
+}

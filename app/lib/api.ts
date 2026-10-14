@@ -55,6 +55,8 @@ import type {
 	CiSettings,
 	CiWorkflow,
 	PullChecks,
+	WikiIndex,
+	WikiPage,
 } from "../../src/api.ts";
 
 export type * from "../../src/api.ts";
@@ -147,7 +149,7 @@ export const api = {
 			defaultBranch: repo.defaultBranch,
 			repo,
 		})),
-	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean }) =>
+	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
 	fileHistory: (project: string, path: string, ref?: string, from?: string) =>
@@ -291,6 +293,18 @@ export const api = {
 			files: { path: string; content: string | null; previousPath?: string; encoding?: "base64" }[];
 		},
 	) => call<{ commit: string; branch: string }>("POST", `${p(project)}/contents`, input),
+	// The wiki: pages by slug ("Getting-Started"); edits name the wiki head they started from.
+	wiki: (project: string) => call<WikiIndex>("GET", `${p(project)}/wiki`),
+	wikiPage: (project: string, page: string) => call<{ page: WikiPage }>("GET", `${p(project)}/wiki/pages/${encodeURIComponent(page)}`).then((r) => r.page),
+	wikiHistory: (project: string, page: string, from?: string) =>
+		call<FileHistory>("GET", `${p(project)}/wiki/pages/${encodeURIComponent(page)}/history${from ? `?${new URLSearchParams({ from })}` : ""}`),
+	createWikiPage: (project: string, input: { title: string; content: string; message?: string; baseCommit?: string | null }) =>
+		call<{ page: string; commit: string }>("POST", `${p(project)}/wiki/pages`, input),
+	editWikiPage: (project: string, page: string, input: { title?: string; content?: string; message?: string; baseCommit?: string | null }) =>
+		call<{ page: string; commit: string }>("PATCH", `${p(project)}/wiki/pages/${encodeURIComponent(page)}`, input),
+	deleteWikiPage: (project: string, page: string, baseCommit: string | null) =>
+		call<{ deleted: true; commit: string }>("DELETE", `${p(project)}/wiki/pages/${encodeURIComponent(page)}`, { baseCommit }),
+	wikiRawUrl: (project: string, path: string) => `/api${p(project)}/wiki/raw?${new URLSearchParams({ path })}`,
 	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
 	forks: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/forks`).then((r) => r.repos),
 	fork: (project: string, name: string) => call<{ repo: RepoInfo }>("POST", `${p(project)}/forks`, { name }).then((r) => r.repo),
@@ -400,4 +414,8 @@ export const keys = {
 	/** Under ciRun, so refreshing the run refreshes its artifacts. */
 	ciArtifacts: (project: string, run: number) => ["project", project, "actions", "runs", run, "artifacts"] as const,
 	ciCaches: (project: string) => ["project", project, "actions", "caches"] as const,
+	/** Everything about the wiki sits under this, so a wiki change refreshes it all. */
+	wiki: (project: string) => ["project", project, "wiki"] as const,
+	wikiPage: (project: string, page: string) => ["project", project, "wiki", "page", page] as const,
+	wikiHistory: (project: string, page: string) => ["project", project, "wiki", "history", page] as const,
 };

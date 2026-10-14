@@ -5,6 +5,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { api, repoParams } from "../lib/api.ts";
 import { highlightCode } from "../lib/highlight.ts";
+import { pageLinkTarget, pageTitle, wikiLinks } from "../../src/wiki-pages.ts";
 
 const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;
 
@@ -63,8 +64,25 @@ const SCHEMA = {
  * Renders a Markdown file from the repo (GitHub-flavored; inline HTML is sanitized like GitHub does). Relative links open in
  * the code browser and relative images load from the same ref.
  */
-export function Markdown({ source, project, path, refName }: { source: string; project: string; path: string; refName?: string }) {
+export function Markdown({
+	source,
+	project,
+	path,
+	refName,
+	wiki,
+}: {
+	source: string;
+	project: string;
+	path: string;
+	refName?: string;
+	/**
+	 * A wiki page: `[[Page]]` links work, relative links name pages (missing ones link to creating them,
+	 * marked as such), and relative images load from the wiki. `pages` are the wiki's page slugs.
+	 */
+	wiki?: { pages: string[] };
+}) {
 	const dir = path.split("/").slice(0, -1).join("/");
+	const pages = new Map((wiki?.pages ?? []).map((slug) => [slug.toLowerCase(), slug]));
 	return (
 		<div className="markdown">
 			<ReactMarkdown
@@ -78,6 +96,29 @@ export function Markdown({ source, project, path, refName }: { source: string; p
 								<a href={href} target="_blank" rel="noreferrer noopener">
 									{children}
 								</a>
+							);
+						}
+						if (wiki) {
+							const target = pageLinkTarget(href, (slug) => pages.has(slug.toLowerCase()));
+							if (!target) return <a href={href}>{children}</a>;
+							const page = pages.get(target.slug.toLowerCase());
+							if (!page) {
+								return (
+									<Link
+										to="/$owner/$repo/wiki/_new"
+										params={repoParams(project)}
+										search={{ title: pageTitle(target.slug) }}
+										className="wiki-missing"
+										title={`${pageTitle(target.slug)} doesn't exist yet`}
+									>
+										{children}
+									</Link>
+								);
+							}
+							return (
+								<Link to="/$owner/$repo/wiki/$page" params={{ ...repoParams(project), page }} hash={target.fragment ? `${ID_PREFIX}${target.fragment.toLowerCase()}` : undefined}>
+									{children}
+								</Link>
 							);
 						}
 						const [pathPart, fragment] = href.split("#");
@@ -97,7 +138,12 @@ export function Markdown({ source, project, path, refName }: { source: string; p
 						);
 					},
 					img({ src = "", alt }) {
-						const url = typeof src !== "string" || EXTERNAL.test(src) ? src : api.rawUrl(project, resolvePath(dir, src), refName);
+						const url =
+							typeof src !== "string" || EXTERNAL.test(src)
+								? src
+								: wiki
+									? api.wikiRawUrl(project, resolvePath("", src))
+									: api.rawUrl(project, resolvePath(dir, src), refName);
 						return <img src={url as string} alt={alt ?? ""} loading="lazy" />;
 					},
 					code({ className, children }) {
@@ -108,7 +154,7 @@ export function Markdown({ source, project, path, refName }: { source: string; p
 					},
 				}}
 			>
-				{source}
+				{wiki ? wikiLinks(source) : source}
 			</ReactMarkdown>
 		</div>
 	);

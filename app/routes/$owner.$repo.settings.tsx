@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Archive, ArchiveRestore, ArrowRightLeft, PencilLine, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowRightLeft, BookOpen, PencilLine, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { Webhooks } from "../components/webhooks.tsx";
@@ -25,7 +25,7 @@ function RepoSettings() {
 		void queryClient.invalidateQueries({ queryKey: ["repos"] });
 	};
 	const update = useMutation({
-		mutationFn: (patch: { visibility?: Visibility; description?: string | null; archived?: boolean }) => api.updateRepo(project, patch),
+		mutationFn: (patch: { visibility?: Visibility; description?: string | null; archived?: boolean; hasWiki?: boolean }) => api.updateRepo(project, patch),
 		onSuccess: refresh,
 	});
 	const remove = useMutation({
@@ -81,6 +81,27 @@ function RepoSettings() {
 						Make {other}
 					</Button>
 				</div>
+			</Panel>
+			<Panel title="Features">
+				<label className="flex items-start gap-3 p-4 text-sm">
+					<input
+						type="checkbox"
+						checked={current.hasWiki}
+						disabled={archived || update.isPending}
+						onChange={(e) => update.mutate({ hasWiki: e.target.checked })}
+						className="mt-0.5 accent-accent"
+					/>
+					<span>
+						<span className="flex items-center gap-1.5 text-fg">
+							<BookOpen className="size-4 text-faint" />
+							Wiki
+						</span>
+						<span className="text-xs text-dim">
+							Pages of documentation, edited here or cloned from <code className="font-mono">{current.wikiUrl}</code>. Turned off, the tab and the wiki's
+							address go away, but its pages are kept.
+						</span>
+					</span>
+				</label>
 			</Panel>
 			<ErrorNote error={update.error} />
 			{!archived && <Collaborators project={project} />}

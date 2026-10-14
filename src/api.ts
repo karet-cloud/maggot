@@ -121,7 +121,8 @@ export type EventType =
 	| "pull.opened"
 	| "pull.reviewed"
 	| "pull.merged"
-	| "ci.completed";
+	| "ci.completed"
+	| "wiki.updated";
 
 export interface ProjectEvent {
 	seq: number;
@@ -258,6 +259,10 @@ export interface RepoInfo {
 	archivedAt: string | null;
 	openIssues: number;
 	openPulls: number;
+	/** Whether the wiki is turned on (its pages are kept while it's off). */
+	hasWiki: boolean;
+	/** Where the wiki clones from: `<origin>/<owner>/<name>.wiki.git`. */
+	wikiUrl: string;
 }
 
 /** A pending offer to hand a repository to another user, who has to accept it. */
@@ -329,7 +334,8 @@ export interface CodeSearch {
 	results: { path: string; matches: number; lines: { line: number; text: string }[] }[];
 }
 
-export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues" | "pull_request" | "workflow_run";
+/** `gollum` is GitHub's name for wiki page changes. */
+export type WebhookEvent = "push" | "task" | "merge" | "release" | "issues" | "pull_request" | "workflow_run" | "gollum";
 
 export interface Webhook {
 	id: string;
@@ -480,6 +486,40 @@ export interface FileHistory {
 	commits: (Commit & { change: "modified" | "deleted" })[];
 	/** Where to carry on from (`?from=`) for older history; null when it's all here. */
 	next: string | null;
+}
+
+/** A wiki page as listed: `slug` names it in URLs ("Getting-Started"), `title` is how it reads. */
+export interface WikiPageSummary {
+	slug: string;
+	title: string;
+	/** Its file in the wiki repository (Getting-Started.md). */
+	path: string;
+}
+
+export interface WikiIndex {
+	/** The wiki's head commit; null while it has no pages. Edits name it as their base. */
+	head: string | null;
+	/** Home first, then by title. */
+	pages: WikiPageSummary[];
+	/** _Sidebar.md and _Footer.md, when the wiki has them. */
+	sidebar: string | null;
+	footer: string | null;
+}
+
+export interface WikiPage extends WikiPageSummary {
+	source: string;
+	/** The wiki's head when the page was read. */
+	head: string;
+	/** The last commit that changed the page, if it's within the history looked through. */
+	lastCommit: Commit | null;
+}
+
+/** A page a wiki change touched, as the feed and `gollum` webhooks report it. */
+export interface WikiPageChange {
+	page_name: string;
+	title: string;
+	action: "created" | "edited" | "deleted";
+	sha: string;
 }
 
 export interface Blame {

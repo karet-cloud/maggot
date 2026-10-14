@@ -10,6 +10,7 @@ import { listRefs, pushAccepted, RefUpdateRejected, setRef } from "./git/protoco
 import { checkPush, isAncestor, mapReport, parseCommands, quarantine, refusalReport, type Staged } from "./protection.ts";
 import { repoStore } from "./store.ts";
 import type { RemoteAccess } from "./git/workspace.ts";
+import type { BranchRule } from "./api.ts";
 import type { ProjectCoordinator } from "./project.ts";
 
 const GIT_PATH = /^\/([^/]+)\/([^/]+?)(?:\.git)?\/(info\/refs|git-upload-pack|git-receive-pack)$/;
@@ -48,21 +49,31 @@ const refusePush = (message: string) =>
 
 /** Whether a caller may fetch from (or push to) a repository, and if not, what to tell them. */
 export type GitAccess =
-	| { ok: true; row: RepoRow }
+	/** `wiki`: the request is for the repository's wiki (`<name>.wiki.git`). */
+	| { ok: true; row: RepoRow; wiki: boolean }
 	/** `inProtocol`: say it as a git protocol error (for pushes refused by policy rather than permissions). */
 	| { ok: false; status: 401 | 403 | 404; message: string; inProtocol?: boolean };
 
 /** The checks git over HTTP and over SSH share: visibility, ownership, archiving, email verification and quotas. */
 export async function authorizeGit(env: Env, principal: Principal, owner: string, name: string, pushing: boolean, origin: string): Promise<GitAccess> {
 	await ensureSchema(db(env));
-	const row = await findRepo(db(env), owner, name, principal.kind === "user" ? principal.id : null);
+	const viewer = principal.kind === "user" ? principal.id : null;
+	let row = await findRepo(db(env), owner, name, viewer);
+	// `<name>.wiki` is the wiki of `<name>`. New repositories can't be named like that (assertRepoName),
+	// so only one named so before the rule (or an old name that redirects) takes the name first.
+	let wiki = false;
+	if (!row && /\.wiki$/i.test(name)) {
+		row = await findRepo(db(env), owner, name.slice(0, -".wiki".length), viewer);
+		wiki = row !== null;
+	}
 	// Like GitHub, a repository the caller can't see asks for credentials rather than confirming it exists.
-	if (!row || !canRead(principal, row)) {
+	// A wiki that's turned off is as good as missing (its pages are kept).
+	if (!row || !canRead(principal, row) || (wiki && !row.hasWiki)) {
 		return principal.kind === "anonymous"
 			? { ok: false, status: 401, message: "Authentication required." }
 			: { ok: false, status: 404, message: `Repository ${owner}/${name} not found.` };
 	}
-	if (!pushing) return { ok: true, row };
+	if (!pushing) return { ok: true, row, wiki };
 	if (!canWrite(principal, row)) {
 		return principal.kind === "anonymous"
 			? { ok: false, status: 401, message: "Authentication required to push." }
@@ -76,8 +87,24 @@ export async function authorizeGit(env: Env, principal: Principal, owner: string
 		const blocked = await pushBlocked(env, db(env), row);
 		if (blocked) return { ok: false, status: 403, inProtocol: true, message: blocked };
 	}
-	return { ok: true, row };
+	return { ok: true, row, wiki };
 }
+
+/**
+ * Where an authorized git request goes: the repository's storage, with its branch rules for pushes,
+ * or its wiki's, which has neither branch rules nor Actions. Null for a clone of a wiki with no pages yet.
+ */
+export async function gitUpstream(env: Env, access: Extract<GitAccess, { ok: true }>, pushing: boolean): Promise<{ remote: RemoteAccess; rules: BranchRule[] } | null> {
+	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(access.row.id);
+	if (access.wiki) {
+		const remote = await coordinator.wikiRemote(pushing ? "write" : "read");
+		return remote ? { remote, rules: [] } : null;
+	}
+	return pushing ? coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
+}
+
+/** What git hears when it clones a wiki nobody has written a page in yet. */
+export const EMPTY_WIKI = "This wiki has no pages yet. Create the first page on the web, or push one.";
 
 /** The Actions checkout token (`mgci_…`) a request carries as its Basic password, if it carries one. */
 function checkoutToken(request: Request): string | null {
@@ -125,7 +152,7 @@ export function upstreamFetch(
  * UI, its live feed and webhooks hear about it. Reads a copy of the response, so this happens even if
  * the client hangs up first. Returns the body to pass on.
  */
-export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: ReadableStream<Uint8Array>, sent: () => number, actor: string | null): ReadableStream<Uint8Array> {
+export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: ReadableStream<Uint8Array>, sent: () => number, actor: string | null, wiki = false): ReadableStream<Uint8Array> {
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(row.id);
 	const [client, watcher] = body.tee();
 	ctx.waitUntil(
@@ -134,7 +161,8 @@ export function watchPush(env: Env, ctx: ExecutionContext, row: RepoRow, body: R
 			.then(async (report) => {
 				if (!pushAccepted(new Uint8Array(report))) return;
 				const bytes = sent();
-				await Promise.all([coordinator.pushed(actor), bytes > 0 ? addRepoBytes(db(env), row.id, bytes) : null]);
+				// A push to the wiki counts toward the repository's size, like one to its code.
+				await Promise.all([wiki ? coordinator.wikiPushed(actor) : coordinator.pushed(actor), bytes > 0 ? addRepoBytes(db(env), row.id, bytes) : null]);
 			})
 			.catch((err) => console.error("recording push failed", err)),
 	);
@@ -297,8 +325,9 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		return deny(413, `A push can be at most ${formatBytes(maxPush)}.`);
 	}
 
-	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(row.id);
-	const { remote: upstream, rules: branchRules } = pushing ? await coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
+	const target = await gitUpstream(env, access, pushing);
+	if (!target) return deny(404, EMPTY_WIKI);
+	const { remote: upstream, rules: branchRules } = target;
 	const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
 	const receiving = pushing && route.endpoint === "git-receive-pack";
 	let requestBody = request.body;
@@ -361,7 +390,7 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 			const report = await settleStaged(env, row, upstream, new Uint8Array(await res.arrayBuffer()), protect.staged, protect.capabilities);
 			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent, pusher), { status: res.status, headers: out });
 		}
-		return new Response(watchPush(env, ctx, row, res.body, () => sent, pusher), { status: res.status, headers: out });
+		return new Response(watchPush(env, ctx, row, res.body, () => sent, pusher, access.wiki), { status: res.status, headers: out });
 	}
 	return new Response(res.body, { status: res.status, headers: out });
 }

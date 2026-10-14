@@ -91,6 +91,8 @@ export function useProjectLive(project: string): Live {
 				if (event.type === "ci.completed" || event.type === "repo.pushed" || event.type.startsWith("pull.")) {
 					invalidate(["project", project, "actions", "runs"]);
 				}
+				// Open wiki pages refresh; editors keep their own base (outside these keys) until saved.
+				if (event.type === "wiki.updated") invalidate(keys.wiki(project));
 				if (event.type.startsWith("issue.")) {
 					invalidate(keys.issues(project));
 					// Pull requests are issues too: their comments arrive as issue events.

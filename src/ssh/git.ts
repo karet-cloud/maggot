@@ -3,9 +3,8 @@
 // sends becomes one HTTP request. Pushes are one request: the commands, then the pack.
 import type { Principal } from "../auth.ts";
 import { formatBytes, limit, policy, RateLimited, rules } from "../policy.ts";
-import { authorizeGit, settleStaged, upstreamFetch, watchPush } from "../git-http.ts";
+import { authorizeGit, EMPTY_WIKI, gitUpstream, settleStaged, upstreamFetch, watchPush } from "../git-http.ts";
 import { checkPush, parseCommands, quarantine, refusalReport, type Staged } from "../protection.ts";
-import type { ProjectCoordinator } from "../project.ts";
 import type { Session, SshUser } from "./server.ts";
 import { concat } from "./wire.ts";
 
@@ -49,8 +48,10 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	const pushing = parsed.service === "git-receive-pack";
 	const access = await authorizeGit(env, principal, parsed.owner, parsed.repo, pushing, origin);
 	if (!access.ok) return fail(`ERROR: ${access.message}`);
-	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(access.row.id);
-	const { remote: upstream, rules: branchRules } = pushing ? await coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
+	// `owner/name.wiki.git` reaches the wiki, as over HTTPS.
+	const target = await gitUpstream(env, access, pushing);
+	if (!target) return fail(`ERROR: ${EMPTY_WIKI}`);
+	const { remote: upstream, rules: branchRules } = target;
 	const input = new PktReader(session);
 	const protocol = session.env.get("GIT_PROTOCOL") ?? "";
 
@@ -153,7 +154,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 		const checked = await settleStaged(env, access.row, upstream, new Uint8Array(await res.arrayBuffer()), staged, capabilities);
 		report = new Response(checked).body as ReadableStream<Uint8Array>;
 	}
-	await pipe(watchPush(env, ctx, access.row, report, () => sent, principal.username), session);
+	await pipe(watchPush(env, ctx, access.row, report, () => sent, principal.username, access.wiki), session);
 	return 0;
 }
 

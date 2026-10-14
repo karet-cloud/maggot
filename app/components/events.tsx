@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import {
 	AlertTriangle,
+	BookOpen,
 	CircleCheck,
 	CircleDot,
 	GitBranchPlus,
@@ -20,7 +21,7 @@ import {
 	XCircle,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import type { EventType, ProjectEvent, Task } from "../lib/api.ts";
+import type { EventType, ProjectEvent, Task, WikiPageChange } from "../lib/api.ts";
 import { repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
 import { cx, TimeAgo } from "./ui.tsx";
@@ -48,6 +49,7 @@ const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"pull.reviewed": { icon: <MessageSquare className="size-3.5" />, tone: "text-amber-300" },
 	"pull.merged": { icon: <GitMerge className="size-3.5" />, tone: "text-violet-300" },
 	"ci.completed": { icon: <Workflow className="size-3.5" />, tone: "text-sky-300" },
+	"wiki.updated": { icon: <BookOpen className="size-3.5" />, tone: "text-sky-300" },
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -124,6 +126,13 @@ export function describe(e: ProjectEvent): string {
 			const result = results[run.conclusion ?? ""] ?? "finished";
 			const where = run.pull ? `pull request #${run.pull}` : `${run.branch ?? "?"} at ${shortOid(run.sha)}`;
 			return `${run.workflow ?? "A workflow"} #${run.number ?? "?"} ${result} on ${where}`;
+		}
+		case "wiki.updated": {
+			const pages = (d.pages ?? []) as WikiPageChange[];
+			const who = String(d.actor ?? "Someone");
+			if (pages.length === 0) return `${who} updated the wiki`;
+			if (pages.length > 1) return `${who} changed ${plural(pages.length, "wiki page")}`;
+			return `${who} ${pages[0].action} the wiki page ${pages[0].title}`;
 		}
 	}
 }

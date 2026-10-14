@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal, Workflow } from "lucide-react";
+import { Archive, BookOpen, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EventFeed } from "../components/events.tsx";
 import { NewTask } from "../components/new-task.tsx";
@@ -178,6 +178,7 @@ function ProjectLayout() {
 							sections={["pulls", "pull"]}
 						/>
 						<Tab to="/$owner/$repo/actions" project={project} icon={<Workflow className="size-3.5" />} label="Actions" sections={["actions"]} />
+						{p?.repo.hasWiki && <Tab to="/$owner/$repo/wiki" project={project} icon={<BookOpen className="size-3.5" />} label="Wiki" sections={["wiki"]} />}
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
 						<Tab to="/$owner/$repo/releases" project={project} icon={<Package className="size-3.5" />} label="Releases" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
@@ -316,6 +317,7 @@ type TabTarget =
 	| "/$owner/$repo/issues"
 	| "/$owner/$repo/pulls"
 	| "/$owner/$repo/releases"
+	| "/$owner/$repo/wiki"
 	| "/$owner/$repo/settings";
 
 /**

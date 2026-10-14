@@ -827,6 +827,17 @@ test("git over SSH: keys, clone, push, permissions, branch protection and archiv
 	await git("ada", ["push", "-q", "origin", "--delete", "topic"], join(dir, "clone"));
 	await git("ada", ["fetch", "-q", "origin"], join(dir, "clone"));
 
+	// The wiki is reachable over SSH as well: a first push creates it, and a clone reads it back.
+	await git("ada", ["init", "-q", "-b", "master", join(dir, "wiki")]);
+	await writeFile(join(dir, "wiki", "Home.md"), "Hello over SSH\n");
+	await git("ada", ["add", "-A"], join(dir, "wiki"));
+	await git("ada", ["commit", "-q", "-m", "First page"], join(dir, "wiki"));
+	await git("ada", ["push", "-q", `git@megit-test:${ada.username}/over-ssh.wiki.git`, "master"], join(dir, "wiki"));
+	await git("ada", ["clone", "-q", `git@megit-test:${ada.username}/over-ssh.wiki.git`, join(dir, "wiki-clone")]);
+	assert.equal((await git("ada", ["show", "HEAD:Home.md"], join(dir, "wiki-clone"))).stdout, "Hello over SSH\n");
+	const wikiPage = (await (await as(ada)(`/repos/${ada.username}/over-ssh/wiki/pages/Home`)).json()) as { page: { source: string } };
+	assert.equal(wikiPage.page.source, "Hello over SSH\n");
+
 	// Branch protection holds over SSH too: a force push is put back, a deletion refused.
 	const sshRepo = `/repos/${ada.username}/over-ssh`;
 	assert.equal((await as(ada)(`${sshRepo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", blockForcePushes: true, blockDeletions: true }) })).status, 200);
@@ -1435,4 +1446,142 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.deepEqual((await json<{ artifacts: unknown[] }>(as(null)(`${actions}/runs/${pushed.number}/artifacts`))).artifacts, []);
 	await json(as(ada)(`${actions}/caches/${cacheId}`, { method: "DELETE" }));
 	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204);
+});
+
+test("wikis: pages from the web and over git, stale edits refused, readers read, archived and turned-off wikis", async () => {
+	const ada = await newUser("wikia");
+	const bob = await newUser("wikib");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, {
+			...init,
+			headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers },
+		});
+	const json = async <T>(res: Promise<Response>, status = 200): Promise<T> => {
+		const r = await res;
+		assert.equal(r.status, status, await r.clone().text());
+		return (await r.json()) as T;
+	};
+	type Index = { head: string | null; pages: { slug: string; title: string; path: string }[]; sidebar: string | null; footer: string | null };
+	type Page = { slug: string; title: string; source: string; head: string; lastCommit: { message: string; author: { name: string } } | null };
+	const exec = promisify(execFile);
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+	const git = (cwd: string, ...args: string[]) => exec("git", ["-c", "user.name=w", "-c", "user.email=w@w", ...args], { cwd, env });
+	const wikiUrl = (who?: { username: string; token: string }) => {
+		const url = new URL(`${api}/${ada.username}/docs.wiki.git`);
+		if (who) {
+			url.username = who.username;
+			url.password = who.token;
+		}
+		return url.toString();
+	};
+
+	// `.wiki` names are the wikis'; no repository can take one.
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "docs.wiki" }) })).status, 400);
+	await json(as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "docs", readme: true }) }), 201);
+	const repo = `/repos/${ada.username}/docs`;
+	assert.equal((await json<{ repo: { hasWiki: boolean; wikiUrl: string } }>(as(null)(repo))).repo.wikiUrl, wikiUrl());
+
+	// A wiki with no pages: an empty index, and nothing to clone yet.
+	assert.deepEqual(await json<Index>(as(null)(`${repo}/wiki`)), { head: null, pages: [], sidebar: null, footer: null });
+	await assert.rejects(exec("git", ["clone", "-q", wikiUrl(), join(root, "wiki-empty")], { env }), /no pages yet|404/);
+
+	// The first page creates the wiki; default messages say what happened, and the author is who did it.
+	const home = await json<{ page: string; commit: string }>(as(ada)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "Home", content: "Welcome. See [[Getting Started]].\n" }) }), 201);
+	assert.equal(home.page, "Home");
+	const created = await json<{ page: string; commit: string }>(as(ada)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "Getting Started", content: "# Setup\n" }) }), 201);
+	assert.equal(created.page, "Getting-Started");
+	assert.equal((await as(ada)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "getting started", content: "again" }) })).status, 409, "names are unique, whatever their case");
+	assert.equal((await as(ada)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "_Sidebar", content: "x" }) })).status, 400);
+	const index = await json<Index>(as(null)(`${repo}/wiki`));
+	assert.deepEqual(index.pages.map((p) => [p.slug, p.title, p.path]), [["Home", "Home", "Home.md"], ["Getting-Started", "Getting Started", "Getting-Started.md"]]);
+	assert.equal(index.head, created.commit);
+
+	// An edit based on an older head is refused; one based on the current head lands.
+	const stale = await as(ada)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "Lost?\n", baseCommit: home.commit }) });
+	assert.equal(stale.status, 409);
+	assert.equal(((await stale.json()) as { error: { code: string } }).error.code, "BRANCH_MOVED");
+	await json(as(ada)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "Welcome back. See [[Getting Started]].\n", baseCommit: created.commit }) }));
+	const page = await json<{ page: Page }>(as(bob)(`${repo}/wiki/pages/home`));
+	assert.equal(page.page.source, "Welcome back. See [[Getting Started]].\n");
+	assert.deepEqual([page.page.lastCommit?.message, page.page.lastCommit?.author.name], ["Updated Home", ada.username]);
+	const history = await json<{ commits: { message: string }[] }>(as(null)(`${repo}/wiki/pages/Home/history`));
+	assert.deepEqual(history.commits.map((c) => c.message), ["Updated Home", "Created Home"]);
+
+	// Readers read but don't write.
+	assert.equal((await as(bob)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "Mine", content: "x" }) })).status, 403);
+	assert.equal((await as(bob)(`${repo}/wiki/pages/Home`, { method: "DELETE" })).status, 403);
+	assert.equal((await as(null)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "x" }) })).status, 401);
+
+	// Clone the wiki with git; push a page, which the API then shows (and the feed reports).
+	const dir = join(root, "wiki-clone");
+	await exec("git", ["clone", "-q", wikiUrl(), dir], { env });
+	assert.equal((await git(dir, "show", "HEAD:Home.md")).stdout, "Welcome back. See [[Getting Started]].\n");
+	await writeFile(join(dir, "Guide.md"), "Pushed with git.\n");
+	await writeFile(join(dir, "_Sidebar.md"), "[[Home]] · [[Guide]]\n");
+	await git(dir, "add", "-A");
+	await git(dir, "commit", "-q", "-m", "Add the guide");
+	await assert.rejects(git(dir, "push", "-q", wikiUrl(bob), "master"), /403|can't push/);
+	const before = (await json<{ repo: { sizeBytes: number } }>(as(ada)(repo))).repo.sizeBytes;
+	await git(dir, "push", "-q", wikiUrl(ada), "master");
+	const guide = await until(async () => {
+		const res = await as(null)(`${repo}/wiki/pages/Guide`);
+		return res.ok ? ((await res.json()) as { page: Page }).page : undefined;
+	});
+	assert.equal(guide.source, "Pushed with git.\n");
+	const withSidebar = await json<Index>(as(null)(`${repo}/wiki`));
+	assert.equal(withSidebar.sidebar, "[[Home]] · [[Guide]]\n");
+	assert.ok(!withSidebar.pages.some((p) => p.slug.startsWith("_")), "the sidebar isn't a page");
+	type Feed = { events: { type: string; data: { pages?: { page_name: string; action: string }[]; actor?: string } }[] };
+	const events = await until(async () => {
+		const { events } = await json<Feed>(as(ada)(`${repo}/events`));
+		return events.some((e) => e.type === "wiki.updated" && e.data.pages?.some((p) => p.page_name === "Guide")) ? events : undefined;
+	});
+	const pushed = events.findLast((e) => e.type === "wiki.updated");
+	assert.deepEqual(pushed?.data.pages?.map((p) => [p.page_name, p.action]), [["Guide", "created"]]);
+	assert.equal(pushed?.data.actor, ada.username);
+	// The wiki's pushes count toward the repository's size, as its code's do.
+	await until(async () => ((await json<{ repo: { sizeBytes: number } }>(as(ada)(repo))).repo.sizeBytes > before ? true : undefined));
+
+	// Renaming moves the file; deleting removes it.
+	assert.equal((await json<{ page: string }>(as(ada)(`${repo}/wiki/pages/Getting-Started`, { method: "PATCH", body: JSON.stringify({ title: "Setup" }) }))).page, "Setup");
+	assert.equal((await as(null)(`${repo}/wiki/pages/Getting-Started`)).status, 404);
+	assert.equal((await json<{ page: Page }>(as(null)(`${repo}/wiki/pages/Setup`))).page.source, "# Setup\n");
+	await json(as(ada)(`${repo}/wiki/pages/Setup`, { method: "DELETE" }));
+	assert.deepEqual((await json<Index>(as(null)(`${repo}/wiki`))).pages.map((p) => p.slug), ["Home", "Guide"]);
+
+	// A fork doesn't take the wiki along.
+	await json(as(bob)(`${repo}/forks`, { method: "POST", body: "{}" }), 201);
+	assert.deepEqual((await json<Index>(as(bob)(`/repos/${bob.username}/docs/wiki`))).pages, []);
+
+	// Archived: the wiki is read-only, on the web and over git.
+	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: true }) }));
+	assert.equal((await as(ada)(`${repo}/wiki/pages`, { method: "POST", body: JSON.stringify({ title: "Late", content: "x" }) })).status, 403);
+	await git(dir, "commit", "-q", "--allow-empty", "-m", "late");
+	await assert.rejects(git(dir, "push", "-q", wikiUrl(ada), "master"), /archived/);
+	assert.equal((await as(ada)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: false }) })).status, 403, "settings wait for unarchiving");
+	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ archived: false }) }));
+
+	// Turned off: the API and git answer 404, only admins switch it, and the pages are kept.
+	assert.equal((await as(bob)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: false }) })).status, 403);
+	assert.equal((await json<{ repo: { hasWiki: boolean } }>(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: false }) }))).repo.hasWiki, false);
+	assert.equal((await as(ada)(`${repo}/wiki`)).status, 404);
+	assert.equal((await as(ada)(`${repo}/wiki/pages/Home`)).status, 404);
+	await assert.rejects(exec("git", ["clone", "-q", wikiUrl(ada), join(root, "wiki-off")], { env }), /not found|404/);
+	await json(as(ada)(repo, { method: "PATCH", body: JSON.stringify({ hasWiki: true }) }));
+	assert.deepEqual((await json<Index>(as(null)(`${repo}/wiki`))).pages.map((p) => p.slug), ["Home", "Guide"]);
+
+	// Deleting the repository deletes its wiki's storage too.
+	const { readdir } = await import("node:fs/promises");
+	const wikiHead = (await git(dir, "rev-parse", "HEAD~1")).stdout.trim();
+	const wikiStores = async () => {
+		const found: string[] = [];
+		for (const store of (await readdir(join(root, "artifacts", "repos"))).filter((d) => d.endsWith("--wiki.git"))) {
+			const has = await exec("git", ["--git-dir", join(root, "artifacts", "repos", store), "cat-file", "-e", `${wikiHead}^{commit}`]).then(() => true, () => false);
+			if (has) found.push(store);
+		}
+		return found;
+	};
+	assert.equal((await wikiStores()).length, 1);
+	await json(as(ada)(repo, { method: "DELETE" }));
+	assert.deepEqual(await wikiStores(), []);
 });

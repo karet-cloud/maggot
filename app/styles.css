@@ -132,6 +132,10 @@ body {
 .markdown a {
 	@apply text-accent hover:underline;
 }
+/* A wiki link to a page that doesn't exist yet; following it starts the page. */
+.markdown a.wiki-missing {
+	@apply text-rose-300 underline decoration-dashed;
+}
 .markdown ul {
 	@apply list-disc pl-6;
 }

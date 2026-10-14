@@ -1,10 +1,10 @@
 // Webhooks for one repository: subscriptions and their deliveries live in the repository's coordinator,
 // next to the events they report. Deliveries are queued when an event happens and sent by the
 // coordinator's alarm: signed with HMAC-SHA256, retried with backoff, and kept for inspection.
-import type { EventType, Webhook, WebhookDelivery, WebhookEvent } from "./api.ts";
+import type { EventType, Webhook, WebhookDelivery, WebhookEvent, WikiPageChange } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
-export const WEBHOOK_EVENTS: WebhookEvent[] = ["push", "task", "merge", "release", "issues", "pull_request", "workflow_run"];
+export const WEBHOOK_EVENTS: WebhookEvent[] = ["push", "task", "merge", "release", "issues", "pull_request", "workflow_run", "gollum"];
 const MAX_HOOKS = 20;
 /** Delay before each retry; a delivery that fails them all is marked failed. */
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 3600_000, 6 * 3600_000];
@@ -374,6 +374,22 @@ function payloadsFor(type: EventType, taskId: string | null, data: Record<string
 	}
 	if (type === "ci.completed") {
 		return [{ event: "workflow_run", payload: { event: "workflow_run", action: "completed", ...data, repository: repo } }];
+	}
+	if (type === "wiki.updated") {
+		// GitHub's gollum event: pages created or edited (deleting a page sends nothing there either).
+		const pages = ((data.pages as WikiPageChange[] | undefined) ?? []).filter((p) => p.action !== "deleted");
+		if (pages.length === 0) return [];
+		return [
+			{
+				event: "gollum",
+				payload: {
+					event: "gollum",
+					pages: pages.map((p) => ({ ...p, html_url: `${repository.url}/wiki/${encodeURIComponent(p.page_name)}` })),
+					sender: data.actor ?? null,
+					repository: repo,
+				},
+			},
+		];
 	}
 	if (type.startsWith("issue.")) {
 		return [{ event: "issues", payload: { event: "issues", action: type.slice("issue.".length), ...data, repository: repo } }];

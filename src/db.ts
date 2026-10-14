@@ -83,6 +83,8 @@ const COLUMNS = [
 	`alter table "repo" add column "forkOf" text references "repo" ("id") on delete set null`,
 	// Archived repositories are read-only.
 	`alter table "repo" add column "archivedAt" text`,
+	// The wiki is on unless an admin turned it off (its pages are kept either way).
+	`alter table "repo" add column "hasWiki" integer not null default 1`,
 	// The commit whose "fixes #n" closed the issue, when one did.
 	`alter table "issue" add column "closedByCommit" text`,
 	// Pull requests share the issue table (and its numbers).
@@ -140,6 +142,8 @@ export interface RepoRow {
 	forkOf: string | null;
 	/** When it was archived (made read-only), or null. */
 	archivedAt: string | null;
+	/** 1 while the wiki is on, 0 once an admin turned it off. */
+	hasWiki: number;
 	/**
 	 * The viewer's access, when the row was read for one: 0 none, 1 read, 2 write, 3 admin (public
 	 * visibility aside). See `accessLevel`.
@@ -162,12 +166,15 @@ export interface RepoListing extends RepoRow {
 	openPulls: number;
 }
 
-/** GitHub's rule: letters, digits, '.', '-', '_'; not "." or "..", and not ending in ".git". */
+/**
+ * GitHub's rule: letters, digits, '.', '-', '_'; not "." or "..", and not ending in ".git" or ".wiki"
+ * (`<name>.wiki.git` is the repository's wiki, so no repository may be called `<name>.wiki`).
+ */
 const REPO_NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
 export function assertRepoName(name: string): string {
-	if (!REPO_NAME.test(name) || name === "." || name === ".." || name.toLowerCase().endsWith(".git")) {
-		throw new HttpError(400, "INVALID_NAME", "Repository names are 1-100 letters, digits, '.', '-' or '_', and can't end in .git.");
+	if (!REPO_NAME.test(name) || name === "." || name === ".." || /\.(git|wiki)$/i.test(name)) {
+		throw new HttpError(400, "INVALID_NAME", "Repository names are 1-100 letters, digits, '.', '-' or '_', and can't end in .git or .wiki.");
 	}
 	return name;
 }
@@ -372,7 +379,8 @@ export async function setRepoBytes(database: D1Database, id: string, bytes: numb
 	await database.prepare(`update "repo" set "bytes" = ? where "id" = ?`).bind(bytes, id).run();
 }
 
-export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null }): Promise<void> {
+export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean }): Promise<void> {
+	if (patch.hasWiki !== undefined) await database.prepare(`update "repo" set "hasWiki" = ? where "id" = ?`).bind(patch.hasWiki ? 1 : 0, id).run();
 	if (patch.visibility !== undefined) await database.prepare(`update "repo" set "visibility" = ? where "id" = ?`).bind(patch.visibility, id).run();
 	if (patch.description !== undefined) await database.prepare(`update "repo" set "description" = ? where "id" = ?`).bind(patch.description, id).run();
 }
@@ -477,6 +485,8 @@ export function toRepoInfo(row: RepoRow & Partial<RepoListing>, origin: string, 
 		archivedAt: row.archivedAt ?? null,
 		openIssues: row.openIssues ?? 0,
 		openPulls: row.openPulls ?? 0,
+		hasWiki: row.hasWiki !== 0,
+		wikiUrl: `${origin}/${row.owner}/${row.name}.wiki.git`,
 	};
 }
 
