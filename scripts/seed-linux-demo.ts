@@ -65,7 +65,6 @@ if (existing.ok) {
 
 if (!populated) {
 	const scratch = await mkdtemp(join(tmpdir(), "maggot-linux-seed-"));
-	let tokenId: string | undefined;
 	try {
 		const mirror = join(scratch, "linux.git");
 		const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
@@ -78,24 +77,20 @@ if (!populated) {
 			const created = await request("/api/repos", { name: "linux", visibility: "public", defaultBranch: "master", readme: false, description: "Linux kernel source mirror of https://github.com/torvalds/linux — master, recent shallow history. Upstream copyright and licensing apply." }, { cookie });
 			if (!created.ok) await failure(created, "Create public Linux mirror");
 		}
-		const issued = await request("/api/tokens", { name: "Temporary Linux seed" }, { cookie });
-		if (!issued.ok) await failure(issued, "Issue seed token");
-		const credentials = await issued.json() as { token: string; info: { id: string } };
-		tokenId = credentials.info.id;
+		const issued = await request(`${repoPath}/credentials`, { scope: "write", ttlSeconds: 300 }, { authorization: `Bearer ${adminKey}` });
+		if (!issued.ok) await failure(issued, "Issue short-lived storage credentials");
+		const credentials = await issued.json() as { token: string; remote: string };
+		const remote = new URL(credentials.remote);
+		if (remote.protocol !== "https:" || !remote.hostname.endsWith(".artifacts.cloudflare.net") || remote.username || remote.password) throw new Error("Unexpected storage Git remote");
 		const askpass = join(scratch, "askpass.cjs");
 		await writeFile(askpass, '#!/usr/bin/env node\nprocess.stdout.write(process.argv[2].toLowerCase().includes("username") ? "maggot-mirror" : process.env.MAGGOT_PUSH_TOKEN);\n', { mode: 0o700 });
-		await exec("git", ["-C", mirror, "push", "--quiet", `${base}/maggot-mirror/linux.git`, "master:master"], { env: { ...env, GIT_ASKPASS: askpass, MAGGOT_PUSH_TOKEN: credentials.token }, timeout: 300_000 });
+		await exec("git", ["-C", mirror, "push", "--quiet", credentials.remote, "master:master"], { env: { ...env, GIT_ASKPASS: askpass, MAGGOT_PUSH_TOKEN: credentials.token.split("?expires=")[0] }, timeout: 300_000 });
 	} finally {
-		try {
-			if (tokenId) {
-				const revoked = await request(`/api/tokens/${encodeURIComponent(tokenId)}`, undefined, { cookie }, "DELETE");
-				if (!revoked.ok) await failure(revoked, "Revoke seed token");
-			}
-		} finally {
-			await rm(scratch, { recursive: true, force: true });
-		}
+		await rm(scratch, { recursive: true, force: true });
 	}
 }
+const recount = await request(`${repoPath}/storage/recount`, {}, { authorization: `Bearer ${adminKey}` });
+if (!recount.ok) await failure(recount, "Recount Linux storage and refresh views");
 const tree = await rootTree();
 if (!tree.commit || !tree.entries.some(entry => entry.name === "README") || !tree.entries.some(entry => entry.name === "kernel")) throw new Error("Public Linux mirror has no usable kernel source tree");
 const readme = await request(`${repoPath}/files/README?ref=${encodeURIComponent(tree.commit)}`);

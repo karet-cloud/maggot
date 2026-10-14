@@ -1033,9 +1033,28 @@ repo.delete("/", async (c) => {
 // Admin only: these are the storage backend's own credentials, so pushes with them skip maggot's limits.
 repo.post("/credentials", async (c) => {
 	requireAdmin(c);
-	const { scope } = (await c.req.json().catch(() => ({}))) as { scope?: "read" | "write" };
+	const { scope, ttlSeconds } = (await c.req.json().catch(() => ({}))) as { scope?: "read" | "write"; ttlSeconds?: number };
 	if (scope !== undefined && scope !== "read" && scope !== "write") throw new HttpError(400, "INVALID_INPUT", "scope is read or write");
-	return c.json(await project(c).repoAccess(scope));
+	if (ttlSeconds !== undefined && (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 30 * 24 * 3600)) throw new HttpError(400, "INVALID_INPUT", "ttlSeconds is an integer from 1 to 2592000");
+	return c.json(await project(c).repoAccess(scope, ttlSeconds));
+});
+
+
+// After an instance administrator pushes directly to storage, restore quota accounting and refresh views.
+repo.post("/storage/recount", async (c) => {
+	requireAdmin(c);
+	const row = userRepo(c);
+	const limits = policy(c.env);
+	const used = await usage(db(c.env), row.ownerId);
+	const room = Math.max(0, Math.min(limits.repoBytes, limits.userBytes - used.bytes + row.bytes));
+	let size = await measureRepository(await project(c).gitRemote("read"), room);
+	// Code and wiki uploads share the same quota, including a wiki that is currently hidden.
+	const wiki = await project(c).wikiRemote("read");
+	if (wiki && size <= room) size += await measureRepository(wiki, room - size);
+	await setRepoBytes(db(c.env), row.id, size);
+	if (size > room) throw new HttpError(403, "QUOTA_EXCEEDED", "The repository exceeds its storage quota");
+	await project(c).pushed();
+	return c.json({ bytes: size });
 });
 
 repo.get("/queue", async (c) => c.json({ queue: await project(c).mergeQueue() }));
