@@ -46,7 +46,12 @@ import { Route as OwnerRepoPullNumberRouteImport } from './routes/$owner.$repo.p
 import { Route as OwnerRepoPullsIndexRouteImport } from './routes/$owner.$repo.pulls.index'
 import { Route as OwnerRepoPullsNewRouteImport } from './routes/$owner.$repo.pulls.new'
 import { Route as OwnerRepoTTaskRouteImport } from './routes/$owner.$repo.t.$task'
+import { Route as OwnerRepoWikiIndexRouteImport } from './routes/$owner.$repo.wiki.index'
+import { Route as OwnerRepoWikiPageRouteImport } from './routes/$owner.$repo.wiki.$page'
+import { Route as OwnerRepoWikiChar91_newChar93RouteImport } from './routes/$owner.$repo.wiki.[_new]'
 import { Route as OwnerRepoActionsRunsNumberRouteImport } from './routes/$owner.$repo.actions.runs.$number'
+import { Route as OwnerRepoWikiChar91_editChar93PageRouteImport } from './routes/$owner.$repo.wiki.[_edit].$page'
+import { Route as OwnerRepoWikiChar91_historyChar93PageRouteImport } from './routes/$owner.$repo.wiki.[_history].$page'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -233,10 +238,38 @@ const OwnerRepoTTaskRoute = OwnerRepoTTaskRouteImport.update({
   path: '/t/$task',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
+const OwnerRepoWikiIndexRoute = OwnerRepoWikiIndexRouteImport.update({
+  id: '/wiki/',
+  path: '/wiki/',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoWikiPageRoute = OwnerRepoWikiPageRouteImport.update({
+  id: '/wiki/$page',
+  path: '/wiki/$page',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoWikiChar91_newChar93Route =
+  OwnerRepoWikiChar91_newChar93RouteImport.update({
+    id: '/wiki/_new',
+    path: '/wiki/_new',
+    getParentRoute: () => OwnerRepoRoute,
+  } as any)
 const OwnerRepoActionsRunsNumberRoute =
   OwnerRepoActionsRunsNumberRouteImport.update({
     id: '/actions/runs/$number',
     path: '/actions/runs/$number',
+    getParentRoute: () => OwnerRepoRoute,
+  } as any)
+const OwnerRepoWikiChar91_editChar93PageRoute =
+  OwnerRepoWikiChar91_editChar93PageRouteImport.update({
+    id: '/wiki/_edit/$page',
+    path: '/wiki/_edit/$page',
+    getParentRoute: () => OwnerRepoRoute,
+  } as any)
+const OwnerRepoWikiChar91_historyChar93PageRoute =
+  OwnerRepoWikiChar91_historyChar93PageRouteImport.update({
+    id: '/wiki/_history/$page',
+    path: '/wiki/_history/$page',
     getParentRoute: () => OwnerRepoRoute,
   } as any)
 
@@ -275,10 +308,15 @@ export interface FileRoutesByFullPath {
   '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
   '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/wiki/$page': typeof OwnerRepoWikiPageRoute
+  '/$owner/$repo/wiki/_new': typeof OwnerRepoWikiChar91_newChar93Route
   '/$owner/$repo/actions/': typeof OwnerRepoActionsIndexRoute
   '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
   '/$owner/$repo/pulls/': typeof OwnerRepoPullsIndexRoute
+  '/$owner/$repo/wiki/': typeof OwnerRepoWikiIndexRoute
   '/$owner/$repo/actions/runs/$number': typeof OwnerRepoActionsRunsNumberRoute
+  '/$owner/$repo/wiki/_edit/$page': typeof OwnerRepoWikiChar91_editChar93PageRoute
+  '/$owner/$repo/wiki/_history/$page': typeof OwnerRepoWikiChar91_historyChar93PageRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -314,10 +352,15 @@ export interface FileRoutesByTo {
   '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
   '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/wiki/$page': typeof OwnerRepoWikiPageRoute
+  '/$owner/$repo/wiki/_new': typeof OwnerRepoWikiChar91_newChar93Route
   '/$owner/$repo/actions': typeof OwnerRepoActionsIndexRoute
   '/$owner/$repo/issues': typeof OwnerRepoIssuesIndexRoute
   '/$owner/$repo/pulls': typeof OwnerRepoPullsIndexRoute
+  '/$owner/$repo/wiki': typeof OwnerRepoWikiIndexRoute
   '/$owner/$repo/actions/runs/$number': typeof OwnerRepoActionsRunsNumberRoute
+  '/$owner/$repo/wiki/_edit/$page': typeof OwnerRepoWikiChar91_editChar93PageRoute
+  '/$owner/$repo/wiki/_history/$page': typeof OwnerRepoWikiChar91_historyChar93PageRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -355,10 +398,15 @@ export interface FileRoutesById {
   '/$owner/$repo/pull/$number': typeof OwnerRepoPullNumberRoute
   '/$owner/$repo/pulls/new': typeof OwnerRepoPullsNewRoute
   '/$owner/$repo/t/$task': typeof OwnerRepoTTaskRoute
+  '/$owner/$repo/wiki/$page': typeof OwnerRepoWikiPageRoute
+  '/$owner/$repo/wiki/_new': typeof OwnerRepoWikiChar91_newChar93Route
   '/$owner/$repo/actions/': typeof OwnerRepoActionsIndexRoute
   '/$owner/$repo/issues/': typeof OwnerRepoIssuesIndexRoute
   '/$owner/$repo/pulls/': typeof OwnerRepoPullsIndexRoute
+  '/$owner/$repo/wiki/': typeof OwnerRepoWikiIndexRoute
   '/$owner/$repo/actions/runs/$number': typeof OwnerRepoActionsRunsNumberRoute
+  '/$owner/$repo/wiki/_edit/$page': typeof OwnerRepoWikiChar91_editChar93PageRoute
+  '/$owner/$repo/wiki/_history/$page': typeof OwnerRepoWikiChar91_historyChar93PageRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -397,10 +445,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/pull/$number'
     | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/wiki/$page'
+    | '/$owner/$repo/wiki/_new'
     | '/$owner/$repo/actions/'
     | '/$owner/$repo/issues/'
     | '/$owner/$repo/pulls/'
+    | '/$owner/$repo/wiki/'
     | '/$owner/$repo/actions/runs/$number'
+    | '/$owner/$repo/wiki/_edit/$page'
+    | '/$owner/$repo/wiki/_history/$page'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -436,10 +489,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/pull/$number'
     | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/wiki/$page'
+    | '/$owner/$repo/wiki/_new'
     | '/$owner/$repo/actions'
     | '/$owner/$repo/issues'
     | '/$owner/$repo/pulls'
+    | '/$owner/$repo/wiki'
     | '/$owner/$repo/actions/runs/$number'
+    | '/$owner/$repo/wiki/_edit/$page'
+    | '/$owner/$repo/wiki/_history/$page'
   id:
     | '__root__'
     | '/'
@@ -476,10 +534,15 @@ export interface FileRouteTypes {
     | '/$owner/$repo/pull/$number'
     | '/$owner/$repo/pulls/new'
     | '/$owner/$repo/t/$task'
+    | '/$owner/$repo/wiki/$page'
+    | '/$owner/$repo/wiki/_new'
     | '/$owner/$repo/actions/'
     | '/$owner/$repo/issues/'
     | '/$owner/$repo/pulls/'
+    | '/$owner/$repo/wiki/'
     | '/$owner/$repo/actions/runs/$number'
+    | '/$owner/$repo/wiki/_edit/$page'
+    | '/$owner/$repo/wiki/_history/$page'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -763,11 +826,46 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoTTaskRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/wiki/': {
+      id: '/$owner/$repo/wiki/'
+      path: '/wiki'
+      fullPath: '/$owner/$repo/wiki/'
+      preLoaderRoute: typeof OwnerRepoWikiIndexRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/wiki/$page': {
+      id: '/$owner/$repo/wiki/$page'
+      path: '/wiki/$page'
+      fullPath: '/$owner/$repo/wiki/$page'
+      preLoaderRoute: typeof OwnerRepoWikiPageRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/wiki/_new': {
+      id: '/$owner/$repo/wiki/_new'
+      path: '/wiki/_new'
+      fullPath: '/$owner/$repo/wiki/_new'
+      preLoaderRoute: typeof OwnerRepoWikiChar91_newChar93RouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/actions/runs/$number': {
       id: '/$owner/$repo/actions/runs/$number'
       path: '/actions/runs/$number'
       fullPath: '/$owner/$repo/actions/runs/$number'
       preLoaderRoute: typeof OwnerRepoActionsRunsNumberRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/wiki/_edit/$page': {
+      id: '/$owner/$repo/wiki/_edit/$page'
+      path: '/wiki/_edit/$page'
+      fullPath: '/$owner/$repo/wiki/_edit/$page'
+      preLoaderRoute: typeof OwnerRepoWikiChar91_editChar93PageRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/wiki/_history/$page': {
+      id: '/$owner/$repo/wiki/_history/$page'
+      path: '/wiki/_history/$page'
+      fullPath: '/$owner/$repo/wiki/_history/$page'
+      preLoaderRoute: typeof OwnerRepoWikiChar91_historyChar93PageRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
   }
@@ -791,10 +889,15 @@ interface OwnerRepoRouteChildren {
   OwnerRepoPullNumberRoute: typeof OwnerRepoPullNumberRoute
   OwnerRepoPullsNewRoute: typeof OwnerRepoPullsNewRoute
   OwnerRepoTTaskRoute: typeof OwnerRepoTTaskRoute
+  OwnerRepoWikiPageRoute: typeof OwnerRepoWikiPageRoute
+  OwnerRepoWikiChar91_newChar93Route: typeof OwnerRepoWikiChar91_newChar93Route
   OwnerRepoActionsIndexRoute: typeof OwnerRepoActionsIndexRoute
   OwnerRepoIssuesIndexRoute: typeof OwnerRepoIssuesIndexRoute
   OwnerRepoPullsIndexRoute: typeof OwnerRepoPullsIndexRoute
+  OwnerRepoWikiIndexRoute: typeof OwnerRepoWikiIndexRoute
   OwnerRepoActionsRunsNumberRoute: typeof OwnerRepoActionsRunsNumberRoute
+  OwnerRepoWikiChar91_editChar93PageRoute: typeof OwnerRepoWikiChar91_editChar93PageRoute
+  OwnerRepoWikiChar91_historyChar93PageRoute: typeof OwnerRepoWikiChar91_historyChar93PageRoute
 }
 
 const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
@@ -815,10 +918,17 @@ const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
   OwnerRepoPullNumberRoute: OwnerRepoPullNumberRoute,
   OwnerRepoPullsNewRoute: OwnerRepoPullsNewRoute,
   OwnerRepoTTaskRoute: OwnerRepoTTaskRoute,
+  OwnerRepoWikiPageRoute: OwnerRepoWikiPageRoute,
+  OwnerRepoWikiChar91_newChar93Route: OwnerRepoWikiChar91_newChar93Route,
   OwnerRepoActionsIndexRoute: OwnerRepoActionsIndexRoute,
   OwnerRepoIssuesIndexRoute: OwnerRepoIssuesIndexRoute,
   OwnerRepoPullsIndexRoute: OwnerRepoPullsIndexRoute,
+  OwnerRepoWikiIndexRoute: OwnerRepoWikiIndexRoute,
   OwnerRepoActionsRunsNumberRoute: OwnerRepoActionsRunsNumberRoute,
+  OwnerRepoWikiChar91_editChar93PageRoute:
+    OwnerRepoWikiChar91_editChar93PageRoute,
+  OwnerRepoWikiChar91_historyChar93PageRoute:
+    OwnerRepoWikiChar91_historyChar93PageRoute,
 }
 
 const OwnerRepoRouteWithChildren = OwnerRepoRoute._addFileChildren(

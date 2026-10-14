@@ -69,6 +69,12 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Pull requests", status: "done", comment: "From a branch or a fork, with conversation, commits and files tabs; merge commit or squash; conflicts named; \"fixes #n\" closes issues. Agents also land work through the merge queue." },
 			{ feature: "Code review", status: "done", comment: "Line comments gathered into a review, then comment, approve or request changes. A branch rule can require an approval from someone who can merge. No suggested changes or threaded replies yet." },
 			{ feature: "Issues", status: "done", comment: "Markdown, comments, labels, close and reopen, search, notifications, webhooks, and \"fixes #n\" closing on the default branch. No assignees or milestones yet." },
+			{
+				feature: "Wiki",
+				status: "done",
+				comment:
+					"Markdown pages in a repository of their own, edited on the web (with preview, history, rename and delete; stale edits refused) or cloned and pushed at <repo>.wiki.git over HTTPS and SSH. [[Page]] links, _Sidebar and _Footer, gollum webhooks, and a switch in Settings. Markdown only (GitHub also renders other markups), and no wiki search yet.",
+			},
 			{ feature: "Discussions", status: "missing", comment: "" },
 			{ feature: "Collaborators with write access", status: "done", comment: "Invite people with read, write or admin access; they accept from Invitations." },
 			{ feature: "Organizations and teams", status: "done", comment: "Organizations own repositories; owners administer them all and members read them all; teams grant read, write or admin to particular repositories. Members join by invitation." },
@@ -91,7 +97,7 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "Automation and integrations",
 		items: [
-			{ feature: "Webhooks", status: "done", comment: "Push (branches and tags), merge, release, issue, task and workflow_run events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
+			{ feature: "Webhooks", status: "done", comment: "Push (branches and tags), merge, release, issue, task, workflow_run and gollum (wiki) events. HMAC-signed, retried for about nine hours, with a delivery log and redeliver." },
 			{
 				feature: "Actions / built-in CI",
 				status: "partial",

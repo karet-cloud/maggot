@@ -36,7 +36,8 @@ import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "
 import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef, type TagRef } from "./git/protocol.ts";
 import { protectionFor, validPattern } from "./branch-rules.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
-import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim } from "./names.ts";
+import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim, wikiRepoName } from "./names.ts";
+import { Wiki, type SavePageInput } from "./wiki.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
@@ -44,7 +45,7 @@ import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
 import type { JobGrant } from "./ci/token.ts";
 import type { CiJob } from "./ci/job.ts";
-import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks } from "./api.ts";
+import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks, WikiIndex, WikiPage } from "./api.ts";
 
 const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
 const AGENT_TOKEN_TTL = 6 * 3600;
@@ -147,6 +148,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly code: CodeIndex;
 	private readonly hooks: Webhooks;
 	private readonly ci: CiRuns;
+	private readonly wiki: Wiki;
 	private workspace: Workspace | undefined;
 	private workspaceMerges = 0;
 	private baseToken: { token: string; expires: number } | undefined;
@@ -250,6 +252,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			},
 			wake: (at) => this.scheduleAlarm(at),
 			archived: () => this.sql.exec("SELECT 1 FROM meta WHERE key = 'archived'").toArray().length > 0,
+		});
+		this.wiki = new Wiki({
+			sql: this.sql,
+			store: this.store,
+			name: () => wikiRepoName(this.meta().name),
+			ready: (name) => this.waitReady(name),
+			assertWritable: () => this.assertWritable(),
+			history: (repo, start, path) => this.cached(`wiki-history:${start}:${path}`, () => fileHistory(repo as unknown as HistoryReader, start, path)),
+			emit: (data) => this.emit("wiki.updated", null, data as unknown as Record<string, unknown>),
 		});
 	}
 
@@ -627,6 +638,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			await Promise.all(forks.slice(i, i + 10).map((row) => this.store.delete(row.repo).catch(() => false)));
 		}
 		await this.store.delete(meta.name).catch(() => false);
+		await this.wiki.destroy();
 		for (const ws of this.ctx.getWebSockets()) ws.close(1001, "Project deleted");
 		await this.ctx.storage.deleteAlarm();
 		await this.ctx.storage.deleteAll();
@@ -1967,6 +1979,45 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		await this.ci.storage.deleteCache(id);
 	}
 
+
+	// ── Wiki ─────────────────────────────────────────────────────────────────
+
+	async wikiIndex(): Promise<WikiIndex> {
+		this.meta();
+		return this.wiki.index();
+	}
+
+	async wikiPage(slug: string): Promise<WikiPage> {
+		this.meta();
+		return this.wiki.page(slug);
+	}
+
+	async wikiHistory(slug: string, from?: string): Promise<FileHistory> {
+		this.meta();
+		return this.wiki.history(slug, from);
+	}
+
+	async wikiSave(input: SavePageInput): Promise<{ page: string; commit: string; packBytes: number }> {
+		this.meta();
+		return this.wiki.save(input);
+	}
+
+	async wikiDelete(input: Parameters<Wiki["remove"]>[0]): Promise<{ commit: string; packBytes: number }> {
+		this.meta();
+		return this.wiki.remove(input);
+	}
+
+	/** Where the Git proxy sends a clone of (or push to) the wiki; null for a clone of a wiki with no pages yet. */
+	async wikiRemote(scope: "read" | "write"): Promise<RemoteAccess | null> {
+		this.meta();
+		return this.wiki.remote(scope);
+	}
+
+	/** Called after a push to the wiki through the Git proxy. */
+	async wikiPushed(actor: string | null = null): Promise<void> {
+		this.meta();
+		await this.wiki.pushed(actor);
+	}
 
 	// ── Archiving ────────────────────────────────────────────────────────────
 

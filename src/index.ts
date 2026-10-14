@@ -67,7 +67,8 @@ import {
 } from "./db.ts";
 import { HttpError, toHttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
-import { assertProjectName } from "./names.ts";
+import { assertProjectName, wikiRepoName } from "./names.ts";
+import { WIKI_BRANCH } from "./wiki-pages.ts";
 import { measureRepository } from "./git/protocol.ts";
 import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
@@ -649,6 +650,8 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		bytes: source?.bytes ?? 0,
 		forkOf: source?.id ?? null,
 		archivedAt: null,
+		// A fork starts with a wiki of its own, empty: like GitHub, forking doesn't copy the wiki.
+		hasWiki: 1,
 	};
 	await assertCanCreateRepo(c.env, db(c.env), owner.id);
 	if (source) {
@@ -870,14 +873,15 @@ repo.get("/", async (c) => {
 repo.patch("/", async (c) => {
 	const row = c.var.repo;
 	if (!row) throw new HttpError(400, "INVALID_INPUT", "Only user repositories have settings");
-	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean }>(c);
+	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean }>(c);
+	if (input.hasWiki !== undefined && typeof input.hasWiki !== "boolean") throw new HttpError(400, "INVALID_INPUT", "hasWiki is true or false");
 	if (input.visibility !== undefined && input.visibility !== "public" && input.visibility !== "private") {
 		throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
 	}
 	if (input.archived !== undefined && typeof input.archived !== "boolean") throw new HttpError(400, "INVALID_INPUT", "archived is true or false");
 	if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "INVALID_INPUT", "name is a string");
 	// While archived, only unarchiving (and deleting or transferring, elsewhere) is allowed.
-	if (row.archivedAt && input.archived !== false && (input.visibility !== undefined || input.description !== undefined || input.name !== undefined)) {
+	if (row.archivedAt && input.archived !== false && (input.visibility !== undefined || input.description !== undefined || input.name !== undefined || input.hasWiki !== undefined)) {
 		throw new HttpError(403, "ARCHIVED", "Unarchive the repository before changing its settings");
 	}
 	if (input.name !== undefined) {
@@ -892,7 +896,11 @@ repo.patch("/", async (c) => {
 		await project(c).setArchived(input.archived);
 		await setArchived(db(c.env), row.id, input.archived);
 	}
-	await updateRepo(db(c.env), row.id, { visibility: input.visibility, description: input.description === undefined ? undefined : input.description?.trim() || null });
+	await updateRepo(db(c.env), row.id, {
+		visibility: input.visibility,
+		description: input.description === undefined ? undefined : input.description?.trim() || null,
+		hasWiki: input.hasWiki,
+	});
 	// Live sockets were authorized when they connected; after a visibility change they reconnect and are checked again.
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
 	if (input.name !== undefined) await project(c).setRepository(repositoryRef(c, row));
@@ -1168,12 +1176,7 @@ repo.post("/contents", async (c) => {
 	// Up to 25 MB of files, base64 in JSON; anything far bigger isn't read at all.
 	if (Number(c.req.header("content-length") ?? 0) > 40 * 1024 * 1024) throw new HttpError(413, "TOO_LARGE", "That's too much for one web commit");
 	const row = c.var.repo;
-	const p = c.var.principal;
-	requireVerified(c.env, p);
-	if (row) {
-		const blocked = await pushBlocked(c.env, db(c.env), row);
-		if (blocked) throw new HttpError(403, "QUOTA_EXCEEDED", blocked);
-	}
+	await requireCanCommit(c);
 	const input = await body<{
 		branch?: string;
 		baseCommit?: string | null;
@@ -1204,31 +1207,46 @@ repo.post("/contents", async (c) => {
 		// A rename keeps the file's mode (an executable stays executable).
 		return { path, content, modeFrom: f.previousPath ? normalizeRepoPath(f.previousPath) : undefined };
 	});
-	const who =
-		p.kind === "user"
-			? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` }
-			: { name: "megit", email: "admin@megit.dev" };
 	const branch = input.branch?.trim() || (await project(c).getProject()).defaultBranch;
-	// A web commit is a push: it has the push size limit, and has to fit what the repository and its
-	// owner have left.
-	const limits = policy(c.env);
-	let maxPackBytes = limits.pushBytes;
-	if (row) {
-		const used = await usage(db(c.env), row.ownerId);
-		maxPackBytes = Math.min(maxPackBytes, limits.repoBytes - row.bytes, limits.userBytes - used.bytes);
-	}
 	const result = await project(c).commitFiles({
-		maxPackBytes,
+		maxPackBytes: await webCommitRoom(c),
 		branch,
 		baseCommit: input.baseCommit,
 		newBranch: input.newBranch?.trim() || undefined,
 		changes,
 		message: message.slice(0, 10_000),
-		author: who,
+		author: webAuthor(c),
 	});
 	if (row) c.executionCtx.waitUntil(addRepoBytes(db(c.env), row.id, result.packBytes));
 	return c.json(result, 201);
 });
+
+/** Who a web commit (to the code or the wiki) is by: the signed-in user, with a no-reply address. */
+function webAuthor(c: Context<App>): { name: string; email: string } {
+	const p = c.var.principal;
+	return p.kind === "user" ? { name: p.username, email: `${p.username}@users.noreply.${new URL(c.req.url).hostname}` } : { name: "megit", email: "admin@megit.dev" };
+}
+
+/**
+ * How big a web commit's pack may be. A web commit is a push: it has the push size limit, and has to
+ * fit what the repository and its owner have left.
+ */
+async function webCommitRoom(c: Context<App>): Promise<number> {
+	const row = c.var.repo;
+	const limits = policy(c.env);
+	if (!row) return limits.pushBytes;
+	const used = await usage(db(c.env), row.ownerId);
+	return Math.min(limits.pushBytes, limits.repoBytes - row.bytes, limits.userBytes - used.bytes);
+}
+
+/** What a web commit needs before it starts: a verified email, and the repository not over its quota. */
+async function requireCanCommit(c: Context<App>) {
+	requireVerified(c.env, c.var.principal);
+	const row = c.var.repo;
+	if (!row) return;
+	const blocked = await pushBlocked(c.env, db(c.env), row);
+	if (blocked) throw new HttpError(403, "QUOTA_EXCEEDED", blocked);
+}
 
 function decodeBase64(data: string, path: string): Uint8Array {
 	try {
@@ -1262,6 +1280,124 @@ function isDotGit(part: string): boolean {
 		.replace(/[. ]+$/, "");
 	return name === ".git" || /^git~\d+$/.test(name);
 }
+
+// ── Wiki: Markdown pages in a repository of their own (see src/wiki.ts) ───────
+// Reads need read access and writes write access (the middleware above); archived repositories'
+// wikis are read-only. A wiki its admins turned off answers 404, but its pages are kept.
+
+const wiki = new Hono<App>();
+
+wiki.use("*", async (c, next) => {
+	if (c.var.repo && !c.var.repo.hasWiki) throw new HttpError(404, "NOT_FOUND", "This repository's wiki is turned off");
+	return next();
+});
+
+/** A page's text from a request: Markdown, at most the size the file editor takes. */
+function pageContent(content: unknown): string | undefined {
+	if (content === undefined) return undefined;
+	if (typeof content !== "string") throw new HttpError(400, "INVALID_INPUT", "content is the page's Markdown");
+	if (new TextEncoder().encode(content).length > MAX_EDIT_BYTES) throw new HttpError(413, "TOO_LARGE", `Pages are at most ${formatBytes(MAX_EDIT_BYTES)}; push bigger ones with git`);
+	return content;
+}
+
+function optionalText(value: unknown, name: string, max: number): string | undefined {
+	if (value === undefined || value === null) return undefined;
+	if (typeof value !== "string") throw new HttpError(400, "INVALID_INPUT", `${name} is a string`);
+	return value.slice(0, max);
+}
+
+function baseCommitOf(value: unknown): string | null | undefined {
+	if (value === undefined || value === null || (typeof value === "string" && /^[0-9a-f]{40}$/.test(value))) return value as string | null | undefined;
+	throw new HttpError(400, "INVALID_INPUT", "baseCommit is the wiki head the edit started from, or null");
+}
+
+/** A wiki change counts toward the repository's size like any other push. */
+function countWikiCommit(c: Context<App>, packBytes: number) {
+	if (c.var.repo) c.executionCtx.waitUntil(addRepoBytes(db(c.env), c.var.repo.id, packBytes));
+}
+
+wiki.get("/", async (c) => {
+	c.header("cache-control", "no-store");
+	return c.json(await project(c).wikiIndex());
+});
+
+wiki.get("/pages/:page", async (c) => {
+	c.header("cache-control", "no-store");
+	return c.json({ page: await project(c).wikiPage(c.req.param("page")) });
+});
+
+wiki.get("/pages/:page/history", async (c) => c.json(await project(c).wikiHistory(c.req.param("page"), c.req.query("from"))));
+
+// Creates a page: { title, content, message? }.
+wiki.post("/pages", async (c) => {
+	await requireCanCommit(c);
+	const input = await body<{ title?: unknown; content?: unknown; message?: unknown; baseCommit?: unknown }>(c);
+	if (typeof input.title !== "string") throw new HttpError(400, "INVALID_INPUT", "title is required");
+	const result = await project(c).wikiSave({
+		title: input.title,
+		content: pageContent(input.content ?? ""),
+		message: optionalText(input.message, "message", 10_000),
+		baseCommit: baseCommitOf(input.baseCommit),
+		author: webAuthor(c),
+		maxPackBytes: await webCommitRoom(c),
+	});
+	countWikiCommit(c, result.packBytes);
+	return c.json({ page: result.page, commit: result.commit }, 201);
+});
+
+// Edits a page, renames it (a new title), or both: { title?, content?, message?, baseCommit }.
+wiki.patch("/pages/:page", async (c) => {
+	await requireCanCommit(c);
+	const input = await body<{ title?: unknown; content?: unknown; message?: unknown; baseCommit?: unknown }>(c);
+	const result = await project(c).wikiSave({
+		page: c.req.param("page"),
+		title: optionalText(input.title, "title", 1000),
+		content: pageContent(input.content),
+		message: optionalText(input.message, "message", 10_000),
+		baseCommit: baseCommitOf(input.baseCommit),
+		author: webAuthor(c),
+		maxPackBytes: await webCommitRoom(c),
+	});
+	countWikiCommit(c, result.packBytes);
+	return c.json({ page: result.page, commit: result.commit });
+});
+
+// Deletes a page: an optional body { message?, baseCommit? }.
+wiki.delete("/pages/:page", async (c) => {
+	await requireCanCommit(c);
+	const input = (await c.req.json().catch(() => ({}))) as { message?: unknown; baseCommit?: unknown };
+	const result = await project(c).wikiDelete({
+		page: c.req.param("page"),
+		message: optionalText(input.message, "message", 10_000),
+		baseCommit: baseCommitOf(input.baseCommit),
+		author: webAuthor(c),
+		maxPackBytes: await webCommitRoom(c),
+	});
+	countWikiCommit(c, result.packBytes);
+	return c.json({ deleted: true, commit: result.commit });
+});
+
+// Raw bytes of a file in the wiki (images pages show), sandboxed like /raw.
+wiki.get("/raw", async (c) => {
+	const path = c.req.query("path")?.replace(/^\/+/, "");
+	if (!path) throw new HttpError(400, "INVALID_INPUT", "path is required");
+	const missing = () => new HttpError(404, "NOT_FOUND", `${path} not found`);
+	using store = await repoStore(c.env)
+		.get(wikiRepoName(c.var.projectId))
+		.catch((err) => {
+			throw toHttpError(err).status === 404 ? missing() : err;
+		});
+	const blob = await store.readFile({ ref: WIKI_BRANCH, path });
+	if (!blob) throw missing();
+	return c.body(blob.stream(), 200, {
+		"content-type": blob.type || "application/octet-stream",
+		"content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(path.split("/").pop() ?? "file")}`,
+		...INERT,
+		"cache-control": "private, no-cache",
+	});
+});
+
+repo.route("/wiki", wiki);
 
 // ── Code search ──────────────────────────────────────────────────────────────
 

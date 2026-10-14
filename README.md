@@ -185,6 +185,16 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   search, label filters, notifications for the owner and everyone in the conversation, `issues`
   webhooks, and the activity feed. A commit landing on the default branch (push or merge queue) that
   says "fixes #12", "closes #12" or "resolves #12" closes it. Posting is limited per user per hour.
+- **Wiki**: GitHub's model. Each repository has a wiki in a second Artifacts repo (created with its
+  first page), whose Markdown files at the root of master are the pages: "Getting Started" is
+  `Getting-Started.md`, `Home.md` is the landing page, and `_Sidebar.md` and `_Footer.md` frame every
+  page. `[[Page Name]]` and `[[text|Page Name]]` link pages (missing ones link to creating them). Pages
+  are created, edited with a preview, renamed and deleted on the web by anyone with write access (an
+  edit from a stale head is refused), with per-page history; or clone and push
+  `<origin>/<owner>/<repo>.wiki.git` over HTTPS or SSH, which counts toward the repository's size but
+  has no branch rules or Actions. Changes refresh open pages and send `gollum` webhooks. Read-only when
+  archived; forks don't copy it; admins can turn it off in Settings (it answers 404, pages are kept).
+  Repository names can't end in `.wiki`.
 - **Actions**: workflows in `.megit/workflows/*.yml` in GitHub Actions syntax (`run` steps, `needs`,
   matrices, job `if` and outputs, GitHub's expressions, JavaScript and composite actions from GitHub or the
   repository, and built-in checkout, cache and artifact actions kept in R2), run on pushes, pull
@@ -326,6 +336,11 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET / POST | `/repos/:owner/:repo/issues` | `?state=open\|closed\|all&q=&label=`; `{ title, body?, labels? }` | `IssueList` with open and closed counts; open an issue (signed in) |
 | GET / PATCH | `/repos/:owner/:repo/issues/:n` | `{ title?, body?, state?, labels? }` | the issue and its comments; edit, close or reopen (author or owner; labels: owner) |
 | POST / PATCH / DELETE | `/repos/:owner/:repo/issues/:n/comments`, `…/comments/:id` | `{ body }` | comment (signed in); edit (author); delete (author or owner) |
+| GET | `/repos/:owner/:repo/wiki` | | `WikiIndex`: the wiki's head, its pages (Home first), sidebar and footer |
+| GET | `/repos/:owner/:repo/wiki/pages/:page`, `…/history` | `?from=` (history) | `{ page }` with its Markdown and last edit; the commits that changed it |
+| POST | `/repos/:owner/:repo/wiki/pages` | `{ title, content, message? }` | creates a page (write access) → `{ page, commit }` |
+| PATCH / DELETE | `/repos/:owner/:repo/wiki/pages/:page` | `{ title?, content?, message?, baseCommit? }` | edits or renames a page, or deletes it (write access); a stale `baseCommit` is refused |
+| GET | `/repos/:owner/:repo/wiki/raw` | `?path=` | a file from the wiki (images), sandboxed |
 | GET / POST / DELETE | `/ssh/keys`, `/ssh/keys/:id` | `{ key, name? }` | list, add (an authorized_keys line) or remove your SSH keys |
 | DELETE | `/repos/:owner/:repo` | | deletes it, its agent forks and state (owner) |
 | PUT / DELETE | `/repos/:owner/:repo/star` | | star or unstar (signed in, read access) → `{ starred, stars }` |
@@ -410,6 +425,8 @@ src/git/commit.ts     Commits from the web editor: objects, trees, pack, push
 src/search.ts         Code search index (FTS5 trigram) kept in each repository's coordinator
 src/ci/               Actions: workflow parsing, runs and logs in the coordinator, job DOs, Cloudflare and Depot sandboxes
 src/hooks.ts          Webhook subscriptions, signed deliveries and retries, in the coordinator
+src/wiki.ts           Wikis: the second Artifacts repo per repository, pages, web edits and pushes
+src/wiki-pages.ts     Wiki page names, files and [[links]] (shared with the UI)
 src/archive.ts        Streaming .tar.gz / .zip of a tree
 src/protection.ts     Branch rules: push command checks, holding refs, ancestry, git report rewriting
 src/branch-rules.ts   Which rules apply to a branch (shared with the UI)

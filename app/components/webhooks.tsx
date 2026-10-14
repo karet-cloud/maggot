@@ -11,6 +11,7 @@ const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
 	{ id: "release", label: "Releases", hint: "A release was published" },
 	{ id: "issues", label: "Issues", hint: "Opened, closed, reopened, commented on" },
 	{ id: "pull_request", label: "Pull requests", hint: "Opened, reviewed, merged" },
+	{ id: "gollum", label: "Wiki", hint: "Pages created or edited (GitHub's gollum event)" },
 ];
 
 /** A repository's webhooks: add, pause, test and inspect them. */
