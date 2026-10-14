@@ -26,10 +26,10 @@ jobs:
     needs: check
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment:
       name: production
-      url: https://maggot.sarthak7u.workers.dev
+      url: https://maggot.karet.cloud
     # Never two deploys at once; a newer push waits for the running one instead of cancelling it.
     concurrency:
       group: deploy-production
@@ -48,13 +48,35 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
-      # Provision MAGGOT_API_KEY on the Worker before its first deployment; later deploys keep it.
-      - run: npx cf deploy
+      # Supply the stable key on every deploy, including a new or renamed Worker.
+      - name: Deploy
+        env:
+          MAGGOT_API_KEY: ${{ secrets.MAGGOT_API_KEY }}
+        run: |
+          if [ -z "$MAGGOT_API_KEY" ]; then
+            echo "::error::Set MAGGOT_API_KEY in the GitHub production environment secrets before deploying."
+            exit 1
+          fi
+          secret_file=$(mktemp "$RUNNER_TEMP/maggot-secrets.XXXXXX")
+          trap 'rm -f "$secret_file"' EXIT
+          node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            writeFileSync(process.argv[1], JSON.stringify({ MAGGOT_API_KEY: process.env.MAGGOT_API_KEY }), { mode: 0o600 });
+          ' "$secret_file"
+          unset MAGGOT_API_KEY
+          npx cf deploy --secrets-file "$secret_file"
       - name: Smoke test
         run: |
-          for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' https://maggot.sarthak7u.workers.dev/api/me)
+          for i in $(seq 1 30); do
+            code=$(curl --connect-timeout 5 --max-time 10 -s -o /dev/null -w '%{http_code}' https://maggot.karet.cloud/api/me) || code=000
             [ "$code" = 200 ] && echo "API up" && exit 0
             sleep 5
           done
           echo "unexpected status $code" && exit 1
+
+      - name: Seed public Linux demo
+        env:
+          MAGGOT_API_KEY: ${{ secrets.MAGGOT_API_KEY }}
+          MAGGOT_MIRROR_PASSWORD: ${{ secrets.MAGGOT_MIRROR_PASSWORD }}
+          MAGGOT_URL: https://maggot.karet.cloud
+        run: node scripts/seed-linux-demo.ts
