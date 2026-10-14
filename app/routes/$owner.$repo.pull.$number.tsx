@@ -12,7 +12,7 @@ import { Decision, PullStateBadge } from "../components/pulls.tsx";
 import { Button, cx, Empty, ErrorNote, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type IssueComment, type IssueState, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
-import { preload } from "../lib/queries.ts";
+import { diffQuery, preload } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { tab?: "commits" | "files" };
@@ -23,11 +23,11 @@ const pullFilesQuery = (project: string, number: number) => queryOptions({ query
 export const Route = createFileRoute("/$owner/$repo/pull/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "commits" || s.tab === "files" ? { tab: s.tab } : {}),
 	loaderDeps: ({ search }) => ({ tab: search.tab }),
-	// The full diff is costly to work out, so a hover fetches it only for links to the Files tab.
+	// The full diff is costly to work out: a hover fetches it only for links to the Files tab, and only the browser does.
 	loader: ({ context, params, deps }) => {
 		const project = `${params.owner}/${params.repo}`;
 		const number = Number(params.number);
-		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), deps.tab === "files" && pullFilesQuery(project, number)) : undefined;
+		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), deps.tab === "files" && diffQuery(false, pullFilesQuery(project, number))) : undefined;
 	},
 	component: PullPage,
 });

@@ -1,3 +1,4 @@
+import { useHydrated } from "@tanstack/react-router";
 import { Check, Copy, LoaderCircle, X } from "lucide-react";
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
 import type { TaskStatus } from "../lib/api.ts";
@@ -15,16 +16,22 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
 	);
 }
 
+/**
+ * A relative time. Server-rendered pages (and the browser's first pass over them) show the UTC date,
+ * which both sides agree on; it turns relative once hydrated, in the visitor's own clock and locale.
+ */
 export function TimeAgo({ at, className }: { at: string | number; className?: string }) {
+	const hydrated = useHydrated();
 	const [now, setNow] = useState(() => Date.now());
 	useEffect(() => {
+		setNow(Date.now());
 		const t = setInterval(() => setNow(Date.now()), 15_000);
 		return () => clearInterval(t);
 	}, []);
 	const date = new Date(typeof at === "number" ? at * 1000 : at);
 	return (
-		<time dateTime={date.toISOString()} title={date.toLocaleString()} className={className} suppressHydrationWarning>
-			{timeAgo(at, now)}
+		<time dateTime={date.toISOString()} title={hydrated ? date.toLocaleString() : undefined} className={className}>
+			{hydrated ? timeAgo(at, now) : date.toISOString().slice(0, 10)}
 		</time>
 	);
 }

@@ -7,7 +7,7 @@ import { BranchSelect, branchNamesQuery } from "../components/refs.tsx";
 import { Empty, ErrorNote, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
-import { preload, projectQuery } from "../lib/queries.ts";
+import { diffQuery, preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { base?: string; head?: string };
 
@@ -21,8 +21,8 @@ export const Route = createFileRoute("/$owner/$repo/compare")({
 		const project = `${params.owner}/${params.repo}`;
 		// Without a base in the URL, compare against the default branch if the layout already knows it.
 		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
-		// A comparison is a diff, costly to work out: fetched on the visit, not the hover.
-		return preload(context.queryClient, branchNamesQuery(project), !hover && Boolean(base && deps.head) && compareQuery(project, base as string, deps.head as string));
+		// A comparison is a diff, costly to work out: fetched by the browser on the visit, not the hover.
+		return preload(context.queryClient, branchNamesQuery(project), Boolean(base && deps.head) && diffQuery(hover, compareQuery(project, base as string, deps.head as string)));
 	},
 	component: ComparePage,
 });

@@ -1,5 +1,5 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { Check, Copy, KeySquare, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { SettingsNav } from "../components/settings-nav.tsx";
@@ -22,6 +22,8 @@ function SshKeys() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
 	const info = useQuery(infoQuery);
+	// The page's own origin, which the server render knows too.
+	const { origin } = useRouter();
 	const list = useQuery({ ...keysQuery, enabled: Boolean(viewer.data) });
 	const [key, setKey] = useState("");
 	const [name, setName] = useState("");
@@ -51,7 +53,6 @@ function SshKeys() {
 		);
 	}
 	const host = info.data?.host ?? "maggot";
-	const origin = typeof location === "undefined" ? "" : location.origin;
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
 			<h1 className="text-lg font-semibold">Settings</h1>

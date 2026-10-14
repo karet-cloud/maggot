@@ -1,4 +1,5 @@
-// Browser client for the maggot API. Same origin; the session cookie set at login authenticates it.
+// Client for the maggot API. Same origin; the session cookie set at login authenticates it. While a page
+// renders on the server, the calls go to the API in-process as the visitor (./ssr.ts).
 import type {
 	Branches,
 	CodeSearch,
@@ -58,6 +59,7 @@ import type {
 	WikiIndex,
 	WikiPage,
 } from "../../src/api.ts";
+import { apiFetch } from "./ssr.ts";
 
 export type * from "../../src/api.ts";
 
@@ -72,9 +74,8 @@ export class ApiError extends Error {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-	const res = await fetch(`/api${path}`, {
+	const res = await apiFetch(path, {
 		method,
-		credentials: "same-origin",
 		headers: body === undefined ? undefined : { "content-type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
@@ -332,7 +333,7 @@ export const api = {
 		call<{ tree: Tree }>("GET", `${p(project)}/tree?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`).then((r) => r.tree),
 	file: async (project: string, path: string, ref?: string) => {
 		const q = ref ? `?${new URLSearchParams({ ref })}` : "";
-		const res = await fetch(`/api${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
+		const res = await apiFetch(`${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
 		if (!res.ok) {
 			const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
 			throw new ApiError(res.status, json?.error?.code ?? "HTTP_ERROR", json?.error?.message ?? res.statusText);

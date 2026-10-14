@@ -4,14 +4,18 @@ import { WikiGate, WikiPageView, wikiPageQuery, wikiQueries, wikiQuery, WikiShel
 import { Panel } from "../components/ui.tsx";
 import { repoParams } from "../lib/api.ts";
 import { preload } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 
 // The wiki's landing page: Home, or the list of pages when there's no Home, or the welcome when there's nothing yet.
 export const Route = createFileRoute("/$owner/$repo/wiki/")({
-	loader: ({ context, params }) => {
+	loader: async ({ context, params }) => {
 		const project = `${params.owner}/${params.repo}`;
-		// Home's exact name is known once the index is cached.
-		const home = context.queryClient.getQueryData(wikiQuery(project).queryKey)?.pages.find(isHome);
-		return preload(context.queryClient, ...wikiQueries(context.queryClient, project), home && wikiPageQuery(project, home.slug));
+		// Home's exact name is known once the index is cached; a server render waits for the index to find it.
+		const home = () => context.queryClient.getQueryData(wikiQuery(project).queryKey)?.pages.find(isHome);
+		const cached = home();
+		await preload(context.queryClient, ...wikiQueries(context.queryClient, project), cached && wikiPageQuery(project, cached.slug));
+		const found = isServer && !cached && home();
+		if (found) await preload(context.queryClient, wikiPageQuery(project, found.slug));
 	},
 	component: WikiHome,
 });
