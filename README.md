@@ -496,8 +496,10 @@ npm run typecheck
 - Large repos: the coordinator keeps an in-memory clone, so repos near the 128 MB Worker memory
   limit need ArtifactFS or a Sandbox-backed merge.
 
-The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it from
-`torvalds/linux` on `master` with the latest 100 commits and the full source tree. Set a stable
+The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it with a shallow Git clone and push from
+`torvalds/linux` on `master` (depth 100) and the full source tree. The Artifacts URL import service
+currently fails for Linux. The production transfer limit is 512 MiB (`MAGGOT_POLICY.pushBytes`)
+to accommodate its pack. Set a stable
 `MAGGOT_MIRROR_PASSWORD` production environment secret for the mirror service account. Existing
 mirrors are left unchanged; this is a demo snapshot, not continuous upstream synchronization.
 The repository creation API accepts optional `importDepth` (1–10,000) for shallow imports;
