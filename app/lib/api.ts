@@ -308,8 +308,12 @@ export const api = {
 	wikiRawUrl: (project: string, path: string) => `/api${p(project)}/wiki/raw?${new URLSearchParams({ path })}`,
 	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
 	forks: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/forks`).then((r) => r.repos),
-	/** This repository and the rest of its fork network that the caller can read: where pull requests into it can come from. */
-	network: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/network`).then((r) => r.repos),
+	/**
+	 * This repository and the rest of its fork network that the caller can read: where pull requests into it can come from.
+	 * `q` searches owner/name (the list stops at 100); `owner` lists what `owner:branch` can mean.
+	 */
+	network: (project: string, filter: { q?: string; owner?: string } = {}) =>
+		call<{ repos: RepoInfo[] }>("GET", `${p(project)}/network?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`).then((r) => r.repos),
 	fork: (project: string, name: string) => call<{ repo: RepoInfo }>("POST", `${p(project)}/forks`, { name }).then((r) => r.repo),
 
 	tokens: () => call<{ tokens: TokenInfo[] }>("GET", "/tokens").then((r) => r.tokens),
@@ -368,7 +372,7 @@ export const keys = {
 	config: ["config"] as const,
 	repos: (filter: string | RepoFilter = "") => ["repos", filter] as const,
 	forks: (project: string) => ["project", project, "forks"] as const,
-	network: (project: string) => ["project", project, "network"] as const,
+	network: (project: string, filter: { q?: string; owner?: string } = {}) => ["project", project, "network", filter.q ?? "", filter.owner ?? ""] as const,
 	hooks: (project: string) => ["project", project, "hooks"] as const,
 	deliveries: (project: string, id: string) => ["project", project, "hooks", id] as const,
 	search: (project: string, q: string) => ["project", project, "search", q] as const,

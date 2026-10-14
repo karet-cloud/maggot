@@ -14,6 +14,7 @@ import {
 	getListing,
 	insertRepo,
 	listNetwork,
+	ownerInNetwork,
 	listRepos,
 	listTokens,
 	addRepoBytes,
@@ -46,6 +47,7 @@ import {
 	addReview,
 	approvedAt,
 	getPull,
+	hiddenHeads,
 	listPulls,
 	listReviews,
 	markPullMerged,
@@ -942,10 +944,15 @@ repo.get("/forks", async (c) => {
 });
 
 // The fork network the caller can see (this repository, what it was forked from, and forks of any of them):
-// where a pull request into this repository can come from.
+// where a pull request into this repository can come from. This repository first, then the newest;
+// `?q=` searches owner/name, and `?owner=` lists what `owner:branch` can mean.
 repo.get("/network", async (c) => {
 	const p = c.var.principal;
-	const rows = await listNetwork(db(c.env), userRepo(c).id, viewerId(p), intParam(c.req.query("limit"), 100, 500));
+	const owner = c.req.query("owner");
+	const everything = p.kind === "admin";
+	const rows = owner
+		? await ownerInNetwork(db(c.env), userRepo(c).id, owner, viewerId(p), everything)
+		: await listNetwork(db(c.env), userRepo(c).id, viewerId(p), { limit: intParam(c.req.query("limit"), 100, 500), query: c.req.query("q")?.trim().slice(0, 200) || undefined, everything });
 	return c.json({ repos: rows.filter((r) => canRead(p, r)).map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
@@ -1726,19 +1733,23 @@ repo.delete("/issues/:number/comments/:id", async (c) => {
 /**
  * Where a pull request's changes come from: a branch of this repository, or of `headRepo` ("owner/name"),
  * which has to be in its fork network (forked from it, or from what it was forked from, at any depth) and
- * readable by the caller. `head` may also say `owner:branch`, as on GitHub: that owner's repository in the network.
+ * readable by the caller. `head` may also say `owner:branch`, as on GitHub: that owner's one repository in the
+ * network (the caller has to pass `headRepo` if they have more). `task:<id>` is never an owner: agent forks aren't heads.
  */
 async function pullHead(c: Context<App>, headRepo: unknown, head: unknown): Promise<{ fork: RepoRow | null; branch: string }> {
 	const row = userRepo(c);
 	const p = c.var.principal;
-	const colon = typeof head === "string" ? head.indexOf(":") : -1;
+	const colon = typeof head === "string" && !head.startsWith("task:") ? head.indexOf(":") : -1;
 	const owner = colon >= 0 ? (head as string).slice(0, colon).toLowerCase() : null;
 	const branch = pullBranch(colon >= 0 ? (head as string).slice(colon + 1) : head, "head");
 	if (headRepo === undefined || headRepo === null || headRepo === "") {
-		if (owner === null || owner === row.owner) return { fork: null, branch };
-		const theirs = (await listNetwork(db(c.env), row.id, viewerId(p), 500)).find((r) => r.owner === owner && canRead(p, r));
-		if (!theirs) throw new HttpError(404, "NOT_FOUND", `${owner} has no fork of ${row.owner}/${row.name} that you can see`);
-		return { fork: theirs, branch };
+		if (owner === null) return { fork: null, branch };
+		const theirs = (await ownerInNetwork(db(c.env), row.id, owner, viewerId(p), p.kind === "admin")).filter((r) => canRead(p, r));
+		if (theirs.length === 0) throw new HttpError(404, "NOT_FOUND", `${owner} has no fork of ${row.owner}/${row.name} that you can see`);
+		if (theirs.length > 1) {
+			throw new HttpError(400, "AMBIGUOUS_HEAD", `${owner} has ${theirs.length} repositories in this fork network, so ${owner}:${branch} is ambiguous: pass headRepo (owner/name)`);
+		}
+		return { fork: theirs[0].id === row.id ? null : theirs[0], branch };
 	}
 	if (typeof headRepo !== "string" || !/^[^/]+\/[^/]+$/.test(headRepo)) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
 	const [forkOwner, name] = headRepo.split("/");
@@ -1746,7 +1757,7 @@ async function pullHead(c: Context<App>, headRepo: unknown, head: unknown): Prom
 	const fork = await findRepo(db(c.env), forkOwner, name, viewerId(p));
 	if (!fork || !canRead(p, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
 	if (fork.id === row.id) return { fork: null, branch };
-	if (!(await sameNetwork(db(c.env), row.id, fork.id))) {
+	if (!(await sameNetwork(db(c.env), row, fork))) {
 		throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't in the fork network of ${row.owner}/${row.name}`);
 	}
 	return { fork, branch };
@@ -1873,10 +1884,13 @@ function reopenedPull(c: Context<App>, row: RepoRow, number: number) {
 	);
 }
 
+/** Whose eyes pull requests are shown to: private forks they can't read stay unnamed. */
+const pullViewer = (p: Principal) => ({ viewerId: viewerId(p), everything: p.kind === "admin" });
+
 repo.get("/pulls", async (c) => {
 	const state = c.req.query("state");
 	return c.json(
-		await listPulls(db(c.env), userRepo(c).id, {
+		await listPulls(db(c.env), userRepo(c).id, pullViewer(c.var.principal), {
 			state: state === "closed" || state === "all" ? state : "open",
 			query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 			limit: intParam(c.req.query("limit"), 50, 200),
@@ -1921,13 +1935,14 @@ repo.get("/pulls/:number", async (c) => {
 	const p = c.var.principal;
 	const owner = canWrite(p, row);
 	const me = viewerId(p);
-	const [{ comments, earlier }, review, required] = await Promise.all([
+	const [{ comments, earlier }, review, required, hidden] = await Promise.all([
 		listComments(db(c.env), pull.id, { id: me, owner }),
 		listReviews(db(c.env), pull.id),
 		mergeRequirements(c, pull.baseBranch),
+		hiddenHeads(db(c.env), [pull], pullViewer(p)),
 	]);
 	return c.json({
-		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required),
+		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required, hidden),
 		comments,
 		earlier,
 		reviews: review.reviews,

@@ -33,11 +33,16 @@ export function sqlStorage(db: DatabaseSync): SqlStorage {
 export function d1Database(db: DatabaseSync): D1Database {
 	const statement = (query: string, args: unknown[] = []) => {
 		const params = args as (string | number | null)[];
-		const run = () => ({ meta: { changes: Number(db.prepare(query).run(...params).changes) }, results: [] });
+		// Like D1, a statement that returns rows gives them in `results`, whether it was run or listed.
+		const run = () => {
+			const stmt = db.prepare(query);
+			if (stmt.columns().length > 0) return { results: stmt.all(...params), meta: { changes: 0 } };
+			return { results: [], meta: { changes: Number(stmt.run(...params).changes) } };
+		};
 		return {
 			bind: (...next: unknown[]) => statement(query, next),
 			first: async <T>() => (db.prepare(query).get(...params) as T | undefined) ?? null,
-			all: async () => ({ results: db.prepare(query).all(...params), meta: {} }),
+			all: async () => run(),
 			run: async () => run(),
 			runSync: run,
 		};

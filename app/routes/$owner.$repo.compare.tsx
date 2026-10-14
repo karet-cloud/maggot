@@ -50,10 +50,10 @@ function ComparePage() {
 				<BranchSelect project={project} value={base} onChange={(b) => void navigate({ search: { ...search, base: b } })} branchesOnly />
 				<span>…</span>
 				<span>compare</span>
-				<HeadPicker project={project} network={resolved.network} repo={resolved.repo} branch={head} onChange={(h) => void navigate({ search: { base: search.base, ...h } })} />
+				<HeadPicker project={project} repo={resolved.repo} branch={head} onChange={(h) => void navigate({ search: { base: search.base, ...h } })} />
 			</div>
-			{resolved.unknown ? (
-				<Empty icon={<GitCompareArrows className="size-6" />} title={`${resolved.unknown} has no fork of ${project} that you can see`} />
+			{resolved.problem ? (
+				<Empty icon={<GitCompareArrows className="size-6" />} title={resolved.problem === "ambiguous" ? `${resolved.owner} has more than one repository in this fork network; pick one` : `${resolved.owner} has no fork of ${project} that you can see`} />
 			) : (
 				!head && <Empty icon={<GitCompareArrows className="size-6" />} title="Pick a branch to compare" />
 			)}

@@ -1,5 +1,7 @@
-import { useQuery } from "@tanstack/react-query";
-import { api, keys, type RepoInfo } from "../lib/api.ts";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useDeferredValue, useState } from "react";
+import { api, keys } from "../lib/api.ts";
+import { headSearch, ownerRepo, parseHead, sameRepo, type HeadSearch } from "../lib/pull-head.ts";
 
 /**
  * Picks a branch of the project repo or a task fork (`task:<id>`). An unlisted value (a commit, or
@@ -67,83 +69,79 @@ export function BranchSelect({
 	);
 }
 
-/** A pull request's head as a URL gives it: `head` is a branch here, `owner:branch` (GitHub's syntax), or a branch of `headRepo`. */
-export interface HeadSearch {
-	head?: string;
-	headRepo?: string;
-}
-
-const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-const ownerOf = (repo: string) => repo.split("/")[0].toLowerCase();
-
 /**
- * Resolves a head from the URL against `project`'s fork network (`repo` is `owner/name`; `fork` is set when
- * that isn't `project`). `repo` is undefined while the network loads; `unknown` is an `owner:` with nothing
- * in the network the caller can read.
+ * Resolves a head from the URL (`repo` is `owner/name`; `fork` is set when that isn't `project`). An
+ * `owner:` is looked up on the server, so big networks resolve too; `repo` is undefined while it loads,
+ * and `problem` says when that owner has no readable repository in the network, or more than one.
  */
 export function usePullHead(project: string, search: HeadSearch) {
-	const network = useQuery({ queryKey: keys.network(project), queryFn: () => api.network(project), staleTime: 60_000 });
-	const colon = search.head?.indexOf(":") ?? -1;
-	const owner = colon >= 0 ? search.head?.slice(0, colon).toLowerCase() : undefined;
-	const branch = (colon >= 0 ? search.head?.slice(colon + 1) : search.head) || undefined;
-	let repo: string | undefined = search.headRepo ?? project;
-	if (!search.headRepo && owner && owner !== ownerOf(project)) repo = network.data?.find((r) => r.owner.toLowerCase() === owner)?.fullName;
-	return {
-		repo,
-		fork: repo && !same(repo, project) ? repo : undefined,
-		branch,
-		unknown: !repo && network.data ? owner : undefined,
-		network: network.data ?? [],
-		error: network.error,
-	};
+	const { owner, branch } = parseHead(search.head);
+	const byOwner = !search.headRepo && owner !== undefined;
+	const candidates = useQuery({
+		queryKey: keys.network(project, { owner }),
+		queryFn: () => api.network(project, { owner }),
+		enabled: byOwner,
+		staleTime: 60_000,
+	});
+	const picked = byOwner && candidates.data ? ownerRepo(candidates.data) : {};
+	const repo = search.headRepo ?? (byOwner ? picked.repo : project);
+	return { repo, fork: repo && !sameRepo(repo, project) ? repo : undefined, branch, owner, problem: picked.problem, error: candidates.error };
 }
 
-/** The URL for a head: `branch` here, `owner:branch` when that owner has one repository in the network, else `headRepo` too. */
-export function headSearch(project: string, network: RepoInfo[], repo: string, branch: string | undefined): HeadSearch {
-	if (same(repo, project)) return { head: branch, headRepo: undefined };
-	const owner = ownerOf(repo);
-	const unique = owner !== ownerOf(project) && network.filter((r) => r.owner.toLowerCase() === owner).length === 1;
-	return unique ? { head: `${repo.split("/")[0]}:${branch ?? ""}`, headRepo: undefined } : { head: branch, headRepo: repo };
-}
+/** Past this many, the head repository list gets its search (the server lists up to 100). */
+const NETWORK_SEARCH_AT = 20;
 
 /**
  * Picks where a pull request's changes come from: `project` or another repository in its fork network
  * that the caller can read, then a branch of it. Another repository starts on its own default branch.
+ * Big networks get a search, done on the server, so no fork is out of reach.
  */
 export function HeadPicker({
 	project,
-	network,
 	repo,
 	branch,
 	onChange,
 	branchesOnly,
 }: {
 	project: string;
-	network: RepoInfo[];
 	repo: string | undefined;
 	branch: string | undefined;
 	onChange: (head: HeadSearch) => void;
 	branchesOnly?: boolean;
 }) {
-	const crossRepo = Boolean(repo && !same(repo, project));
+	const [q, setQ] = useState("");
+	const query = useDeferredValue(q.trim());
+	const network = useQuery({ queryKey: keys.network(project, { q: query }), queryFn: () => api.network(project, { q: query }), staleTime: 60_000, placeholderData: keepPreviousData });
+	const repos = network.data ?? [];
+	const crossRepo = Boolean(repo && !sameRepo(repo, project));
+	const searching = Boolean(query) || repos.length >= NETWORK_SEARCH_AT;
 	return (
 		<>
-			{(network.length > 1 || crossRepo) && (
+			{searching && (
+				<input
+					value={q}
+					onChange={(e) => setQ(e.target.value)}
+					placeholder="Find a fork…"
+					aria-label="Find a head repository"
+					className="w-32 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 font-mono text-xs text-fg focus:border-accent focus:outline-none"
+				/>
+			)}
+			{(repos.length > 1 || crossRepo || searching) && (
 				<select
 					value={repo ?? ""}
 					aria-label="Head repository"
 					onChange={(e) => {
-						const next = network.find((r) => r.fullName === e.target.value);
-						if (next) onChange(headSearch(project, network, next.fullName, same(next.fullName, project) ? undefined : next.defaultBranch));
+						const next = repos.find((r) => r.fullName === e.target.value);
+						if (next) onChange(headSearch(project, next.fullName, sameRepo(next.fullName, project) ? undefined : next.defaultBranch));
 					}}
 					className="max-w-72 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 font-mono text-xs text-fg focus:border-accent focus:outline-none"
 				>
 					{!repo && <option value="">…</option>}
-					{repo && !network.some((r) => r.fullName === repo) && <option value={repo}>{repo}</option>}
-					{network.map((r) => (
+					{repo && !repos.some((r) => r.fullName === repo) && <option value={repo}>{repo}</option>}
+					{repos.map((r) => (
 						<option key={r.fullName} value={r.fullName}>
 							{r.fullName}
-							{same(r.fullName, project) ? "" : r.visibility === "private" ? " (private)" : ""}
+							{sameRepo(r.fullName, project) ? "" : r.visibility === "private" ? " (private)" : ""}
 						</option>
 					))}
 				</select>
@@ -152,7 +150,7 @@ export function HeadPicker({
 				<BranchSelect
 					project={repo}
 					value={branch}
-					onChange={(b) => onChange(headSearch(project, network, repo, b))}
+					onChange={(b) => onChange(headSearch(project, repo, b))}
 					placeholder="Pick a branch"
 					branchesOnly={branchesOnly || crossRepo}
 				/>
@@ -160,3 +158,4 @@ export function HeadPicker({
 		</>
 	);
 }
+

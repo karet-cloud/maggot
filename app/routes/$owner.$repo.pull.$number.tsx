@@ -58,7 +58,7 @@ function PullPage() {
 						into{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">{pull.base}</code> from{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">
-							{pull.headRepo ? `${pull.headRepo}:` : ""}
+							{pull.headRepo ? (pull.head ? `${pull.headRepo}:` : "a private fork") : ""}
 							{pull.head}
 						</code>
 					</span>

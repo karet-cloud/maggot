@@ -65,10 +65,10 @@ function NewPull() {
 				<span>into</span>
 				<BranchSelect project={project} value={base} onChange={(b) => void navigate({ search: { ...search, base: b } })} branchesOnly />
 				<span>from</span>
-				<HeadPicker project={project} network={resolved.network} repo={resolved.repo} branch={head} onChange={(h) => void navigate({ search: { ...search, ...h } })} branchesOnly />
+				<HeadPicker project={project} repo={resolved.repo} branch={head} onChange={(h) => void navigate({ search: { ...search, ...h } })} branchesOnly />
 			</div>
-			{resolved.unknown ? (
-				<Empty icon={<GitPullRequest className="size-6" />} title={`${resolved.unknown} has no fork of ${project} that you can see`} />
+			{resolved.problem ? (
+				<Empty icon={<GitPullRequest className="size-6" />} title={resolved.problem === "ambiguous" ? `${resolved.owner} has more than one repository in this fork network; pick one` : `${resolved.owner} has no fork of ${project} that you can see`} />
 			) : (
 				!head && <Empty icon={<GitPullRequest className="size-6" />} title="Pick the branch with your changes" />
 			)}

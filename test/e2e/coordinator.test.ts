@@ -1132,7 +1132,8 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	await git(cyDir, "commit", "-q", "-m", "Add a code of conduct");
 	await git(cyDir, "push", "-q", "origin", "HEAD:conduct");
 	const network = async (who: { token: string } | null) => ((await (await as(who)(`${repo}/network`)).json()) as { repos: { fullName: string }[] }).repos.map((r) => r.fullName);
-	const everyone = [`${ada.username}/prs`, `${bob.username}/prs`, `${cy.username}/prs`];
+	// This repository first, then the newest.
+	const everyone = [`${ada.username}/prs`, `${cy.username}/prs`, `${bob.username}/prs`];
 	assert.deepEqual(await network(null), everyone);
 	const preview = await as(null)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`);
 	assert.equal(preview.status, 200, await preview.clone().text());
@@ -1146,10 +1147,22 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=master&headRepo=${bob.username}/elsewhere`)).status, 400);
 	// Gone private, cy's fork drops out of everyone else's network, and owner:branch finds nothing for them.
 	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
-	assert.deepEqual(await network(null), everyone.slice(0, 2));
+	assert.deepEqual(await network(null), [everyone[0], everyone[2]]);
 	assert.deepEqual(await network(cy), everyone);
 	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`)).status, 404);
 	assert.equal((await as(bob)(`${repo}/pulls/${cyPull.number}/files`)).status, 403);
+	const listed = (await (await as(bob)(`${repo}/pulls`)).json()) as { pulls: { number: number; headRepo: string; head: string }[] };
+	const hiddenPull = listed.pulls.find((p) => p.number === cyPull.number);
+	assert.deepEqual([hiddenPull?.headRepo, hiddenPull?.head], ["(private fork)", ""], "nor is it named to them");
+	assert.equal(((await (await as(cy)(`${repo}/pulls/${cyPull.number}`)).json()) as { pull: { headRepo: string } }).pull.headRepo, `${cy.username}/prs`);
+	// task:<id> is an agent fork, never an owner; and an owner with two repositories in the network is ambiguous.
+	const taskHead = await as(ada)(`${repo}/pulls/compare?base=master&head=task:t123`);
+	assert.equal(((await taskHead.json()) as { error: { code: string } }).error.code, "INVALID_INPUT");
+	assert.equal((await as(ada)(`${repo}/forks`, { method: "POST", body: JSON.stringify({ name: "prs-copy" }) })).status, 201);
+	const ambiguous = await as(ada)(`${repo}/pulls/compare?base=master&head=${ada.username}:master`);
+	assert.equal(ambiguous.status, 400);
+	assert.equal(((await ambiguous.json()) as { error: { code: string } }).error.code, "AMBIGUOUS_HEAD");
+	assert.equal((await as(ada)(`${repo}/pulls/compare?base=master&head=master&headRepo=${ada.username}/prs-copy`)).status, 200);
 	// Public again: ada merges into her master with write on it alone, none on cy's fork.
 	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
 	const viaForkOfFork = await as(ada)(`${repo}/pulls/${cyPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
