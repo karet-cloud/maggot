@@ -54,6 +54,61 @@ export async function listRefs(remote: RemoteAccess, incoming = false): Promise<
 }
 
 /**
+ * The branch a public remote's HEAD points at, from the symref its smart HTTP advertisement carries
+ * (`symref=HEAD:refs/heads/master`), or undefined when it can't be told.
+ */
+export async function remoteHead(url: string): Promise<string | undefined> {
+	return (await probeRemote(url))?.head;
+}
+
+/** Whether `url` serves Git's smart HTTP protocol to anyone (null if not), and the branch its HEAD names. */
+export async function probeRemote(url: string): Promise<{ head?: string } | null> {
+	try {
+		const res = await fetch(`${url.replace(/\/+$/, "")}/info/refs?service=git-upload-pack`, {
+			headers: { "user-agent": "git/2.45.0" },
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok || !res.body || !res.headers.get("content-type")?.startsWith("application/x-git-upload-pack-advertisement")) return null;
+		// HEAD's line comes first; a repository with many tags advertises megabytes after it.
+		const reader = res.body.getReader();
+		let bytes = new Uint8Array(0);
+		let first: string | undefined;
+		while (first === undefined) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const next = new Uint8Array(bytes.length + value.length);
+			next.set(bytes);
+			next.set(value, bytes.length);
+			bytes = next;
+			first = firstRefLine(bytes);
+		}
+		void reader.cancel().catch(() => {});
+		const capabilities = first?.split("\0")[1] ?? "";
+		return { head: /(?:^| )symref=HEAD:refs\/heads\/(\S+)/.exec(capabilities)?.[1] };
+	} catch {
+		return null;
+	}
+}
+
+/** The first ref line of an advertisement, once enough of it has arrived. */
+function firstRefLine(bytes: Uint8Array): string | undefined {
+	const decoder = new TextDecoder();
+	for (let i = 0; i + 4 <= bytes.length; ) {
+		const size = Number.parseInt(decoder.decode(bytes.subarray(i, i + 4)), 16);
+		if (Number.isNaN(size)) return "";
+		if (size < 4) {
+			i += 4;
+			continue;
+		}
+		if (i + size > bytes.length) return undefined;
+		const line = decoder.decode(bytes.subarray(i + 4, i + size));
+		if (!line.startsWith("# service=")) return line;
+		i += size;
+	}
+	return undefined;
+}
+
+/**
  * How big a repository is, measured as the pack a full clone downloads: every branch and tag. Stops
  * reading once it passes `limit`, and returns `limit + 1` then.
  */

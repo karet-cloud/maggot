@@ -7,6 +7,7 @@ import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts"
 import { toHttpError } from "./errors.ts";
 import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
 import { listRefs, pushAccepted, RefUpdateRejected, setRef } from "./git/protocol.ts";
+import { isLsRefs, pointHeadV0, pointHeadV2 } from "./git/head.ts";
 import { checkPush, isAncestor, mapReport, parseCommands, quarantine, refusalReport, type Staged } from "./protection.ts";
 import { repoStore } from "./store.ts";
 import type { RemoteAccess } from "./git/workspace.ts";
@@ -94,13 +95,13 @@ export async function authorizeGit(env: Env, principal: Principal, owner: string
  * Where an authorized git request goes: the repository's storage, with its branch rules for pushes,
  * or its wiki's, which has neither branch rules nor Actions. Null for a clone of a wiki with no pages yet.
  */
-export async function gitUpstream(env: Env, access: Extract<GitAccess, { ok: true }>, pushing: boolean): Promise<{ remote: RemoteAccess; rules: BranchRule[] } | null> {
+export async function gitUpstream(env: Env, access: Extract<GitAccess, { ok: true }>, pushing: boolean): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: string } | null> {
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(access.row.id);
 	if (access.wiki) {
 		const remote = await coordinator.wikiRemote(pushing ? "write" : "read");
 		return remote ? { remote, rules: [] } : null;
 	}
-	return pushing ? coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
+	return pushing ? coordinator.pushContext() : coordinator.fetchContext();
 }
 
 /** What git hears when it clones a wiki nobody has written a page in yet. */
@@ -327,10 +328,17 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 
 	const target = await gitUpstream(env, access, pushing);
 	if (!target) return deny(404, EMPTY_WIKI);
-	const { remote: upstream, rules: branchRules } = target;
+	const { remote: upstream, rules: branchRules, head } = target;
 	const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
 	const receiving = pushing && route.endpoint === "git-receive-pack";
 	let requestBody = request.body;
+	// After a default branch change, clones are told HEAD is the new default (see git/head.ts).
+	let lsRefs: Uint8Array | null = null;
+	if (head && route.endpoint === "git-upload-pack" && requestBody && !headers["content-encoding"]) {
+		const buffered = new Uint8Array(await request.arrayBuffer());
+		if (isLsRefs(buffered)) lsRefs = buffered;
+		requestBody = new Response(buffered).body;
+	}
 	// Protected branches: refuse what the commands alone show is not allowed, and note the branches
 	// that may only fast-forward, to check once the push is stored.
 	let protect: { staged: Staged[]; capabilities: string[] } | null = null;
@@ -391,6 +399,10 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 			return new Response(watchPush(env, ctx, row, new Response(report).body as ReadableStream<Uint8Array>, () => sent, pusher), { status: res.status, headers: out });
 		}
 		return new Response(watchPush(env, ctx, row, res.body, () => sent, pusher, access.wiki), { status: res.status, headers: out });
+	}
+	if (head && res.ok && !pushing && (lsRefs || (route.endpoint === "info/refs" && !/version=2/.test(headers["git-protocol"] ?? "")))) {
+		const advertised = new Uint8Array(await res.arrayBuffer());
+		return new Response(lsRefs ? pointHeadV2(advertised, head, lsRefs) : pointHeadV0(advertised, head), { status: res.status, headers: out });
 	}
 	return new Response(res.body, { status: res.status, headers: out });
 }

@@ -33,7 +33,7 @@ import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
-import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef, type TagRef } from "./git/protocol.ts";
+import { deleteBranch, listBranches, listRefs, RefUpdateRejected, remoteHead, setRef, type TagRef } from "./git/protocol.ts";
 import { protectionFor, validPattern } from "./branch-rules.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim, wikiRepoName } from "./names.ts";
@@ -136,7 +136,15 @@ type TaskRow = {
 	merged_at: string | null;
 };
 
-type Meta = { name: string; description: string | null; defaultBranch: string; remote: string; createdAt: string };
+type Meta = {
+	name: string;
+	description: string | null;
+	defaultBranch: string;
+	remote: string;
+	createdAt: string;
+	/** The storage's own HEAD, when the default branch was set to another (storage can't move HEAD). */
+	storeBranch?: string;
+};
 
 /**
  * One instance per project. It is the only writer to the project's default branch: agents push
@@ -268,6 +276,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async create(input: CreateProjectInput): Promise<Project> {
 		if (this.metaOrNull()) throw new HttpError(409, "ALREADY_EXISTS", `Project ${input.name} already exists`);
+		// Artifacts imports `main` and reports it as the default unless told the branch, so an import takes
+		// the source's own default (master, trunk, …) from its HEAD.
+		const importBranch = input.importUrl ? (input.importBranch ?? (await remoteHead(input.importUrl))) : undefined;
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
 		try {
 			created = await retrying(async () => {
@@ -279,7 +290,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				}
 				return input.importUrl
 					? this.store.import({
-							source: { url: input.importUrl, branch: input.importBranch },
+							source: { url: input.importUrl, branch: importBranch },
 							target: { name: input.name, opts: { description: input.description } },
 						})
 					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
@@ -295,6 +306,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		}
 
 		await this.waitReady(created.name);
+		// The storage's HEAD can't be moved, so a fork keeps its source's chosen default on top of it.
+		const storeBranch = created.defaultBranch;
+		if (importBranch) created = { ...created, defaultBranch: importBranch };
+		else if (input.forked && input.defaultBranch) created = { ...created, defaultBranch: input.defaultBranch };
 		const empty = await (async () => {
 			using repo = await this.store.get(created.name);
 			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
@@ -314,6 +329,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			defaultBranch: created.defaultBranch,
 			remote: created.remote,
 			createdAt: new Date().toISOString(),
+			...(storeBranch !== created.defaultBranch ? { storeBranch } : {}),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
 		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
@@ -349,6 +365,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			this.readToken = { token: creds.token, expires: Date.parse(creds.expiresAt) };
 		}
 		return { url: meta.remote, token: this.readToken.token };
+	}
+
+	/** What a fetch needs: read access, and the branch to advertise as HEAD when it isn't storage's own. */
+	async fetchContext(): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: string }> {
+		const meta = this.meta();
+		return { remote: await this.gitRemote("read"), rules: [], head: meta.storeBranch && meta.storeBranch !== meta.defaultBranch ? meta.defaultBranch : undefined };
 	}
 
 	/** What a push needs: write access to the repository and its branch rules, in one round trip. */
@@ -936,6 +958,28 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { defaultBranch: meta.defaultBranch, branches, agents };
 	}
 
+	/** Makes `name`, an existing branch, the default: what the code page shows, pull requests target and agents merge into. */
+	async setDefaultBranch(name: string): Promise<string> {
+		const meta = this.meta();
+		this.assertWritable();
+		if (name === meta.defaultBranch) return name;
+		const active = this.sql
+			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(", ")})`, ...ACTIVE_STATUSES)
+			.one().n;
+		// Their forks and merges are based on the old default.
+		if (active > 0) throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before changing the default branch`);
+		const access = await this.baseAccess(meta);
+		if (!(await listBranches(access)).has(name)) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
+		const storeBranch = meta.storeBranch ?? meta.defaultBranch;
+		const next: Meta = { ...meta, defaultBranch: name, storeBranch: storeBranch === name ? undefined : storeBranch };
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(next));
+		// The merge workspace tracks the old default.
+		this.workspace = undefined;
+		const repository = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'repository'").toArray()[0];
+		if (repository) this.sql.exec("UPDATE meta SET value = ? WHERE key = 'repository'", JSON.stringify({ ...JSON.parse(repository.value), defaultBranch: name }));
+		return name;
+	}
+
 	async deleteBranch(name: string): Promise<void> {
 		const meta = this.meta();
 		this.assertWritable();
@@ -1334,7 +1378,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			try {
 				const forked = await step("fork", async () => {
 					using base = await this.store.get(meta.name);
-					return base.fork(repoName, { description: `${meta.name}: ${row.title}`, defaultBranchOnly: true });
+					// Only the storage's HEAD branch comes along with defaultBranchOnly, so after a default change take them all.
+					return base.fork(repoName, { description: `${meta.name}: ${row.title}`, defaultBranchOnly: !meta.storeBranch || meta.storeBranch === meta.defaultBranch });
 				});
 				await step("wait for fork", () => this.waitReady(repoName));
 				const baseOid = await step("read fork head", async () => {

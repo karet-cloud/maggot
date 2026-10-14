@@ -379,7 +379,8 @@ export async function setRepoBytes(database: D1Database, id: string, bytes: numb
 	await database.prepare(`update "repo" set "bytes" = ? where "id" = ?`).bind(bytes, id).run();
 }
 
-export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean }): Promise<void> {
+export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean; defaultBranch?: string }): Promise<void> {
+	if (patch.defaultBranch !== undefined) await database.prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(patch.defaultBranch, id).run();
 	if (patch.hasWiki !== undefined) await database.prepare(`update "repo" set "hasWiki" = ? where "id" = ?`).bind(patch.hasWiki ? 1 : 0, id).run();
 	if (patch.visibility !== undefined) await database.prepare(`update "repo" set "visibility" = ? where "id" = ?`).bind(patch.visibility, id).run();
 	if (patch.description !== undefined) await database.prepare(`update "repo" set "description" = ? where "id" = ?`).bind(patch.description, id).run();

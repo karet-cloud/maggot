@@ -15,7 +15,7 @@ export interface ParitySection {
 	items: ParityItem[];
 }
 
-export const PARITY_UPDATED = "2026-10-14";
+export const PARITY_UPDATED = "2026-10-15";
 
 export const PARITY: ParitySection[] = [
 	{
@@ -26,7 +26,8 @@ export const PARITY: ParitySection[] = [
 			{ feature: "git clone, fetch and push over HTTPS", status: "done", comment: "At /<owner>/<repo>.git with a personal access token as the password. The Worker proxies smart HTTP to Cloudflare Artifacts." },
 			{ feature: "Git over SSH", status: "done", comment: "git@host:owner/repo.git with an SSH key. Workers can't listen on port 22, so ssh connects through a one-line ProxyCommand over a WebSocket; it's real SSH end to end, with post-quantum key exchange." },
 			{ feature: "Git LFS", status: "missing", comment: "Planned: large files in R2 behind the LFS batch API." },
-			{ feature: "Import from another host", status: "done", comment: "Public URLs only; the import is measured against your storage quota." },
+			{ feature: "Import from another host", status: "done", comment: "Any public Git URL (GitHub, GitLab, Codeberg, self-hosted), with or without .git; it keeps the source's default branch, and a …/tree/<branch> link imports that branch. Measured against your storage quota." },
+			{ feature: "Change the default branch", status: "done", comment: "In Settings, to any existing branch: the code page, new pull requests, agent tasks and clones (HTTPS and SSH) follow it. Forks keep their source's default." },
 			{ feature: "Rename or transfer a repository", status: "done", comment: "Old names keep redirecting, for the web, the API and git. Transfers wait for the new owner to accept, within a week, and count against their quota." },
 			{ feature: "Archive a repository (read-only)", status: "done", comment: "Pushes, web edits, branch deletes and agent tasks are refused; cloning, forking and starring still work." },
 			{ feature: "Template repositories", status: "missing", comment: "" },
