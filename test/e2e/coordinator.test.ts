@@ -1589,7 +1589,8 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 
 test("shallow imports keep the requested history depth and reject invalid depths", async () => {
 	const exec = promisify(execFile);
-	const git = (args: string[], cwd?: string) => exec("git", args, { cwd });
+	// Fixture-only identity, matching the other isolated Git repositories in this suite.
+	const git = (args: string[], cwd?: string) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd });
 	const source = join(root, "shallow-source");
 	await git(["init", "-q", "-b", "master", source]);
 	for (let n = 1; n <= 3; n++) {
