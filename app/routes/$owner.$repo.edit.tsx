@@ -3,8 +3,9 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitBranch, GitCommitHorizontal } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams } from "../lib/api.ts";
+import { api, ApiError, repoParams } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
+import { projectQuery } from "../lib/queries.ts";
 
 type Search = { ref?: string; path?: string; dir?: string };
 
@@ -28,7 +29,7 @@ function Editor() {
 	const needsVerification = useNeedsVerification();
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const branch = ref ?? info.data?.defaultBranch;
 	const parentDir = editing ? editing.split("/").slice(0, -1).join("/") : (dir ?? "");
 	// The commit the edit starts from, fixed for this editing session: the file is read at that commit,

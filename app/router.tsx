@@ -10,6 +10,8 @@ export function getRouter() {
 		routeTree,
 		context: { queryClient },
 		defaultPreload: "intent",
+		// Loaders only warm the query cache, which tracks freshness itself: run them on every preload.
+		defaultPreloadStaleTime: 0,
 		scrollRestoration: true,
 	});
 }

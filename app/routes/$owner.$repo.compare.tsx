@@ -1,12 +1,13 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, GitCompareArrows } from "lucide-react";
 import { CommitList } from "../components/commits.tsx";
 import { DiffView } from "../components/diff.tsx";
-import { BranchSelect } from "../components/refs.tsx";
+import { BranchSelect, branchNamesQuery } from "../components/refs.tsx";
 import { Empty, ErrorNote, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { base?: string; head?: string };
 
@@ -15,22 +16,28 @@ export const Route = createFileRoute("/$owner/$repo/compare")({
 		base: typeof s.base === "string" && s.base ? s.base : undefined,
 		head: typeof s.head === "string" && s.head ? s.head : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ base: search.base, head: search.head }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// Without a base in the URL, compare against the default branch if the layout already knows it.
+		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
+		return preload(context.queryClient, branchNamesQuery(project), Boolean(base && deps.head) && compareQuery(project, base as string, deps.head as string));
+	},
 	component: ComparePage,
 });
+
+const compareQuery = (project: string, base: string, head: string) =>
+	queryOptions({ queryKey: keys.compare(project, base, head), queryFn: () => api.compare(project, base, head) });
 
 function ComparePage() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const search = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const base = search.base ?? info.data?.defaultBranch;
 	const head = search.head;
-	const comparison = useQuery({
-		queryKey: keys.compare(project, base ?? "", head ?? ""),
-		queryFn: () => api.compare(project, base as string, head as string),
-		enabled: Boolean(base && head),
-	});
+	const comparison = useQuery({ ...compareQuery(project, base ?? "", head ?? ""), enabled: Boolean(base && head) });
 
 	return (
 		<div className="space-y-4">

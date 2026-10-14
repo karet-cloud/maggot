@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { AlertTriangle, Bot, FileWarning, RotateCw } from "lucide-react";
 import type { ReactNode } from "react";
@@ -7,9 +7,14 @@ import { cx, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type Task, repoParams } from "../lib/api.ts";
 import { STATUS } from "../lib/format.ts";
 import { useLive } from "../lib/live.ts";
-import { useProjectTasks } from "../lib/queries.ts";
+import { preload, projectQuery, useProjectTasks } from "../lib/queries.ts";
 
-export const Route = createFileRoute("/$owner/$repo/agents")({ component: Board });
+export const Route = createFileRoute("/$owner/$repo/agents")({
+	loader: ({ context, params }) => preload(context.queryClient, queueQuery(`${params.owner}/${params.repo}`)),
+	component: Board,
+});
+
+const queueQuery = (project: string) => queryOptions({ queryKey: keys.queue(project), queryFn: () => api.queue(project) });
 
 const MERGED_SHOWN = 12;
 
@@ -17,8 +22,8 @@ function Board() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const tasks = useProjectTasks(project);
-	const queue = useQuery({ queryKey: keys.queue(project), queryFn: () => api.queue(project) });
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const queue = useQuery(queueQuery(project));
+	const info = useQuery(projectQuery(project));
 
 	if (tasks.isPending || info.isPending) return <Spinner />;
 	if (info.data && !info.data.head) {

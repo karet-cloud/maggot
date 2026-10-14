@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Check, CircleAlert, FileDiff, GitCommitHorizontal, GitMerge, MessageSquare, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
@@ -7,15 +7,26 @@ import { DiffView, lineKey, type DiffNotes } from "../components/diff.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { PullChecksBox, usePullChecks } from "../components/actions.tsx";
+import { listPatches, openCountPatch, pendingComment, stateChange } from "../components/issues.tsx";
 import { Decision, PullStateBadge } from "../components/pulls.tsx";
 import { Button, cx, Empty, ErrorNote, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type IssueComment, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
+import { api, ApiError, keys, repoParams, type IssueComment, type IssueState, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { tab?: "commits" | "files" };
 
+const pullQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pull(project, number), queryFn: () => api.pull(project, number) });
+const pullFilesQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pullFiles(project, number), queryFn: () => api.pullFiles(project, number) });
+
 export const Route = createFileRoute("/$owner/$repo/pull/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "commits" || s.tab === "files" ? { tab: s.tab } : {}),
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		const number = Number(params.number);
+		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), pullFilesQuery(project, number)) : undefined;
+	},
 	component: PullPage,
 });
 
@@ -24,8 +35,8 @@ function PullPage() {
 	const project = `${owner}/${repo}`;
 	const number = Number(raw);
 	const { tab } = Route.useSearch();
-	const data = useQuery({ queryKey: keys.pull(project, number), queryFn: () => api.pull(project, number), enabled: Number.isInteger(number) });
-	const files = useQuery({ queryKey: keys.pullFiles(project, number), queryFn: () => api.pullFiles(project, number), enabled: Number.isInteger(number) });
+	const data = useQuery({ ...pullQuery(project, number), enabled: Number.isInteger(number) });
+	const files = useQuery({ ...pullFilesQuery(project, number), enabled: Number.isInteger(number) });
 
 	if (data.isPending) return <Spinner />;
 	if (data.error) {
@@ -110,17 +121,38 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 		void queryClient.invalidateQueries({ queryKey: keys.pulls(project) });
 		void queryClient.invalidateQueries({ queryKey: keys.project(project) });
 	};
-	const comment = useMutation({
-		mutationFn: async (toggle: boolean) => {
-			const state = toggle ? (pull.state === "open" ? "closed" : "open") : undefined;
-			if (reply.trim()) await api.comment(project, pull.number, reply, state);
+	// One request either way, as on issues.
+	const comment = useOptimistic({
+		mutationFn: async ({ body, state }: { body: string; state?: IssueState }) => {
+			if (body.trim()) await api.comment(project, pull.number, body, state);
 			else if (state) await api.updateIssue(project, pull.number, { state });
 		},
-		onSuccess: () => {
-			setReply("");
-			refresh();
+		apply: ({ body, state }) => {
+			const by = viewer.data?.username ?? null;
+			const posted = body.trim() ? pendingComment(body, by) : null;
+			const change = state ? { ...stateChange(state, by), pullState: state } : {};
+			return [
+				...openCountPatch(project, "openPulls", state),
+				patch<PullData>(
+					keys.pull(project, pull.number),
+					(old) => ({
+						...old,
+						pull: { ...old.pull, ...change, comments: old.pull.comments + (posted ? 1 : 0) },
+						comments: posted ? [...old.comments, posted] : old.comments,
+					}),
+					true,
+				),
+				...listPatches(keys.pulls(project), "pulls", pull.number, (row) => ({ ...change, comments: row.comments + (posted ? 1 : 0) })),
+			];
 		},
+		// The draft comes back unless another has been started since.
+		onError: (_error, { body }) => setReply((r) => r || body),
+		action: "update the pull request",
 	});
+	const send = (toggle: boolean) => {
+		comment.mutate({ body: reply, state: toggle ? (pull.state === "open" ? "closed" : "open") : undefined });
+		setReply("");
+	};
 	const timeline = useMemo(() => {
 		const items: { at: string; node: ReactNode }[] = [
 			...data.comments.map((c) => ({ at: c.createdAt, node: <CommentCard key={`c${c.id}`} project={project} comment={c} /> })),
@@ -142,14 +174,13 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 			{viewer.data && pull.pullState !== "merged" && (
 				<div className="space-y-2">
 					<MarkdownEditor value={reply} onChange={setReply} project={project} label="Comment" placeholder="Leave a comment" rows={4} />
-					<ErrorNote error={comment.error} />
 					<div className="flex justify-end gap-2">
 						{pull.canEdit && (
-							<Button busy={comment.isPending && comment.variables === true} onClick={() => comment.mutate(true)} disabled={needsVerification && Boolean(reply.trim())}>
+							<Button onClick={() => send(true)} disabled={needsVerification && Boolean(reply.trim())}>
 								{pull.state === "open" ? "Close pull request" : "Reopen pull request"}
 							</Button>
 						)}
-						<Button variant="primary" busy={comment.isPending && comment.variables === false} disabled={!reply.trim() || needsVerification} onClick={() => comment.mutate(false)}>
+						<Button variant="primary" disabled={!reply.trim() || needsVerification} onClick={() => send(false)}>
 							Comment
 						</Button>
 					</div>
@@ -162,7 +193,7 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDone: () => void }) {
 	const [method, setMethod] = useState<MergeMethod>("merge");
 	// The head shown in Files changed is the one that merges; if the branch moved since, the merge stops.
-	const files = useQuery({ queryKey: keys.pullFiles(project, pull.number), queryFn: () => api.pullFiles(project, pull.number), enabled: pull.pullState === "open" });
+	const files = useQuery({ ...pullFilesQuery(project, pull.number), enabled: pull.pullState === "open" });
 	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.head), onSuccess: onDone });
 	// The server's own judgement of the checks (what a merge would get), so the two can't disagree.
 	const checks = usePullChecks(project, pull.number, pull.pullState === "open");
@@ -315,12 +346,34 @@ interface Draft {
 /** The diff, with existing line comments, and a pending review built up line by line. */
 function Files({ project, pull, reviewComments, files }: { project: string; pull: Pull; reviewComments: ReviewComment[]; files: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.pullFiles>>>> }) {
 	const viewer = useViewer();
-	const queryClient = useQueryClient();
 	const [drafts, setDrafts] = useState<Draft[]>([]);
 	const [editing, setEditing] = useState<{ path: string; side: "new" | "old"; line: number } | null>(null);
 	const [text, setText] = useState("");
 	const [finishing, setFinishing] = useState(false);
+	// A review that failed to submit, to start the next attempt from.
+	const [failed, setFailed] = useState<{ state: ReviewState; body: string } | null>(null);
 	const canReview = Boolean(viewer.data) && pull.pullState === "open";
+	// The review and its line comments show at once; the approval decision comes with the refetch.
+	const submit = useOptimistic({
+		mutationFn: (r: { state: ReviewState; body: string; commit: string; drafts: Draft[] }) =>
+			api.review(project, pull.number, { state: r.state, body: r.body, commit: r.commit, comments: r.drafts.map(({ path, side, line, body }) => ({ path, side, line, body })) }),
+		apply: (r) => {
+			const id = `optimistic-${Date.now()}`;
+			const author = viewer.data?.username ?? null;
+			const createdAt = new Date().toISOString();
+			const review: Review = { id, author, state: r.state, body: r.body, commit: r.commit, createdAt };
+			const comments: ReviewComment[] = r.drafts.map((d, i) => ({ ...d, id: `${id}-${i}`, reviewId: id, author, commit: r.commit, createdAt }));
+			return [
+				patch<PullData>(keys.pull(project, pull.number), (old) => ({ ...old, reviews: [...old.reviews, review], reviewComments: [...old.reviewComments, ...comments] }), true),
+			];
+		},
+		invalidate: () => [keys.pulls(project)],
+		onError: (_error, r) => {
+			setDrafts((all) => [...r.drafts, ...all]);
+			setFailed({ state: r.state, body: r.body });
+		},
+		action: "submit the review",
+	});
 
 	const notes: DiffNotes = useMemo(() => {
 		const under = new Map<string, ReactNode>();
@@ -406,13 +459,13 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 				<FinishReview
 					project={project}
 					pull={pull}
-					commit={files.data.head}
 					drafts={drafts}
-					onDone={() => {
+					initial={failed}
+					onSubmit={(state, body) => {
+						submit.mutate({ state, body, commit: files.data.head, drafts });
 						setFinishing(false);
 						setDrafts([]);
-						void queryClient.invalidateQueries({ queryKey: keys.pull(project, pull.number) });
-						void queryClient.invalidateQueries({ queryKey: keys.pulls(project) });
+						setFailed(null);
 					}}
 				/>
 			</Modal>
@@ -420,15 +473,23 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 	);
 }
 
-function FinishReview({ project, pull, commit, drafts, onDone }: { project: string; pull: Pull; commit: string; drafts: Draft[]; onDone: () => void }) {
+function FinishReview({
+	project,
+	pull,
+	drafts,
+	initial,
+	onSubmit,
+}: {
+	project: string;
+	pull: Pull;
+	drafts: Draft[];
+	initial: { state: ReviewState; body: string } | null;
+	onSubmit: (state: ReviewState, body: string) => void;
+}) {
 	const viewer = useViewer();
-	const [body, setBody] = useState("");
-	const [state, setState] = useState<ReviewState>("commented");
+	const [body, setBody] = useState(initial?.body ?? "");
+	const [state, setState] = useState<ReviewState>(initial?.state ?? "commented");
 	const mine = viewer.data?.username === pull.author;
-	const submit = useMutation({
-		mutationFn: () => api.review(project, pull.number, { state, body, commit, comments: drafts.map(({ path, side, line, body: text }) => ({ path, side, line, body: text })) }),
-		onSuccess: onDone,
-	});
 	const option = (value: ReviewState, label: string, hint: string, disabled: boolean) => (
 		<label className={cx("flex items-start gap-2 text-sm", disabled && "opacity-50")}>
 			<input type="radio" className="mt-1" checked={state === value} onChange={() => setState(value)} disabled={disabled} />
@@ -442,7 +503,7 @@ function FinishReview({ project, pull, commit, drafts, onDone }: { project: stri
 		<form
 			onSubmit={(e) => {
 				e.preventDefault();
-				submit.mutate();
+				onSubmit(state, body);
 			}}
 			className="space-y-3"
 		>
@@ -453,9 +514,8 @@ function FinishReview({ project, pull, commit, drafts, onDone }: { project: stri
 				{option("changes_requested", "Request changes", "Blocks merging into a branch that requires a review until it's approved.", mine || !pull.canMerge)}
 			</fieldset>
 			<p className="text-xs text-faint">{drafts.length === 1 ? "1 line comment" : `${drafts.length} line comments`} will be posted with it.</p>
-			<ErrorNote error={submit.error} />
 			<div className="flex justify-end">
-				<Button type="submit" variant="primary" busy={submit.isPending}>
+				<Button type="submit" variant="primary">
 					Submit review
 				</Button>
 			</div>

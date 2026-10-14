@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -6,10 +6,11 @@ import { Markdown } from "../components/markdown.tsx";
 import { RepoCommands } from "../components/repo-access.tsx";
 import { BlameView } from "../components/blame.tsx";
 import { GoToFile } from "../components/file-finder.tsx";
-import { BranchSelect } from "../components/refs.tsx";
+import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { ref?: string; path?: string; file?: string };
 
@@ -19,8 +20,24 @@ export const Route = createFileRoute("/$owner/$repo/")({
 		path: typeof s.path === "string" && s.path ? s.path : undefined,
 		file: typeof s.file === "string" && s.file ? s.file : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ ref: search.ref, path: search.path ?? "", file: search.file }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(
+			context.queryClient,
+			treeQuery(project, deps.ref, deps.path),
+			deps.file !== undefined && !IMAGE.test(deps.file) && fileQuery(project, deps.ref, deps.file),
+			branchNamesQuery(project),
+			tagNamesQuery(project),
+		);
+	},
 	component: Code,
 });
+
+const treeQuery = (project: string, ref: string | undefined, path: string) =>
+	queryOptions({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
+const fileQuery = (project: string, ref: string | undefined, path: string) =>
+	queryOptions({ queryKey: [...keys.code(project), "file", ref ?? "", path], queryFn: () => api.file(project, path, ref) });
 
 const MAX_LINES = 5000;
 /** Past this, files are shown plain: highlighting runs on the main thread. */
@@ -31,8 +48,9 @@ function Code() {
 	const project = `${owner}/${repo}`;
 	const { ref, path = "", file } = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
-	const tree = useQuery({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
+	const info = useQuery(projectQuery(project));
+	// The previous listing stays up while the next directory or ref loads.
+	const tree = useQuery({ ...treeQuery(project, ref, path), placeholderData: keepPreviousData });
 	const readme = !file ? tree.data?.entries.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name)) : undefined;
 	const shown = file ?? readme?.path;
 	// Archived repositories are read-only, even for their owner.
@@ -216,11 +234,7 @@ function FileView({
 	const [deleting, setDeleting] = useState(false);
 	const image = IMAGE.test(path);
 	const markdown = MARKDOWN.test(path);
-	const file = useQuery({
-		queryKey: [...keys.code(project), "file", refName ?? "", path],
-		queryFn: () => api.file(project, path, refName),
-		enabled: !image,
-	});
+	const file = useQuery({ ...fileQuery(project, refName, path), enabled: !image });
 	const [mode, setMode] = useState<"preview" | "code">("preview");
 	const [blaming, setBlaming] = useState(false);
 	const navigate = useNavigate({ from: Route.fullPath });

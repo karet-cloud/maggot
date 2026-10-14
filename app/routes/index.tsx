@@ -1,18 +1,27 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { GitBranch, Lock, Plus, Terminal } from "lucide-react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Spinner } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
+import { preload, viewerQuery } from "../lib/queries.ts";
 import { useViewer } from "./__root.tsx";
 
-export const Route = createFileRoute("/")({ component: Home });
+export const Route = createFileRoute("/")({
+	loader: ({ context }) => {
+		const me = context.queryClient.getQueryData(viewerQuery.queryKey);
+		return preload(context.queryClient, me && reposQuery(me.username), reposQuery());
+	},
+	component: Home,
+});
+
+const reposQuery = (owner?: string) => queryOptions({ queryKey: keys.repos(owner), queryFn: () => api.repos(owner) });
 
 function Home() {
 	const viewer = useViewer();
 	const me = viewer.data;
-	const mine = useQuery({ queryKey: keys.repos(me?.username), queryFn: () => api.repos(me?.username), enabled: Boolean(me) });
-	const explore = useQuery({ queryKey: keys.repos(), queryFn: () => api.repos() });
+	const mine = useQuery({ ...reposQuery(me?.username), enabled: Boolean(me) });
+	const explore = useQuery(reposQuery());
 	const publicRepos = (explore.data ?? []).filter((r) => r.visibility === "public" && r.owner !== me?.username);
 
 	return (

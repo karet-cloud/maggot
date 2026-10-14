@@ -1,35 +1,52 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Bot, GitBranch, GitCompareArrows, ShieldCheck, Trash2 } from "lucide-react";
 import { protectionFor } from "../../src/branch-rules.ts";
 import type { ReactNode } from "react";
 import { Button, Empty, ErrorNote, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
-import { api, keys, type BranchSummary, repoParams } from "../lib/api.ts";
+import { api, keys, type Branches, type BranchSummary, repoParams, type Task } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
-export const Route = createFileRoute("/$owner/$repo/branches")({ component: BranchesPage });
+export const Route = createFileRoute("/$owner/$repo/branches")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, branchesQuery(project), branchRulesQuery(project));
+	},
+	component: BranchesPage,
+});
+
+const branchesQuery = (project: string) => queryOptions({ queryKey: keys.branches(project), queryFn: () => api.branches(project) });
+// The same key and fetcher as the branch protection settings.
+const branchRulesQuery = (project: string) => queryOptions({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
 
 function BranchesPage() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
-	const queryClient = useQueryClient();
-	const branches = useQuery({ queryKey: keys.branches(project), queryFn: () => api.branches(project) });
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const branches = useQuery(branchesQuery(project));
+	const info = useQuery(projectQuery(project));
 	// Only the owner deletes branches, and not while the repository is archived.
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
-	const rules = useQuery({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
+	const rules = useQuery(branchRulesQuery(project));
 	const protectedBranch = (name: string) => protectionFor(rules.data ?? [], name).patterns.length > 0;
 	const deletable = (name: string) => {
 		const p = protectionFor(rules.data ?? [], name);
 		return !p.blockDeletions && !p.requireMergeQueue;
 	};
-	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
-	const remove = useMutation({ mutationFn: (name: string) => api.deleteBranch(project, name), onSuccess: refresh });
-	const abandon = useMutation({
+	// Covers the "names" variant the branch pickers use too.
+	const remove = useOptimistic({
+		mutationFn: (name: string) => api.deleteBranch(project, name),
+		apply: (name) => [patch<Branches>(keys.branches(project), (old) => ({ ...old, branches: old.branches.filter((b) => b.name !== name) }))],
+		action: "delete the branch",
+	});
+	const abandon = useOptimistic({
 		mutationFn: (id: string) => api.abandon(project, id),
-		onSuccess: () => {
-			refresh();
-			void queryClient.invalidateQueries({ queryKey: keys.tasks(project) });
-		},
+		apply: (id) => [
+			patch<Branches>(keys.branches(project), (old) => ({ ...old, agents: old.agents.filter((a) => a.taskId !== id) })),
+			patch<Task[]>(keys.tasks(project), (old) => old.map((t) => (t.id === id ? { ...t, status: "abandoned" } : t)), true),
+			patch<Task>(keys.task(project, id), (old) => ({ ...old, status: "abandoned" }), true),
+		],
+		action: "abandon the task",
 	});
 
 	if (branches.isPending) return <Spinner />;
@@ -41,7 +58,6 @@ function BranchesPage() {
 
 	return (
 		<div className="space-y-4">
-			<ErrorNote error={remove.error ?? abandon.error} />
 			{main && (
 				<Panel title="Default branch">
 					<BranchRow project={project} branch={main} name={main.name} refName={undefined} scale={scale} isDefault protectedBranch={protectedBranch(main.name)} />
@@ -68,7 +84,6 @@ function BranchesPage() {
 										writable && deletable(b.name) && <Button
 											variant="ghost"
 											className="px-2 text-xs hover:text-red-300"
-											busy={remove.isPending && remove.variables === b.name}
 											onClick={() => confirm(`Delete branch ${b.name}? Its commits stay reachable only if merged elsewhere.`) && remove.mutate(b.name)}
 											title="Delete branch"
 										>
@@ -111,7 +126,6 @@ function BranchesPage() {
 											<Button
 												variant="ghost"
 												className="px-2 text-xs hover:text-red-300"
-												busy={abandon.isPending && abandon.variables === a.taskId}
 												onClick={() => confirm(`Abandon task ${a.taskId} and delete its fork?`) && abandon.mutate(a.taskId)}
 												title="Abandon task and delete its fork"
 											>

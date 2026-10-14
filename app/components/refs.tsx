@@ -1,5 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { api, keys } from "../lib/api.ts";
+
+/** Branch and agent-fork names without commit counts, for pickers. */
+export const branchNamesQuery = (project: string) => queryOptions({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false) });
+export const tagNamesQuery = (project: string) => queryOptions({ queryKey: keys.tagNames(project), queryFn: () => api.tags(project, false), staleTime: 60_000 });
 
 /**
  * Picks a branch of the project repo or a task fork (`task:<id>`). An unlisted value (a commit, or
@@ -19,8 +23,8 @@ export function BranchSelect({
 	branchesOnly?: boolean;
 	placeholder?: string;
 }) {
-	const refs = useQuery({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false) });
-	const tagList = useQuery({ queryKey: keys.tagNames(project), queryFn: () => api.tags(project, false), enabled: !branchesOnly, staleTime: 60_000 });
+	const refs = useQuery(branchNamesQuery(project));
+	const tagList = useQuery({ ...tagNamesQuery(project), enabled: !branchesOnly });
 	const tags = branchesOnly ? [] : (tagList.data ?? []);
 	const defaultBranch = refs.data?.defaultBranch;
 	const others = (refs.data?.branches ?? []).filter((b) => !b.default);

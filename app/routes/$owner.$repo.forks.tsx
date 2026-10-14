@@ -1,16 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { GitFork } from "lucide-react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 
-export const Route = createFileRoute("/$owner/$repo/forks")({ component: Forks });
+export const Route = createFileRoute("/$owner/$repo/forks")({
+	loader: ({ context, params }) => preload(context.queryClient, forksQuery(`${params.owner}/${params.repo}`)),
+	component: Forks,
+});
+
+const forksQuery = (project: string) => queryOptions({ queryKey: keys.forks(project), queryFn: () => api.forks(project) });
 
 function Forks() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
-	const forks = useQuery({ queryKey: keys.forks(project), queryFn: () => api.forks(project) });
+	const forks = useQuery(forksQuery(project));
 	return (
 		<Panel
 			title={

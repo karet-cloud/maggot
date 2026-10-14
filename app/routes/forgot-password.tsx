@@ -3,13 +3,14 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { AuthForm, authLink } from "../components/auth-form.tsx";
 import { Field, Input } from "../components/ui.tsx";
-import { api, keys } from "../lib/api.ts";
+import { api } from "../lib/api.ts";
+import { configQuery } from "../lib/queries.ts";
 
 export const Route = createFileRoute("/forgot-password")({ component: ForgotPassword });
 
 function ForgotPassword() {
 	const [email, setEmail] = useState("");
-	const config = useQuery({ queryKey: keys.config, queryFn: api.config, staleTime: Infinity });
+	const config = useQuery(configQuery);
 	const request = useMutation({ mutationFn: () => api.requestPasswordReset(email.trim()) });
 	if (request.isSuccess) {
 		return (

@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronRight, RotateCw, Send, Trash2, Webhook as WebhookIcon } from "lucide-react";
 import { useState } from "react";
 import { api, keys, type Webhook, type WebhookDelivery, type WebhookEvent } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
@@ -14,9 +15,11 @@ const EVENTS: { id: WebhookEvent; label: string; hint: string }[] = [
 	{ id: "gollum", label: "Wiki", hint: "Pages created or edited (GitHub's gollum event)" },
 ];
 
+export const hooksQuery = (project: string) => queryOptions({ queryKey: keys.hooks(project), queryFn: () => api.hooks(project) });
+
 /** A repository's webhooks: add, pause, test and inspect them. */
 export function Webhooks({ project, archived = false }: { project: string; archived?: boolean }) {
-	const hooks = useQuery({ queryKey: keys.hooks(project), queryFn: () => api.hooks(project) });
+	const hooks = useQuery(hooksQuery(project));
 	return (
 		<Panel title="Webhooks" actions={<span className="text-[11px] text-faint">POSTed as JSON, signed with your secret</span>}>
 			<div className="space-y-4 p-4">
@@ -119,8 +122,18 @@ function HookRow({ project, hook }: { project: string; hook: Webhook }) {
 		void queryClient.invalidateQueries({ queryKey: keys.hooks(project) });
 		void queryClient.invalidateQueries({ queryKey: keys.deliveries(project, hook.id) });
 	};
-	const toggle = useMutation({ mutationFn: () => api.updateHook(project, hook.id, { active: !hook.active }), onSuccess: refresh });
-	const remove = useMutation({ mutationFn: () => api.deleteHook(project, hook.id), onSuccess: refresh });
+	// Exact: deliveries sit under the list's key.
+	const edit = (update: (old: Webhook[]) => Webhook[]) => [patch<Webhook[]>(keys.hooks(project), update, true)];
+	const toggle = useOptimistic({
+		mutationFn: (active: boolean) => api.updateHook(project, hook.id, { active }),
+		apply: (active) => edit((old) => old.map((h) => (h.id === hook.id ? { ...h, active } : h))),
+		action: "update the webhook",
+	});
+	const remove = useOptimistic({
+		mutationFn: () => api.deleteHook(project, hook.id),
+		apply: () => edit((old) => old.filter((h) => h.id !== hook.id)),
+		action: "delete the webhook",
+	});
 	const ping = useMutation({
 		mutationFn: () => api.pingHook(project, hook.id),
 		onSuccess: () => {
@@ -143,13 +156,12 @@ function HookRow({ project, hook }: { project: string; hook: Webhook }) {
 						<Send className="size-3.5" />
 						Test
 					</Button>
-					<Button variant="ghost" onClick={() => toggle.mutate()} busy={toggle.isPending} className="text-xs">
+					<Button variant="ghost" onClick={() => toggle.mutate(!hook.active)} className="text-xs">
 						{hook.active ? "Pause" : "Resume"}
 					</Button>
 					<Button
 						variant="ghost"
 						onClick={() => confirm(`Delete the webhook to ${hook.url}?`) && remove.mutate()}
-						busy={remove.isPending}
 						className="text-xs hover:text-rose-300"
 						title="Delete"
 					>
@@ -157,7 +169,7 @@ function HookRow({ project, hook }: { project: string; hook: Webhook }) {
 					</Button>
 				</div>
 			</div>
-			<ErrorNote error={toggle.error ?? remove.error ?? ping.error} />
+			<ErrorNote error={ping.error} />
 			{open && <Deliveries project={project} hookId={hook.id} />}
 		</li>
 	);
