@@ -2,7 +2,7 @@ import type { PullChecks, CiArtifact, CiCache, CiConclusion, CiEvent, CiJob as C
 import { HttpError } from "../errors.ts";
 import type { RepositoryRef } from "../hooks.ts";
 import type { RepoStore } from "../store.ts";
-import { GitHubActions, resolveActions, type ActionSource } from "./actions.ts";
+import { ActionFetchError, GitHubActions, resolveActions, type ActionSource } from "./actions.ts";
 import { nextRun, parseCron } from "./cron.ts";
 import { checkDepotCredentials, DepotError, type DepotCredentials } from "./depot.ts";
 import { evaluate, ExpressionError, parseCondition, parseTemplate, propertiesOf, render, truthy, type Expression, type Value } from "./expr.ts";
@@ -516,6 +516,7 @@ export class CiRuns {
 
 	/** Records the default branch's scheduled workflows (as of `sha`), keeping the next run of schedules that didn't change. */
 	async refreshSchedules(sha: string): Promise<void> {
+		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('ciSchedulesFrom', ?)", this.host.repository().defaultBranch);
 		const wanted = new Map<string, string>();
 		for (const w of await this.workflowsAt(this.host.repoId(), sha)) for (const cron of w.spec?.on.schedule ?? []) wanted.set(`${w.path}\0${cron}`, cron);
 		const have = this.sql.exec<{ path: string; cron: string }>("SELECT path, cron FROM ci_schedules").toArray();
@@ -964,7 +965,7 @@ export class CiRuns {
 				if (deps.some((d) => d.status !== "completed")) continue;
 				const { workflow, trigger, run } = runOf(job.run);
 				const spec = workflow.jobs.find((j) => j.key === job.key);
-				const verdict = spec ? this.jobCondition(spec, run, trigger, deps) : { run: true, reason: null };
+				const verdict = spec ? this.jobCondition(spec, workflow, run, trigger) : { run: true, reason: null };
 				if (!verdict.run) {
 					this.finishJob(job, "skipped", verdict.reason);
 					changed = true;
@@ -989,9 +990,22 @@ export class CiRuns {
 
 	/**
 	 * Whether a job whose needs are done runs: its `if:` (success() unless it says otherwise), where
-	 * success() means every job it needs succeeded and failure() that one failed.
+	 * success() means every job before it succeeded (the jobs it needs, the jobs those need, and so on,
+	 * as on GitHub) and failure() that one of them failed.
 	 */
-	private jobCondition(spec: JobSpec, run: RunRow, trigger: Trigger, deps: { key: string; conclusion: CiConclusion | null }[]): { run: boolean; reason: string | null } {
+	private jobCondition(spec: JobSpec, workflow: WorkflowSpec, run: RunRow, trigger: Trigger): { run: boolean; reason: string | null } {
+		const before = new Set<string>();
+		const visit = (keys: string[]) => {
+			for (const key of keys) {
+				if (before.has(key)) continue;
+				before.add(key);
+				visit(workflow.jobs.find((j) => j.key === key)?.needs ?? []);
+			}
+		};
+		visit(spec.needs);
+		const deps = before.size
+			? this.sql.exec<{ key: string; conclusion: CiConclusion | null }>(`SELECT key, conclusion FROM ci_jobs WHERE run = ? AND key IN (${[...before].map(() => "?").join(", ")})`, run.number, ...before).toArray()
+			: [];
 		const failed = deps.filter((d) => d.conclusion !== "success");
 		try {
 			const ok = truthy(
@@ -1035,11 +1049,12 @@ export class CiRuns {
 	/** The github context: what's fixed for a job of a run. */
 	private githubContext(run: RunRow, trigger: Trigger, job: string): Record<string, string> {
 		const repo = this.host.repository();
-		const ref = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}/merge` : `refs/heads/${trigger.branch}`;
+		// A pull request's head is what's checked out (megit makes no merge commits to test), so its ref names that.
+		const ref = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}/head` : `refs/heads/${trigger.branch}`;
 		return {
 			sha: run.sha,
 			ref,
-			ref_name: trigger.event === "pull_request" ? `${trigger.pull}/merge` : trigger.branch,
+			ref_name: trigger.branch,
 			ref_type: "branch",
 			head_ref: trigger.event === "pull_request" ? trigger.branch : "",
 			base_ref: trigger.baseBranch ?? "",
@@ -1093,6 +1108,14 @@ export class CiRuns {
 		try {
 			launch = await this.launchFor(job);
 		} catch (err) {
+			// GitHub briefly unreachable while its actions were read: tried again, like a start that didn't get through.
+			if (err instanceof ActionFetchError) {
+				const attempts = job.dispatch_attempts + 1;
+				this.sql.exec("UPDATE ci_jobs SET dispatch_attempts = ? WHERE id = ?", attempts, job.id);
+				console.error("ci: reading a job's actions failed", err);
+				if (attempts >= MAX_DISPATCH_ATTEMPTS) this.finishJob(job, "failure", message(err));
+				return;
+			}
 			this.finishJob(job, "failure", message(err));
 			return;
 		}
@@ -1279,6 +1302,13 @@ export class CiRuns {
 	 */
 	async tick(): Promise<void> {
 		await this.drainPulls();
+		// Schedules are read from the default branch when it moves; also when it's a different branch than
+		// they were read from (renamed, or never read: a repository from before schedules).
+		const branch = this.host.repository().defaultBranch;
+		if (this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'ciSchedulesFrom'").toArray()[0]?.value !== branch) {
+			const tip = await this.tipOf(this.host.repoId(), branch).catch(() => null);
+			if (tip) await this.refreshSchedules(tip);
+		}
 		await this.runSchedules();
 		const pruned = Number(this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'ciStoragePruned'").toArray()[0]?.value ?? 0);
 		if (Date.now() - pruned > STORAGE_PRUNE_MS) {

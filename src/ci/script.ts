@@ -572,7 +572,12 @@ while IFS= read -r p; do
   done
 done <<< "$MEGIT_PATTERNS"
 if [ \${#keep[@]} -eq 0 ]; then echo; exit 0; fi
-printf '%s\\n' "\${!keep[@]}" | LC_ALL=C sort | while IFS= read -r f; do sha256sum -- "$f" | cut -c1-64; done | sha256sum | cut -c1-64
+# As GitHub does: each file's SHA-256 as bytes, in order, hashed together. Names pass NUL-separated (any name
+# works), and files are read from stdin, so sha256sum never escapes an unusual name.
+for f in "\${!keep[@]}"; do printf '%s\\0' "$f"; done | LC_ALL=C sort -z | while IFS= read -r -d '' f; do
+  h=$(sha256sum < "$f" | cut -c1-64)
+  printf "$(printf '%s' "$h" | sed 's/../\\\\x&/g')"
+done | sha256sum | cut -c1-64
 `;
 
 export function parseHashOutput(stdout: string): string {
@@ -666,11 +671,12 @@ out() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_OUTPUT"
 keep() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_STATE"; }
 # The files (and empty folders) in folder $1; hidden ones only when $2 is "hidden".
 list_dir() {
-  if [ "$2" = hidden ]; then find "$1" \\( -type f -o -type l -o -type d -empty \\) -print
-  else find "$1" -mindepth 1 -name '.*' -prune -o \\( -type f -o -type l -o -type d -empty \\) -print
+  if [ "$2" = hidden ]; then find "$1" \\( -type f -o -type l -o -type d -empty \\) -print0
+  else find "$1" -mindepth 1 -name '.*' -prune -o \\( -type f -o -type l -o -type d -empty \\) -print0
   fi
 }
-# Every file (and empty folder) the path lines in $1 match, one absolute path per line; ! lines exclude.
+# Every file (and empty folder) the path lines in $1 match, as absolute paths ending in NUL (so any name
+# works); ! lines exclude.
 matches() {
   local p f neg
   shopt -s globstar nullglob
@@ -688,13 +694,13 @@ matches() {
       [ -e "$f" ] || continue
       case "$f" in /*) ;; *) f="$GITHUB_WORKSPACE/\${f#./}" ;; esac
       if [ -d "$f" ]; then
-        while IFS= read -r g; do if [ "$neg" = 1 ]; then unset 'seen[$g]'; else seen[$g]=1; fi; done < <(list_dir "$f" "\${2:-}")
+        while IFS= read -r -d '' g; do if [ "$neg" = 1 ]; then unset 'seen[$g]'; else seen[$g]=1; fi; done < <(list_dir "$f" "\${2:-}")
       elif [ "$neg" = 1 ]; then unset 'seen[$f]'
       else seen[$f]=1
       fi
     done
   done <<< "$1"
-  [ \${#seen[@]} -gt 0 ] && printf '%s\\n' "\${!seen[@]}" | LC_ALL=C sort
+  [ \${#seen[@]} -gt 0 ] && for f in "\${!seen[@]}"; do printf '%s\\0' "$f"; done | LC_ALL=C sort -z
   return 0
 }
 # Uploads the file $1 in parts to the upload $2 (cache or artifact $3), then finishes it.
@@ -760,7 +766,7 @@ if [ ! -s "$list" ]; then
   exit 0
 fi
 archive="$RUNNER_TEMP/megit-cache.tar.gz"
-tar -czf "$archive" -P -T "$list" 2>/dev/null || tar -czf "$archive" -P -T "$list"
+tar -czf "$archive" -P --null --verbatim-files-from -T "$list"
 size=$(wc -c < "$archive" | tr -d ' ')
 code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/caches" --data-urlencode "key=$key" --data-urlencode "version=$version" --data-urlencode "size=$size" || echo 000)
 if [ "$code" = 409 ]; then
@@ -790,15 +796,16 @@ if [ ! -s "$list" ]; then
   esac
 fi
 # Paths inside the artifact are relative to the folder all the files share, as on GitHub.
-root=$(dirname "$(head -n 1 "$list")")
-while IFS= read -r f; do while [ "$root" != / ] && case "$f" in "$root"/*) false ;; *) true ;; esac; do root=$(dirname "$root"); done; done < "$list"
+IFS= read -r -d '' first < "$list" || true
+root=$(dirname -- "$first")
+while IFS= read -r -d '' f; do while [ "$root" != / ] && case "$f" in "$root"/*) false ;; *) true ;; esac; do root=$(dirname -- "$root"); done; done < "$list"
 rel="$RUNNER_TEMP/megit-artifact-rel"
 prefix="\${root%/}/"
-while IFS= read -r f; do printf '%s\n' "\${f#"$prefix"}"; done < "$list" > "$rel"
+while IFS= read -r -d '' f; do printf '%s\\0' "\${f#"$prefix"}"; done < "$list" > "$rel"
 archive="$RUNNER_TEMP/megit-artifact.tar.gz"
-tar -czf "$archive" -C "$root" -T "$rel"
+tar -czf "$archive" -C "$root" --null --verbatim-files-from -T "$rel"
 size=$(wc -c < "$archive" | tr -d ' ')
-count=$(wc -l < "$list" | tr -d ' ')
+count=$(tr -cd '\\0' < "$list" | wc -c | tr -d ' ')
 code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/artifacts" --data-urlencode "name=$name" --data-urlencode "size=$size" --data-urlencode "retention-days=\${MEGIT_IN_RETENTION_DAYS:-}" --data-urlencode "overwrite=\${MEGIT_IN_OVERWRITE:-false}" || echo 000)
 if [ "$code" != 201 ]; then
   echo "Uploading the artifact failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-reserve")" >&2

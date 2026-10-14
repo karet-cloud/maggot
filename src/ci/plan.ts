@@ -79,6 +79,8 @@ export interface Plan {
 
 /** How deeply composite actions may use composite actions, as on GitHub. */
 export const MAX_ACTION_DEPTH = 9;
+/** Units a job may have in all, composite actions expanded: enough for any real job, and a bound on its state. */
+export const MAX_UNITS = 1000;
 
 export function buildPlan(steps: StepSpec[], resolved: (ResolvedAction | null)[]): Plan {
 	const units: Unit[] = [];
@@ -138,6 +140,7 @@ export function buildPlan(steps: StepSpec[], resolved: (ResolvedAction | null)[]
 						post.push({ ...b, ui: -postUi.length, id: null, name: `Post ${s.name}`, if: runs.postIf, continueOnError: true, timeoutMinutes: null, kind: "node", action: index, phase: "post", main });
 					}
 				} else {
+					if (units.length > MAX_UNITS) throw new Error(`the job's steps and the actions they use come to more than ${MAX_UNITS} steps`);
 					if (depth + 1 > MAX_ACTION_DEPTH) throw new Error(`${s.name}: composite actions nest more than ${MAX_ACTION_DEPTH} deep`);
 					const inner = `${++scopes}`;
 					const enter = units.length;
@@ -151,6 +154,7 @@ export function buildPlan(steps: StepSpec[], resolved: (ResolvedAction | null)[]
 		}
 	};
 	walk(steps, resolved, "", (i) => i, 0);
+	if (units.length + pre.length + post.length > MAX_UNITS) throw new Error(`the job's steps and the actions they use come to more than ${MAX_UNITS} steps`);
 	for (const [i, s] of steps.entries()) mainUi[i] = s.name;
 	// Number the shown steps: 0 Set up job, then pre, main, post (reversed), Complete job.
 	const firstMain = 1 + preUi.length;

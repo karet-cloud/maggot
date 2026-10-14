@@ -55,7 +55,7 @@ export class CiStorage {
 				created_at INTEGER NOT NULL,
 				used_at INTEGER NOT NULL
 			);
-			CREATE INDEX IF NOT EXISTS ci_caches_lookup ON ci_caches (scope, version, key);
+			CREATE UNIQUE INDEX IF NOT EXISTS ci_caches_key ON ci_caches (scope, version, key);
 			CREATE TABLE IF NOT EXISTS ci_artifacts (
 				id TEXT PRIMARY KEY,
 				run INTEGER NOT NULL,
@@ -69,7 +69,7 @@ export class CiStorage {
 				created_at INTEGER NOT NULL,
 				expires_at INTEGER NOT NULL
 			);
-			CREATE INDEX IF NOT EXISTS ci_artifacts_run ON ci_artifacts (run, name);
+			CREATE UNIQUE INDEX IF NOT EXISTS ci_artifacts_name ON ci_artifacts (run, name);
 		`);
 	}
 
@@ -108,27 +108,26 @@ export class CiStorage {
 		if (!/^[0-9a-f]{64}$/.test(version)) throw new HttpError(400, "INVALID_INPUT", "The cache version is a SHA-256");
 		if (!Number.isInteger(size) || size < 1) throw new HttpError(400, "INVALID_INPUT", "size is the archive's size in bytes");
 		if (size > MAX_CACHE_BYTES) throw new HttpError(413, "TOO_LARGE", `A cache can be at most ${MAX_CACHE_BYTES / 1024 ** 3} GB`);
-		const existing = this.sql.exec<CacheRow>("SELECT * FROM ci_caches WHERE scope = ? AND version = ? AND key = ?", grant.write, version, key).toArray();
-		for (const row of existing) {
-			if (row.status === "ready" || Date.now() - row.created_at < UPLOAD_TTL_MS) return null;
-			await this.dropCache(row);
-		}
+		const existing = this.sql.exec<CacheRow>("SELECT * FROM ci_caches WHERE scope = ? AND version = ? AND key = ?", grant.write, version, key).toArray()[0];
+		if (existing && (existing.status === "ready" || Date.now() - existing.created_at < UPLOAD_TTL_MS)) return null;
 		const id = crypto.randomUUID();
 		const r2key = `caches/${this.repoId()}/${id}`;
-		const upload = await this.r2().createMultipartUpload(r2key);
 		const now = Date.now();
+		// The name is claimed before anything is awaited, so two jobs saving the same key can't both start.
+		if (existing) this.sql.exec("DELETE FROM ci_caches WHERE id = ?", existing.id);
 		this.sql.exec(
-			"INSERT INTO ci_caches (id, key, version, scope, r2key, size, upload_id, status, created_at, used_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)",
+			"INSERT INTO ci_caches (id, key, version, scope, r2key, size, upload_id, status, created_at, used_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 'uploading', ?, ?)",
 			id,
 			key,
 			version,
 			grant.write,
 			r2key,
 			size,
-			upload.uploadId,
 			now,
 			now,
 		);
+		if (existing) await this.abortOrDelete(existing);
+		await this.startUpload("ci_caches", id, r2key);
 		return id;
 	}
 
@@ -166,34 +165,38 @@ export class CiStorage {
 		if (size > MAX_ARTIFACT_BYTES) throw new HttpError(413, "TOO_LARGE", `An artifact can be at most ${MAX_ARTIFACT_BYTES / 1024 ** 3} GB`);
 		const days = retentionDays ?? DEFAULT_RETENTION_DAYS;
 		if (!Number.isInteger(days) || days < 1 || days > MAX_RETENTION_DAYS) throw new HttpError(400, "INVALID_INPUT", `retention-days is from 1 to ${MAX_RETENTION_DAYS}`);
-		const same = this.sql.exec<ArtifactRow>("SELECT * FROM ci_artifacts WHERE run = ? AND name = ?", grant.run, name).toArray();
-		for (const row of same) {
-			if (row.status === "ready" && !overwrite) throw new HttpError(409, "ALREADY_EXISTS", `This run already has an artifact called ${name} (set overwrite: true to replace it)`);
-			await this.dropArtifact(row);
+		const same = this.sql.exec<ArtifactRow>("SELECT * FROM ci_artifacts WHERE run = ? AND name = ?", grant.run, name).toArray()[0];
+		// One still uploading (another job's, say) is taken too, unless overwriting or it's been abandoned.
+		const stale = same && same.status === "uploading" && Date.now() - same.created_at > UPLOAD_TTL_MS;
+		if (same && !overwrite && !stale) {
+			throw new HttpError(409, "ALREADY_EXISTS", `This run already has an artifact called ${name}${same.status === "uploading" ? " (still being uploaded)" : ""} (set overwrite: true to replace it)`);
 		}
-		if (this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ci_artifacts WHERE run = ?", grant.run).one().n >= MAX_ARTIFACTS_PER_RUN) {
+		const others = same ? 1 : 0;
+		if (this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ci_artifacts WHERE run = ?", grant.run).one().n - others >= MAX_ARTIFACTS_PER_RUN) {
 			throw new HttpError(409, "TOO_MANY", `A run can have at most ${MAX_ARTIFACTS_PER_RUN} artifacts`);
 		}
-		const total = this.sql.exec<{ n: number | null }>("SELECT SUM(size) AS n FROM ci_artifacts").one().n ?? 0;
+		const total = (this.sql.exec<{ n: number | null }>("SELECT SUM(size) AS n FROM ci_artifacts").one().n ?? 0) - (same?.size ?? 0);
 		if (total + size > REPO_ARTIFACT_BYTES) {
 			throw new HttpError(413, "QUOTA_EXCEEDED", `The repository's artifacts would take more than ${REPO_ARTIFACT_BYTES / 1024 ** 3} GB; delete some or shorten their retention`);
 		}
 		const id = crypto.randomUUID();
 		const r2key = `artifacts/${this.repoId()}/${grant.run}/${id}`;
-		const upload = await this.r2().createMultipartUpload(r2key);
 		const now = Date.now();
+		// Claimed before anything is awaited, so two uploads of the same name can't both start.
+		if (same) this.sql.exec("DELETE FROM ci_artifacts WHERE id = ?", same.id);
 		this.sql.exec(
-			"INSERT INTO ci_artifacts (id, run, job, name, r2key, size, upload_id, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)",
+			"INSERT INTO ci_artifacts (id, run, job, name, r2key, size, upload_id, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 'uploading', ?, ?)",
 			id,
 			grant.run,
 			grant.job,
 			name,
 			r2key,
 			size,
-			upload.uploadId,
 			now,
 			now + days * 86_400_000,
 		);
+		if (same) await this.abortOrDelete(same);
+		await this.startUpload("ci_artifacts", id, r2key);
 		return id;
 	}
 
@@ -224,6 +227,17 @@ export class CiStorage {
 
 	// ── Uploads ──────────────────────────────────────────────────────────────
 
+	/** Starts the R2 multipart upload for a claimed record; if that fails, the claim goes. */
+	private async startUpload(table: "ci_caches" | "ci_artifacts", id: string, r2key: string) {
+		try {
+			const upload = await this.r2().createMultipartUpload(r2key);
+			this.sql.exec(`UPDATE ${table} SET upload_id = ? WHERE id = ?`, upload.uploadId, id);
+		} catch (err) {
+			this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, id);
+			throw err;
+		}
+	}
+
 	private row(kind: Kind, id: string): CacheRow | ArtifactRow | undefined {
 		return kind === "caches" ? this.sql.exec<CacheRow>("SELECT * FROM ci_caches WHERE id = ?", id).toArray()[0] : this.sql.exec<ArtifactRow>("SELECT * FROM ci_artifacts WHERE id = ?", id).toArray()[0];
 	}
@@ -233,6 +247,7 @@ export class CiStorage {
 		const row = this.row(kind, id);
 		const mine = row && (kind === "caches" ? (row as CacheRow).scope === grant.write : (row as ArtifactRow).run === grant.run);
 		if (!row || !mine || row.status !== "uploading" || !row.upload_id) throw new HttpError(404, "NOT_FOUND", "No such upload in progress");
+		if (Date.now() - row.created_at > UPLOAD_TTL_MS) throw new HttpError(410, "EXPIRED", "The upload took too long and was given up on");
 		return row;
 	}
 
@@ -256,6 +271,13 @@ export class CiStorage {
 		if (parts.length === 0) throw new HttpError(400, "INVALID_INPUT", "Nothing was uploaded");
 		const object = await this.r2().resumeMultipartUpload(row.r2key, row.upload_id!).complete(parts);
 		const table = kind === "caches" ? "ci_caches" : "ci_artifacts";
+		// The size given when it was reserved was checked against the limits: the upload must be exactly that
+		// (a part missing or extra is caught here too).
+		if (object.size !== row.size) {
+			await this.r2().delete(row.r2key);
+			this.sql.exec(`DELETE FROM ${table} WHERE id = ?`, id);
+			throw new HttpError(400, "INCOMPLETE_UPLOAD", `The upload came to ${object.size} bytes, not the ${row.size} it was reserved for`);
+		}
 		this.sql.exec(`UPDATE ${table} SET status = 'ready', size = ?, upload_id = NULL, parts = '[]' WHERE id = ?`, object.size, id);
 		if (kind === "caches") await this.evict();
 	}
@@ -272,7 +294,7 @@ export class CiStorage {
 
 	/** Keeps the repository's caches under REPO_CACHE_BYTES, dropping the least recently restored. */
 	private async evict() {
-		let total = this.sql.exec<{ n: number | null }>("SELECT SUM(size) AS n FROM ci_caches").one().n ?? 0;
+		let total = this.sql.exec<{ n: number | null }>("SELECT SUM(size) AS n FROM ci_caches WHERE status = 'ready'").one().n ?? 0;
 		while (total > REPO_CACHE_BYTES) {
 			const oldest = this.sql.exec<CacheRow>("SELECT * FROM ci_caches WHERE status = 'ready' ORDER BY used_at LIMIT 1").toArray()[0];
 			if (!oldest) break;

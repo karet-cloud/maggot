@@ -1448,7 +1448,7 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204);
 });
 
-test("wikis: pages from the web and over git, stale edits refused, readers read, archived and turned-off wikis", async () => {
+test("wikis: pages from the web and over git, conflicting edits refused, readers read, archived and turned-off wikis", async () => {
 	const ada = await newUser("wikia");
 	const bob = await newUser("wikib");
 	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
@@ -1496,11 +1496,11 @@ test("wikis: pages from the web and over git, stale edits refused, readers read,
 	assert.deepEqual(index.pages.map((p) => [p.slug, p.title, p.path]), [["Home", "Home", "Home.md"], ["Getting-Started", "Getting Started", "Getting-Started.md"]]);
 	assert.equal(index.head, created.commit);
 
-	// An edit based on an older head is refused; one based on the current head lands.
-	const stale = await as(ada)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "Lost?\n", baseCommit: home.commit }) });
+	// An edit is refused if its page changed since the editor's base; changes to other pages don't stand in the way.
+	const stale = await as(ada)(`${repo}/wiki/pages/Getting-Started`, { method: "PATCH", body: JSON.stringify({ content: "Lost?\n", baseCommit: home.commit }) });
 	assert.equal(stale.status, 409);
 	assert.equal(((await stale.json()) as { error: { code: string } }).error.code, "BRANCH_MOVED");
-	await json(as(ada)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "Welcome back. See [[Getting Started]].\n", baseCommit: created.commit }) }));
+	await json(as(ada)(`${repo}/wiki/pages/Home`, { method: "PATCH", body: JSON.stringify({ content: "Welcome back. See [[Getting Started]].\n", baseCommit: home.commit }) }));
 	const page = await json<{ page: Page }>(as(bob)(`${repo}/wiki/pages/home`));
 	assert.equal(page.page.source, "Welcome back. See [[Getting Started]].\n");
 	assert.deepEqual([page.page.lastCommit?.message, page.page.lastCommit?.author.name], ["Updated Home", ada.username]);

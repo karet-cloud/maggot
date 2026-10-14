@@ -194,7 +194,12 @@ export class Wiki {
 		return { commit, packBytes };
 	}
 
-	/** One web commit to the wiki: checks the base, builds the changes from the root's files, commits and reports it. */
+	/**
+	 * One web commit to the wiki: builds the changes from the root's files, checks that nothing they touch
+	 * changed since the editor's base, commits and reports it. Edits to other pages since the base don't
+	 * stand in the way. The wiki's storage is created only when the first commit is about to be made, so a
+	 * refused write leaves nothing behind.
+	 */
 	private async write(
 		input: { message?: string; baseCommit?: string | null; author: Identity; maxPackBytes: number },
 		plan: (
@@ -203,25 +208,37 @@ export class Wiki {
 		) => Promise<{ changes: FileChange[]; message: string; slug: string; pages: (sha: string) => WikiPageChange[] }>,
 	): Promise<{ page: string; commit: string; packBytes: number }> {
 		this.host.assertWritable();
-		const access = (await this.remote("write")) as RemoteAccess;
-		const head = (await listBranches(access)).get(WIKI_BRANCH) ?? null;
-		if (input.baseCommit !== undefined && input.baseCommit !== head) {
-			throw new HttpError(409, "BRANCH_MOVED", "The wiki has changed since you started editing; reload to see the changes");
-		}
-		using repo = await this.host.store.get(this.host.name());
-		const parent = head ? await repo.readCommit(head) : null;
-		if (head && !parent) throw new HttpError(409, "BRANCH_MOVED", "The wiki changed while saving; reload and try again");
-		const entries = parent ? ((await repo.readTree(parent.treeHash)) ?? []).filter((e) => e.type !== "tree") : [];
-		const read = async (path: string) => {
-			const entry = entries.find((e) => e.name === path);
-			return (entry && (await (await repo.readBlob(entry.hash))?.text())) ?? "";
-		};
-		const planned = await plan(
-			entries.map((e) => e.name),
-			read,
-		);
+		const exists = this.storedRemote() !== null;
+		let access = exists ? ((await this.remote("write")) as RemoteAccess) : null;
+		const head = access ? ((await listBranches(access)).get(WIKI_BRANCH) ?? null) : null;
+		const repo = exists ? await this.host.store.get(this.host.name()) : null;
 		try {
-			const result = await commitChanges(repo, access, {
+			const parent = head && repo ? await repo.readCommit(head) : null;
+			if (head && !parent) throw new HttpError(409, "BRANCH_MOVED", "The wiki changed while saving; reload and try again");
+			const filesAt = async (treeHash: string) => ((await repo!.readTree(treeHash)) ?? []).filter((e) => e.type !== "tree");
+			const entries = parent ? await filesAt(parent.treeHash) : [];
+			const read = async (path: string) => {
+				const entry = entries.find((e) => e.name === path);
+				return (entry && repo && (await (await repo.readBlob(entry.hash))?.text())) ?? "";
+			};
+			const planned = await plan(
+				entries.map((e) => e.name),
+				read,
+			);
+			// The wiki moved on since the editor opened: fine, unless a file this commit touches changed too.
+			if (input.baseCommit !== undefined && input.baseCommit !== head) {
+				const base = input.baseCommit && repo ? await repo.readCommit(input.baseCommit) : null;
+				if (input.baseCommit && !base) throw new HttpError(409, "BRANCH_MOVED", "The wiki has changed since you started editing; reload to see the changes");
+				const before = base ? await filesAt(base.treeHash) : [];
+				for (const change of planned.changes) {
+					const was = before.find((e) => e.name === change.path)?.hash ?? null;
+					const now = entries.find((e) => e.name === change.path)?.hash ?? null;
+					if (was !== now) throw new HttpError(409, "BRANCH_MOVED", `${change.path} changed since you started editing; reload to see the changes`);
+				}
+			}
+			access ??= (await this.remote("write")) as RemoteAccess;
+			using target = repo ? null : await this.host.store.get(this.host.name());
+			const result = await commitChanges((repo ?? target)!, access, {
 				branch: WIKI_BRANCH,
 				parent: parent ? { hash: parent.hash, treeHash: parent.treeHash } : null,
 				create: !head,
@@ -242,6 +259,8 @@ export class Wiki {
 			if (err instanceof TooLarge) throw new HttpError(413, "TOO_LARGE", `${err.message}; push it with git, or make room under the size limits`);
 			if (err instanceof RefUpdateRejected) throw new HttpError(409, "BRANCH_MOVED", "The wiki changed while saving; reload and try again");
 			throw err;
+		} finally {
+			repo?.[Symbol.dispose]();
 		}
 	}
 

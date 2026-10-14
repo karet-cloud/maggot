@@ -479,8 +479,8 @@ export function RunArtifacts({ project, run, active, canWrite }: { project: stri
 	);
 }
 
-/** The repository's saved caches (actions/cache), newest use first, with delete. For people who can write. */
-export function Caches({ project }: { project: string }) {
+/** The repository's saved caches (actions/cache), newest use first, with delete (not while archived). For people who can write. */
+export function Caches({ project, canDelete }: { project: string; canDelete: boolean }) {
 	const queryClient = useQueryClient();
 	const [open, setOpen] = useState(false);
 	const caches = useQuery({ queryKey: keys.ciCaches(project), queryFn: () => api.ciCaches(project), enabled: open });
@@ -524,9 +524,11 @@ export function Caches({ project }: { project: string }) {
 								<span className="text-[11px] text-faint">
 									{formatBytes(c.size)} · used <TimeAgo at={c.usedAt} />
 								</span>
-								<Button variant="ghost" className="text-xs" busy={remove.isPending && remove.variables === c.id} onClick={() => remove.mutate(c.id)} aria-label={`Delete the cache ${c.key}`}>
-									<Trash2 className="size-3.5" />
-								</Button>
+								{canDelete && (
+									<Button variant="ghost" className="text-xs" busy={remove.isPending && remove.variables === c.id} onClick={() => remove.mutate(c.id)} aria-label={`Delete the cache ${c.key}`}>
+										<Trash2 className="size-3.5" />
+									</Button>
+								)}
 							</li>
 						))}
 					</ul>

@@ -70,8 +70,9 @@ export function parseCron(text: string): Cron {
 		days: field(parts[2], "day of month", 1, 31),
 		months: field(parts[3], "month", 1, 12, MONTHS, 1),
 		weekdays,
-		anyDay: parts[2] === "*",
-		anyWeekday: parts[4] === "*",
+		// As in classic cron, a field starting with * (even */2) doesn't restrict the day.
+		anyDay: parts[2].startsWith("*"),
+		anyWeekday: parts[4].startsWith("*"),
 		minGapMinutes: 0,
 	};
 	// The gap between runs, from a sample of them: enough to see the tightest one.
@@ -92,9 +93,9 @@ export function parseCron(text: string): Cron {
 function dayMatches(cron: Cron, d: Date): boolean {
 	const day = cron.days.has(d.getUTCDate());
 	const weekday = cron.weekdays.has(d.getUTCDay());
-	if (cron.anyDay && cron.anyWeekday) return true;
-	if (cron.anyDay) return weekday;
-	if (cron.anyWeekday) return day;
+	// As in classic cron: if either field starts with *, both must match (a * field matches every day);
+	// when both are restricted, either will do.
+	if (cron.anyDay || cron.anyWeekday) return day && weekday;
 	return day || weekday;
 }
 

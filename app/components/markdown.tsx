@@ -5,7 +5,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { api, repoParams } from "../lib/api.ts";
 import { highlightCode } from "../lib/highlight.ts";
-import { pageLinkTarget, pageTitle, wikiLinks } from "../../src/wiki-pages.ts";
+import { headingSlug, pageLinkTarget, pageTitle, wikiLinks } from "../../src/wiki-pages.ts";
 
 const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;
 
@@ -23,12 +23,21 @@ interface HastNode {
 const textOf = (node: HastNode): string => (node.type === "text" ? (node.value ?? "") : (node.children ?? []).map(textOf).join(""));
 
 /** Gives headings GitHub's anchor ids (lowercased, punctuation dropped, spaces to hyphens, repeats numbered). */
+/** A URL path decoded, or as it is if it isn't valid percent-encoding. */
+function decodePath(path: string): string {
+	try {
+		return decodeURIComponent(path);
+	} catch {
+		return path;
+	}
+}
+
 function rehypeHeadingIds() {
 	return (tree: HastNode) => {
 		const seen = new Map<string, number>();
 		const visit = (node: HastNode) => {
 			if (node.type === "element" && /^h[1-6]$/.test(node.tagName ?? "")) {
-				const base = textOf(node).trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+				const base = headingSlug(textOf(node));
 				const n = seen.get(base) ?? 0;
 				seen.set(base, n + 1);
 				node.properties = { ...node.properties, id: `${ID_PREFIX}${n ? `${base}-${n}` : base}` };
@@ -82,7 +91,11 @@ export function Markdown({
 	wiki?: { pages: string[] };
 }) {
 	const dir = path.split("/").slice(0, -1).join("/");
-	const pages = new Map((wiki?.pages ?? []).map((slug) => [slug.toLowerCase(), slug]));
+	// A page by its exact name first, then ignoring case, as the server finds them (so Foo and foo can both exist).
+	const exact = new Set(wiki?.pages ?? []);
+	const folded = new Map<string, string>();
+	for (const slug of wiki?.pages ?? []) if (!folded.has(slug.toLowerCase())) folded.set(slug.toLowerCase(), slug);
+	const findPage = (slug: string) => (exact.has(slug) ? slug : folded.get(slug.toLowerCase()));
 	return (
 		<div className="markdown">
 			<ReactMarkdown
@@ -99,9 +112,9 @@ export function Markdown({
 							);
 						}
 						if (wiki) {
-							const target = pageLinkTarget(href, (slug) => pages.has(slug.toLowerCase()));
+							const target = pageLinkTarget(href, (slug) => findPage(slug) !== undefined);
 							if (!target) return <a href={href}>{children}</a>;
-							const page = pages.get(target.slug.toLowerCase());
+							const page = findPage(target.slug);
 							if (!page) {
 								return (
 									<Link
@@ -138,12 +151,14 @@ export function Markdown({
 						);
 					},
 					img({ src = "", alt }) {
+						// A relative image's path is a URL path: decoded (my%20logo.png is "my logo.png"), without ?query or #fragment.
+						const local = typeof src === "string" ? decodePath(src.split(/[?#]/)[0]) : "";
 						const url =
 							typeof src !== "string" || EXTERNAL.test(src)
 								? src
 								: wiki
-									? api.wikiRawUrl(project, resolvePath("", src))
-									: api.rawUrl(project, resolvePath(dir, src), refName);
+									? api.wikiRawUrl(project, resolvePath("", local))
+									: api.rawUrl(project, resolvePath(dir, local), refName);
 						return <img src={url as string} alt={alt ?? ""} loading="lazy" />;
 					},
 					code({ className, children }) {

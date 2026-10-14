@@ -83,6 +83,8 @@ test("templates and conditions", () => {
 	assert.ok(!runs("!cancelled()", status(false, false, true)));
 	assert.ok(runs("steps.build.outputs.cache-hit != 'true' || failure()", status(false, true, false)));
 	assert.ok(!runs("steps.build.outputs.cache-hit != 'true'", status(true, false, false)));
+	assert.ok(!runs("${{ false && contains('}}', '}}') }}", status(true, false, false)), "a quoted }} doesn't end the expression");
+	assert.ok(runs("${{ false }} or not", status(true, false, false)), "text around ${{ }} is a non-empty string");
 });
 
 test("hashFiles is worked out first, then read back", () => {
@@ -103,6 +105,8 @@ test("cron schedules", () => {
 	assert.equal(next("0 0 * 2 0", "2026-10-14T00:00:00Z"), "2027-02-07T00:00:00.000Z", "Sundays in February");
 	assert.equal(next("0 12 13 * 5", "2026-10-14T00:00:00Z"), "2026-10-16T12:00:00.000Z", "day of month or day of week");
 	assert.equal(next("0 0 * * 7", "2026-10-14T00:00:00Z"), "2026-10-18T00:00:00.000Z", "7 is Sunday");
+	assert.equal(next("0 0 */2 * *", "2026-10-14T00:00:00Z"), "2026-10-15T00:00:00.000Z", "*/2 days: odd days of the month");
+	assert.equal(next("0 0 */2 * 1", "2026-10-14T00:00:00Z"), "2026-10-19T00:00:00.000Z", "a field starting with * means both must match (an odd day that is a Monday)");
 	assert.equal(parseCron("*/5 * * * *").minGapMinutes, 5);
 	assert.equal(parseCron("0,30 * * * *").minGapMinutes, 30);
 	assert.equal(parseCron("5/20 * * * *").minGapMinutes, 20);

@@ -94,6 +94,14 @@ export function pageLinkTarget(href: string, isPage?: (slug: string) => boolean)
 const LINK = /\[\[([^[\]\n]+?)\]\]/g;
 const escapeText = (text: string) => text.replace(/[\\[\]]/g, (c) => `\\${c}`);
 
+/**
+ * A heading's anchor, as the Markdown renderer makes it (GitHub's rule): lower case, punctuation dropped,
+ * spaces as dashes. `[[Page#Some heading]]` links use it too, so they land on the heading.
+ */
+export function headingSlug(text: string): string {
+	return text.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, "").replace(/\s/g, "-");
+}
+
 /** One `[[...]]` as a Markdown link: `[[Page Name]]`, `[[Link text|Page Name]]`, `[[Page#section]]`, or a URL. */
 function wikiLink(inner: string): string {
 	const bar = inner.indexOf("|");
@@ -102,7 +110,7 @@ function wikiLink(inner: string): string {
 	if (!target) return `[[${inner}]]`;
 	if (/^https?:\/\//i.test(target)) return `[${escapeText(text)}](<${target.replace(/[<>]/g, "")}>)`;
 	const [page, fragment] = target.split("#", 2);
-	const anchor = fragment ? `#${encodeURIComponent(pageSlug(fragment).toLowerCase())}` : "";
+	const anchor = fragment ? `#${encodeURIComponent(headingSlug(fragment))}` : "";
 	if (!page.trim()) return `[${escapeText(text)}](${anchor || "#"})`;
 	return `[${escapeText(text)}](${encodeURIComponent(pageSlug(page))}${anchor})`;
 }

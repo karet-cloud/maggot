@@ -91,7 +91,7 @@ function Actions() {
 					</div>
 				)}
 			</div>
-			{info.data?.repo.canWrite && <Caches project={project} />}
+			{info.data?.repo.canWrite && <Caches project={project} canDelete={!info.data.repo.archivedAt} />}
 		</div>
 	);
 }
