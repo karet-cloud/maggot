@@ -368,9 +368,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	}
 
 	/** What a fetch needs: read access, and the branch to advertise as HEAD when it isn't storage's own. */
-	async fetchContext(): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: string }> {
+	async fetchContext(): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: { branch: string; oid?: string } }> {
 		const meta = this.meta();
-		return { remote: await this.gitRemote("read"), rules: [], head: meta.storeBranch && meta.storeBranch !== meta.defaultBranch ? meta.defaultBranch : undefined };
+		const moved = meta.storeBranch && meta.storeBranch !== meta.defaultBranch;
+		return { remote: await this.gitRemote("read"), rules: [], head: moved ? { branch: meta.defaultBranch, oid: this.knownRefs(meta)[meta.defaultBranch] } : undefined };
 	}
 
 	/** What a push needs: write access to the repository and its branch rules, in one round trip. */
@@ -798,14 +799,16 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		/** The head commit the merger saw (and reviewers approved); the merge stops if the branch has moved on. */
 		expectedHead?: string;
 	}): Promise<{ commit: string; changedFiles: string[] }> {
-		const meta = this.meta();
+		this.meta();
 		this.assertWritable();
 		return this.mergeSlot.run(async () => {
+			// Read inside the slot: the default branch may have changed while this merge waited.
+			const meta = this.meta();
 			const base = await this.baseAccess(meta);
 			const head = input.headRepo && input.headRepo !== meta.name ? await this.credentials(input.headRepo, input.headBranch, "read", INTERNAL_TOKEN_TTL) : null;
 			const headAccess = head ? { url: head.remote, token: head.token } : base;
 			// The default branch's workspace is kept between merges (and reset now and then, as the queue's is); other bases get a fresh one.
-			if (input.base === meta.defaultBranch && (!this.workspace || this.workspaceMerges >= WORKSPACE_MAX_MERGES)) {
+			if (input.base === meta.defaultBranch && (!this.workspace || this.workspace.branch !== meta.defaultBranch || this.workspaceMerges >= WORKSPACE_MAX_MERGES)) {
 				this.workspace = new Workspace(meta.defaultBranch, MERGE_IDENTITY);
 				this.workspaceMerges = 0;
 			}
@@ -960,24 +963,34 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	/** Makes `name`, an existing branch, the default: what the code page shows, pull requests target and agents merge into. */
 	async setDefaultBranch(name: string): Promise<string> {
-		const meta = this.meta();
+		if (name === this.meta().defaultBranch) return name;
 		this.assertWritable();
-		if (name === meta.defaultBranch) return name;
-		const active = this.sql
-			.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(", ")})`, ...ACTIVE_STATUSES)
-			.one().n;
-		// Their forks and merges are based on the old default.
-		if (active > 0) throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before changing the default branch`);
-		const access = await this.baseAccess(meta);
-		if (!(await listBranches(access)).has(name)) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
-		const storeBranch = meta.storeBranch ?? meta.defaultBranch;
-		const next: Meta = { ...meta, defaultBranch: name, storeBranch: storeBranch === name ? undefined : storeBranch };
-		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(next));
-		// The merge workspace tracks the old default.
-		this.workspace = undefined;
-		const repository = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'repository'").toArray()[0];
-		if (repository) this.sql.exec("UPDATE meta SET value = ? WHERE key = 'repository'", JSON.stringify({ ...JSON.parse(repository.value), defaultBranch: name }));
-		return name;
+		if (name.startsWith("maggot-incoming/")) throw new HttpError(400, "INVALID_INPUT", `${name} is an internal branch`);
+		// Waits for merges in progress, so none lands on the old default after the switch.
+		return this.mergeSlot.run(async () => {
+			const exists = (await listBranches(await this.baseAccess(this.meta()))).has(name);
+			if (!exists) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
+			// From here to the write, nothing awaits: a task can't start in between.
+			const meta = this.meta();
+			this.assertWritable();
+			const active = this.sql
+				.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(", ")})`, ...ACTIVE_STATUSES)
+				.one().n;
+			// Their forks and merges are based on the old default.
+			if (active > 0) throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before changing the default branch`);
+			const storeBranch = meta.storeBranch ?? meta.defaultBranch;
+			const next: Meta = { ...meta, defaultBranch: name, storeBranch: storeBranch === name ? undefined : storeBranch };
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(next));
+			this.workspace = undefined;
+			const repository = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'repository'").toArray()[0];
+			if (repository) this.sql.exec("UPDATE meta SET value = ? WHERE key = 'repository'", JSON.stringify({ ...JSON.parse(repository.value), defaultBranch: name }));
+			return name;
+		});
+	}
+
+	/** The default branch, as the coordinator knows it: D1's copy follows this one. */
+	async defaultBranch(): Promise<string> {
+		return this.meta().defaultBranch;
 	}
 
 	async deleteBranch(name: string): Promise<void> {
@@ -1448,7 +1461,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		try {
 			const base = await this.baseAccess(meta);
 			const fork = await this.credentials(row.repo, meta.defaultBranch, "read", INTERNAL_TOKEN_TTL);
-			if (!this.workspace || this.workspaceMerges >= WORKSPACE_MAX_MERGES) {
+			if (!this.workspace || this.workspace.branch !== meta.defaultBranch || this.workspaceMerges >= WORKSPACE_MAX_MERGES) {
 				this.workspace = new Workspace(meta.defaultBranch, MERGE_IDENTITY);
 				this.workspaceMerges = 0;
 			}

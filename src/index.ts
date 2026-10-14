@@ -612,6 +612,11 @@ interface NewRepo {
 	owner?: string;
 }
 
+function assertBranchName(name: string): string {
+	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(name) || name.includes("..") || name.startsWith("/") || name.endsWith("/")) throw new HttpError(400, "INVALID_INPUT", `Invalid branch name: ${name}`);
+	return name;
+}
+
 /**
  * A public Git URL to import from, as people paste it: the scheme may be missing, and a browser link
  * to a branch (`…/tree/<branch>`) names the branch to import. Checked to answer Git before anything is created.
@@ -625,17 +630,23 @@ async function importSource(raw: string, branch?: string): Promise<{ url: string
 	}
 	if (url.protocol !== "https:" && url.protocol !== "http:") throw new HttpError(400, "INVALID_INPUT", "Import from an http(s) Git URL, such as https://github.com/owner/repo.git");
 	if (url.username || url.password) throw new HttpError(400, "INVALID_INPUT", "Only public repositories can be imported, so leave credentials out of the URL");
-	const tree = /^(\/[^/]+\/[^/]+?)(?:\.git)?\/(?:-\/)?tree\/(.+?)\/?$/.exec(url.pathname);
+	// GitLab nests groups (`/group/sub/repo/-/tree/x`); a branch name with slashes can't be told from a folder in it.
+	const tree = /^(\/.+?)(?:\.git)?\/(?:-\/)?tree\/(.+?)\/?$/.exec(url.pathname);
 	if (tree) {
 		url.pathname = tree[1];
-		branch ??= decodeURIComponent(tree[2]);
+		try {
+			branch ??= decodeURIComponent(tree[2]);
+		} catch {
+			throw new HttpError(400, "INVALID_INPUT", "The import URL's branch isn't valid");
+		}
 	}
 	url.search = "";
 	url.hash = "";
 	const clean = url.toString().replace(/\/+$/, "");
 	const probe = (await probeRemote(clean)) ?? (clean.endsWith(".git") ? null : await probeRemote(`${clean}.git`).then((p) => (p ? { ...p, dotGit: true } : null)));
 	if (!probe) throw new HttpError(400, "IMPORT_FAILED", `${clean} isn't a public Git repository (it didn't answer a Git clone)`);
-	return { url: "dotGit" in probe ? `${clean}.git` : clean, branch: branch ?? probe.head };
+	const chosen = branch ?? probe.head;
+	return { url: "dotGit" in probe ? `${clean}.git` : clean, branch: chosen === undefined ? undefined : assertBranchName(chosen) };
 }
 
 /** Whose account a new repository (or fork) goes in: the caller's, or an organization they're a member of. */
@@ -659,8 +670,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	// A fork of a private repository stays private.
 	const visibility = source?.visibility === "private" ? "private" : (input.visibility ?? source?.visibility ?? "public");
 	if (visibility !== "public" && visibility !== "private") throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
-	const defaultBranch = source?.defaultBranch ?? (input.defaultBranch?.trim() || "master");
-	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(defaultBranch) || defaultBranch.includes("..")) throw new HttpError(400, "INVALID_INPUT", "Invalid branch name");
+	const defaultBranch = assertBranchName(source?.defaultBranch ?? (input.defaultBranch?.trim() || "master"));
 	await ensureSchema(db(c.env));
 	const owner = await newOwner(c, user, input.owner);
 	const row: RepoRow = {
@@ -680,12 +690,12 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		hasWiki: 1,
 	};
 	await assertCanCreateRepo(c.env, db(c.env), owner.id);
-	const imported = !source && input.importUrl?.trim() ? await importSource(input.importUrl.trim(), input.importBranch?.trim() || undefined) : undefined;
 	if (source) {
 		const room = policy(c.env).userBytes - (await usage(db(c.env), owner.id)).bytes;
 		if (source.bytes > room) throw new HttpError(403, "QUOTA_EXCEEDED", `${source.owner}/${source.name} is bigger than the ${formatBytes(Math.max(room, 0))} you have room for.`);
 	}
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
+	const imported = !source && input.importUrl?.trim() ? await importSource(input.importUrl.trim(), input.importBranch?.trim() || undefined) : undefined;
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
 	await insertRepo(db(c.env), row, policy(c.env).reposPerUser, policy(c.env).userBytes);
 	// A member who creates a repository in an organization administers it, as on GitHub; members alone only read.
@@ -893,6 +903,11 @@ repo.get("/", async (c) => {
 	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
 	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row), await ownsRepo(c, row)) : null;
 	const state = await project(c).getProject();
+	// The coordinator's default branch is the one that counts; D1's copy catches up if a write to it failed.
+	if (row && info && state.defaultBranch !== row.defaultBranch) {
+		c.executionCtx.waitUntil(updateRepo(db(c.env), row.id, { defaultBranch: state.defaultBranch }));
+		info.defaultBranch = state.defaultBranch;
+	}
 	// People reach user repositories through maggot's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
 });
@@ -901,7 +916,7 @@ repo.patch("/", async (c) => {
 	const row = c.var.repo;
 	if (!row) throw new HttpError(400, "INVALID_INPUT", "Only user repositories have settings");
 	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean; defaultBranch?: string }>(c);
-	if (input.defaultBranch !== undefined && (typeof input.defaultBranch !== "string" || !input.defaultBranch.trim())) throw new HttpError(400, "INVALID_INPUT", "defaultBranch is a branch name");
+	if (input.defaultBranch !== undefined && typeof input.defaultBranch !== "string") throw new HttpError(400, "INVALID_INPUT", "defaultBranch is a branch name");
 	if (input.hasWiki !== undefined && typeof input.hasWiki !== "boolean") throw new HttpError(400, "INVALID_INPUT", "hasWiki is true or false");
 	if (input.visibility !== undefined && input.visibility !== "public" && input.visibility !== "private") {
 		throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
@@ -919,17 +934,24 @@ repo.patch("/", async (c) => {
 			row.name = name;
 		}
 	}
+	// Before archiving or after unarchiving, since an archived repository refuses it. Always through the coordinator, whose copy is the one that
+	// counts: it checks the branch exists and no agent task works from the old default, and asking again
+	// repairs D1 if writing it failed last time.
+	let defaultBranch: string | undefined;
+	const switchDefault = async () => {
+		if (input.defaultBranch === undefined) return;
+		defaultBranch = await project(c).setDefaultBranch(assertBranchName(input.defaultBranch.trim()));
+		row.defaultBranch = defaultBranch;
+	};
+	if (input.archived !== false) await switchDefault();
 	if (input.archived !== undefined && input.archived !== Boolean(row.archivedAt)) {
 		// The coordinator refuses first if agent tasks are still active, and from then on refuses writes.
 		await project(c).setArchived(input.archived);
 		await setArchived(db(c.env), row.id, input.archived);
 	}
-	const defaultBranch = input.defaultBranch?.trim();
-	if (defaultBranch !== undefined && defaultBranch !== row.defaultBranch) {
-		// The coordinator checks the branch exists and that no agent task is working from the old default.
-		row.defaultBranch = await project(c).setDefaultBranch(defaultBranch);
-	}
+	if (input.archived === false) await switchDefault();
 	await updateRepo(db(c.env), row.id, {
+		visibility: input.visibility,
 		defaultBranch,
 		description: input.description === undefined ? undefined : input.description?.trim() || null,
 		hasWiki: input.hasWiki,

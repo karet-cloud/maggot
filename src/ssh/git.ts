@@ -77,7 +77,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 			});
 			if (!res.ok || !res.body) return fail(`ERROR: The storage backend answered ${res.status}.`);
 			// After a default branch change, clones are told HEAD is the new default (see git/head.ts).
-			if (target.head && isLsRefs(request)) await session.write(pointHeadV2(new Uint8Array(await res.arrayBuffer()), target.head, request));
+			if (target.head && isLsRefs(request)) await session.write(pointHeadV2(new Uint8Array(await res.arrayBuffer()), target.head.branch, request, target.head.oid));
 			else await pipe(res.body, session);
 		}
 	}

@@ -31,6 +31,14 @@ describe("pointHeadV0", () => {
 		);
 	});
 
+	it("copies other refs byte for byte, even when they aren't UTF-8", () => {
+		const odd = new Uint8Array([...enc.encode("0039"), ...enc.encode(`${A} refs/tags/`), 0xff, 0x0a]);
+		const advert = new Uint8Array([...bytes(pkt(`${A} HEAD\0multi_ack symref=HEAD:refs/heads/main\n`), pkt(`${B} refs/heads/master\n`)), ...odd, ...enc.encode("0000")]);
+		const out = pointHeadV0(advert, "master");
+		assert.match(dec.decode(out), /symref=HEAD:refs\/heads\/master/);
+		assert.deepEqual(out.subarray(out.length - odd.length - 4, out.length - 4), odd);
+	});
+
 	it("leaves the advertisement alone when the branch isn't there", () => {
 		const advert = bytes(pkt(`${A} HEAD\0multi_ack symref=HEAD:refs/heads/main\n`), pkt(`${A} refs/heads/main\n`), "0000");
 		assert.equal(pointHeadV0(advert, "gone"), advert);
@@ -58,5 +66,11 @@ describe("pointHeadV2", () => {
 			[pkt(`${B} HEAD symref-target:refs/heads/master\n`), pkt(`${B} refs/heads/master\n`), "0000"].join(""),
 		);
 		assert.deepEqual(pointHeadV2(answer, "master", request("ref-prefix refs/heads/")), answer);
+	});
+
+	it("takes the branch's head from the caller when the answer doesn't list it (ls-remote HEAD)", () => {
+		const answer = bytes(pkt(`${A} HEAD symref-target:refs/heads/main\n`), "0000");
+		assert.equal(dec.decode(pointHeadV2(answer, "master", request("symrefs", "ref-prefix HEAD"), B)), [pkt(`${B} HEAD symref-target:refs/heads/master\n`), "0000"].join(""));
+		assert.deepEqual(pointHeadV2(answer, "master", request("symrefs", "ref-prefix HEAD")), answer);
 	});
 });

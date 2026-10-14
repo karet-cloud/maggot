@@ -1585,3 +1585,61 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 	await json(as(ada)(repo, { method: "DELETE" }));
 	assert.deepEqual(await wikiStores(), []);
 });
+
+test("the default branch can be switched, and clones (protocol v0 and v2) and forks follow it", async () => {
+	const ada = await newUser("switcher");
+	const bob = await newUser("forker");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "switch", visibility: "public" }) })).status, 201);
+	const exec = promisify(execFile);
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+	const git = (args: string[], cwd?: string) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env });
+	const url = (owner: string, repo: string) => {
+		const u = new URL(`${api}/${owner}/${repo}.git`);
+		u.username = ada.username;
+		u.password = ada.token;
+		return u.toString();
+	};
+	const dir = join(root, "switch");
+	await git(["init", "-q", "-b", "master", dir]);
+	await writeFile(join(dir, "README.md"), "# master\n");
+	await git(["add", "-A"], dir);
+	await git(["commit", "-q", "-m", "first"], dir);
+	await git(["checkout", "-q", "-b", "dev"], dir);
+	await writeFile(join(dir, "DEV.md"), "dev\n");
+	await git(["add", "-A"], dir);
+	await git(["commit", "-q", "-m", "dev"], dir);
+	await git(["push", "-q", url(ada.username, "switch"), "master", "dev"], dir);
+
+	const patch = (body: unknown) => as(ada)(`/repos/${ada.username}/switch`, { method: "PATCH", body: JSON.stringify(body) });
+	assert.equal((await patch({ defaultBranch: "nope" })).status, 404);
+	const switched = await patch({ defaultBranch: "dev" });
+	assert.equal(switched.status, 200, await switched.clone().text());
+	assert.equal(((await switched.json()) as { repo: { defaultBranch: string } }).repo.defaultBranch, "dev");
+	// Other settings still save alongside it.
+	assert.equal(((await (await patch({ visibility: "private" })).json()) as { repo: { visibility: string } }).repo.visibility, "private");
+	assert.equal(((await (await patch({ visibility: "public" })).json()) as { repo: { visibility: string } }).repo.visibility, "public");
+
+	for (const version of ["0", "2"]) {
+		const clone = join(root, `switch-clone-v${version}`);
+		await git(["-c", `protocol.version=${version}`, "clone", "-q", url(ada.username, "switch"), clone]);
+		assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], clone)).stdout.trim(), "dev", `protocol v${version}`);
+	}
+	const symref = (await git(["-c", "protocol.version=2", "ls-remote", "--symref", url(ada.username, "switch"), "HEAD"])).stdout;
+	assert.match(symref, /^ref: refs\/heads\/dev\tHEAD$/m);
+
+	const forked = await as(bob)(`/repos/${ada.username}/switch/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(forked.status, 201, await forked.clone().text());
+	const fork = ((await forked.json()) as { repo: { owner: string; name: string; defaultBranch: string } }).repo;
+	assert.equal(fork.defaultBranch, "dev");
+	const forkClone = join(root, "switch-fork");
+	await git(["clone", "-q", `${api}/${fork.owner}/${fork.name}.git`, forkClone]);
+	assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], forkClone)).stdout.trim(), "dev");
+
+	// Back to the branch storage itself points at: nothing to rewrite any more.
+	assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+	const back = join(root, "switch-back");
+	await git(["clone", "-q", url(ada.username, "switch"), back]);
+	assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], back)).stdout.trim(), "master");
+});

@@ -201,7 +201,10 @@ function DefaultBranch({ project, repo, disabled }: { project: string; repo: Rep
 			void queryClient.invalidateQueries({ queryKey: ["repos"] });
 		},
 	});
-	const names = branches.data?.branches.map((b) => b.name) ?? [repo.defaultBranch];
+	const listed = branches.data?.branches.map((b) => b.name).filter((name) => !name.startsWith("maggot-incoming/")) ?? [];
+	// An older import or fork can name a default branch that doesn't exist; it stays listed so another can be picked.
+	const missing = branches.data !== undefined && !listed.includes(repo.defaultBranch);
+	const names = listed.includes(repo.defaultBranch) ? listed : [repo.defaultBranch, ...listed];
 	return (
 		<form
 			onSubmit={(e) => {
@@ -222,6 +225,7 @@ function DefaultBranch({ project, repo, disabled }: { project: string; repo: Rep
 						{names.map((name) => (
 							<option key={name} value={name}>
 								{name}
+								{missing && name === repo.defaultBranch ? " (doesn't exist)" : ""}
 							</option>
 						))}
 					</select>
