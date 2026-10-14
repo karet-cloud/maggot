@@ -67,7 +67,7 @@ import {
 } from "./db.ts";
 import { HttpError, toHttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
-import { assertProjectName, wikiRepoName } from "./names.ts";
+import { assertProjectName, reservedName, wikiRepoName } from "./names.ts";
 import { WIKI_BRANCH } from "./wiki-pages.ts";
 import { measureRepository } from "./git/protocol.ts";
 import { validateHookUrl } from "./hooks.ts";
@@ -129,6 +129,9 @@ app.use("/api/auth/*", async (c, next) => {
 		return typeof value === "string" ? value.trim().toLowerCase() : "";
 	};
 	if (action === "sign-up/email") {
+		// Usernames are URL segments; Better Auth's validator only checks their shape (see src/auth.ts).
+		const name = field("username");
+		if (reservedName(name)) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
 		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
 	} else if (action === "sign-in/username" || action === "sign-in/email") {
 		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
@@ -954,7 +957,8 @@ repo.put("/collaborators/:username", async (c) => {
 	const row = userRepo(c);
 	const user = requireUser(c);
 	const input = await body<{ permission?: string }>(c);
-	const permission = assertPermission(input.permission);
+	// Like the invite form, least access unless asked for more.
+	const permission = assertPermission(input.permission ?? "read");
 	const result = await setCollaborator(db(c.env), row, c.req.param("username"), permission, user.id);
 	// A changed grant (a downgrade, say) applies to views already open too.
 	if (!result.invited) reauthorize(c, [row.id]);

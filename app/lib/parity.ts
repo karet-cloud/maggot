@@ -136,7 +136,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "In-app notifications", status: "done", comment: "Stars, forks, agent task results and failing webhooks." },
 			{ feature: "Email notifications", status: "missing", comment: "" },
 			{ feature: "Repository search", status: "done", comment: "By owner, name or description; newest or most starred first." },
-			{ feature: "Explore page", status: "partial", comment: "The home page lists the newest public repositories. No trending." },
+			{ feature: "Explore page", status: "partial", comment: "/explore lists public repositories, newest or most starred first. No trending or topics." },
 			{ feature: "Follow people", status: "missing", comment: "" },
 			{ feature: "Activity feed", status: "partial", comment: "Live per repository. No personal dashboard feed." },
 			{ feature: "Works on phones", status: "partial", comment: "Usable; some wide tables still need horizontal scrolling." },

@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Download, Package, Pencil, Plus, Tag as TagIcon, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -67,6 +67,17 @@ function Downloads({ project, refName }: { project: string; refName: string }) {
 	);
 }
 
+/**
+ * Applies a change the server just confirmed to every loaded page of the list (keyed by limit), so it
+ * shows at once, then refetches all of them (active or not) for what else may have moved.
+ */
+function updateReleases(queryClient: QueryClient, project: string, change: (list: Release[]) => Release[]) {
+	queryClient.setQueriesData<{ releases: Release[]; more: boolean }>({ queryKey: keys.releases(project) }, (page) =>
+		page ? { ...page, releases: change(page.releases) } : page,
+	);
+	void queryClient.invalidateQueries({ queryKey: keys.releases(project), refetchType: "all" });
+}
+
 function ReleaseList({ project, writable }: { project: string; writable: boolean }) {
 	const [limit, setLimit] = useState(20);
 	const page = useQuery({ queryKey: [...keys.releases(project), limit], queryFn: () => api.releases(project, limit), placeholderData: keepPreviousData });
@@ -108,18 +119,17 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 	const [name, setName] = useState(r.name);
 	const [notes, setNotes] = useState(r.notes);
 	const [prerelease, setPrerelease] = useState(r.prerelease);
-	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.releases(project) });
 	const save = useMutation({
 		mutationFn: () => api.updateRelease(project, r.id, { name, notes, prerelease }),
-		onSuccess: () => {
+		onSuccess: (next) => {
 			setEditing(false);
-			refresh();
+			updateReleases(queryClient, project, (list) => list.map((x) => (x.id === next.id ? next : x)));
 		},
 	});
 	const remove = useMutation({
 		mutationFn: (deleteTag: boolean) => api.deleteRelease(project, r.id, deleteTag),
 		onSuccess: () => {
-			refresh();
+			updateReleases(queryClient, project, (list) => list.filter((x) => x.id !== r.id));
 			void queryClient.invalidateQueries({ queryKey: keys.tags(project) });
 		},
 	});
@@ -317,8 +327,8 @@ function NewRelease({ project, onDone }: { project: string; onDone: () => void }
 	const exists = tags.data?.some((t) => t.name === tag.trim()) ?? false;
 	const create = useMutation({
 		mutationFn: () => api.createRelease(project, { tag: tag.trim(), target: exists ? undefined : target, name: name.trim() || undefined, notes, prerelease }),
-		onSuccess: () => {
-			void queryClient.invalidateQueries({ queryKey: keys.releases(project) });
+		onSuccess: (release) => {
+			updateReleases(queryClient, project, (list) => [release, ...list.filter((x) => x.id !== release.id)]);
 			void queryClient.invalidateQueries({ queryKey: keys.tags(project) });
 			onDone();
 		},

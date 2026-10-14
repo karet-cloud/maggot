@@ -1,14 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { BookMarked, Building2, Star, Users, UsersRound } from "lucide-react";
 import { OrgHeader, People, Teams } from "../components/org.tsx";
 import type { ReactNode } from "react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Spinner } from "../components/ui.tsx";
+import { routeName } from "../../src/names.ts";
 import { api, keys, type RepoFilter } from "../lib/api.ts";
 import { useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/$owner/")({
+	// A page's own first segment with no page of its own (/orgs, say) isn't a profile: no account can have that name.
+	beforeLoad: ({ params }) => {
+		if (routeName(params.owner)) throw notFound();
+	},
 	validateSearch: (search: Record<string, unknown>): { tab?: "stars" | "people" | "teams" } =>
 		search.tab === "stars" || search.tab === "people" || search.tab === "teams" ? { tab: search.tab } : {},
 	component: Profile,

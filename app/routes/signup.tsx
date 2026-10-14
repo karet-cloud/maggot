@@ -32,7 +32,7 @@ function SignUp() {
 			onSubmit={() => signUp.mutate()}
 			busy={signUp.isPending}
 			error={signUp.error}
-			submit="Create account"
+			submit={signUp.isPending ? "Creating account…" : "Create account"}
 			footer={<>Already have an account? {authLink("/login", "Sign in")}</>}
 		>
 			<Field label="Username" hint="Lowercase letters, digits and single hyphens. It's in your repository URLs.">

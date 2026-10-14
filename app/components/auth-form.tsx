@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useHydrated } from "@tanstack/react-router";
 import type { FormEvent, ReactNode } from "react";
 import { Button, ErrorNote } from "./ui.tsx";
 
@@ -22,6 +22,8 @@ export function AuthForm({
 	footer: ReactNode;
 	children: ReactNode;
 }) {
+	// Before hydration a submit would be the browser's own (a bare reload that loses what was typed).
+	const hydrated = useHydrated();
 	return (
 		<main className="flex min-h-[calc(100vh-3rem)] items-center justify-center px-5 py-10">
 			<form
@@ -36,13 +38,14 @@ export function AuthForm({
 					<h1 className="text-lg font-semibold">{title}</h1>
 					<p className="text-sm text-dim">{subtitle}</p>
 				</div>
-				<div className="space-y-3 rounded-xl border border-line bg-panel p-5">
+				{/* A disabled fieldset disables every field in it while the request is in flight. */}
+				<fieldset disabled={busy} aria-busy={busy} className="space-y-3 rounded-xl border border-line bg-panel p-5 disabled:[&_input]:opacity-60">
 					{children}
 					<ErrorNote error={error} />
-					<Button type="submit" variant="primary" busy={busy} className="w-full">
+					<Button type="submit" variant="primary" busy={busy} disabled={!hydrated} className="w-full">
 						{submit}
 					</Button>
-				</div>
+				</fieldset>
 				<p className="text-center text-xs text-dim">{footer}</p>
 			</form>
 		</main>

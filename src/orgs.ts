@@ -3,8 +3,8 @@
 // Members are invited and accept; owners administer every repository, members read them all, and
 // teams (and collaborators on any repository) add read, write or admin access to particular ones.
 import type { Collaborator, Invitation, Org, OrgMember, OrgRole, Permission, Team } from "./api.ts";
-import { validUsername } from "./auth.ts";
 import { HttpError } from "./errors.ts";
+import { reservedName, validUsername } from "./names.ts";
 
 export const MAX_ORGS_PER_USER = 10;
 export const MAX_MEMBERS = 500;
@@ -36,7 +36,8 @@ export async function roleIn(database: D1Database, orgId: string, userId: string
 
 export async function createOrg(database: D1Database, ownerId: string, name: string, displayName: string): Promise<OrgRow> {
 	const username = name.trim().toLowerCase();
-	if (!validUsername(username)) throw new HttpError(400, "INVALID_NAME", "Organization names are 2-39 lowercase letters, digits or single hyphens, and some names are reserved");
+	if (reservedName(username)) throw new HttpError(400, "NAME_RESERVED", `${username} is reserved for maggot's own pages; pick another name`);
+	if (!validUsername(username)) throw new HttpError(400, "INVALID_NAME", "Organization names are 2-39 lowercase letters, digits or single hyphens");
 	const owned = await database.prepare(`select count(*) as "n" from "org_member" where "userId" = ? and "role" = 'owner'`).bind(ownerId).first<{ n: number }>();
 	if ((owned?.n ?? 0) >= MAX_ORGS_PER_USER) throw new HttpError(403, "QUOTA_EXCEEDED", `You can own at most ${MAX_ORGS_PER_USER} organizations`);
 	const id = `org_${crypto.randomUUID().replaceAll("-", "").slice(0, 20)}`;

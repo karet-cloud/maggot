@@ -83,14 +83,19 @@ export function useChecks(project: string, sha: string) {
 	});
 }
 
-/** A pull request's checks on its head, as the server judges them (the merge gets the same answer). Polls while they're unsettled. */
-export function usePullChecks(project: string, number: number, enabled: boolean) {
+/**
+ * A pull request's checks on its head, as the server judges them (the merge gets the same answer). Polls
+ * while they're unsettled and the pull request is open; the 409 a merged or closed one answers stops it
+ * even before the page learns the new state.
+ */
+export function usePullChecks(project: string, number: number, open: boolean) {
 	return useQuery({
 		queryKey: keys.pullChecks(project, number),
 		queryFn: () => api.pullChecks(project, number),
-		enabled,
+		enabled: open,
 		// Runs waiting for approval change only when someone approves them, which the live connection reports.
-		refetchInterval: (q) => (q.state.data?.state === "pending" ? 5000 : false),
+		// An error keeps the last data, so a failed refetch (409 once merged) mustn't keep polling on a stale "pending".
+		refetchInterval: (q) => (q.state.status !== "error" && q.state.data?.state === "pending" ? 5000 : false),
 		retry: false,
 	});
 }
