@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, test } from "node:test";
+import webHttp from "isomorphic-git/http/web";
 import { Workspace } from "../src/git/workspace.ts";
 import { authUrl, localArtifacts, sh } from "./helpers.ts";
 
@@ -176,4 +177,88 @@ test("finds the real merge base behind the shallow cut, so an old branch merges 
 	await sh("git", ["fsck", "--full", "--strict"], check);
 	assert.equal(await sh("git", ["show", "HEAD:old.txt"], check), "old");
 	assert.equal((await sh("git", ["show", "HEAD:history.txt"], check)).split("\n").length, 120);
+});
+
+/** Pushes `count` commits on a new `branch` off `start`, each appending to `file`. */
+async function branchOff(dir: string, remote: { url: string; token: string }, branch: string, start: string, file: string, count: number) {
+	await sh("git", ["checkout", "--quiet", "-b", branch, start], dir);
+	await sh("bash", ["-c", `for i in $(seq 1 ${count}); do echo "${branch} $i" >> ${file}; git add ${file}; git commit --quiet -m "${branch} $i"; done`], dir);
+	await sh("git", ["push", "--quiet", authUrl(remote.url, remote.token), branch], dir);
+	await sh("git", ["checkout", "--quiet", "main"], dir);
+}
+
+/** A full clone of `remote` that git itself finds intact. */
+async function checkedClone(remote: { url: string; token: string }, name: string) {
+	const check = join(artifacts.root, name);
+	await sh("git", ["clone", "--quiet", authUrl(remote.url, remote.token), check]);
+	await sh("git", ["fsck", "--full", "--strict"], check);
+	return check;
+}
+
+test("a shallow workspace whose server stops taking shallow fetches starts over with a full clone", async () => {
+	const { remote, dir } = await deepRepo("deep3", 150);
+	await branchOff(dir, remote, "late", "main~120", "late.txt", 70);
+	// Hides the server's "shallow" capability once `hide` is set, as a server that stopped supporting it.
+	let hide = false;
+	const http = {
+		async request(req: Parameters<typeof webHttp.request>[0]) {
+			const res = await webHttp.request(req);
+			if (!hide || !req.url.includes("/info/refs")) return res;
+			const chunks: Uint8Array[] = [];
+			for await (const chunk of res.body ?? []) chunks.push(chunk);
+			const text = Buffer.concat(chunks).toString("latin1").replace(/ shallow(?= |\n|\0)/g, " xhallow");
+			return { ...res, body: (async function* () { yield Buffer.from(text, "latin1"); })() };
+		},
+	};
+	const ws = new Workspace("main", bot, http);
+	await ws.syncBase(remote);
+	hide = true;
+	const outcome = await ws.merge(await ws.fetchTask(remote, "late"), "Merge late", bot, "merge-commit");
+	assert.equal(outcome.kind, "merged");
+	assert.deepEqual(outcome.kind === "merged" && outcome.changedFiles, ["late.txt"]);
+	assert.equal(await ws.push(remote), true);
+	const check = await checkedClone(remote, "deep3-check");
+	assert.equal(await sh("git", ["rev-list", "--count", "HEAD"], check), String(150 + 70 + 1));
+	assert.equal(await sh("git", ["merge-base", "HEAD^1", "HEAD^2"], check), await sh("git", ["rev-parse", "main~120"], dir));
+});
+
+test("a workspace kept between merges syncs again and still deepens for an old branch", async () => {
+	const { remote, dir } = await deepRepo("deep4", 120);
+	await branchOff(dir, remote, "recent", "main~2", "recent.txt", 1);
+	await branchOff(dir, remote, "ancient", "main~100", "ancient.txt", 3);
+	const ws = new Workspace("main", bot);
+	await ws.syncBase(remote);
+	assert.equal((await ws.merge(await ws.fetchTask(remote, "recent"), "Merge recent", bot, "merge-commit")).kind, "merged");
+	assert.equal(await ws.push(remote), true);
+
+	// Main moves on elsewhere too; the second sync fetches just what's new.
+	await sh("git", ["fetch", "--quiet", authUrl(remote.url, remote.token), "main"], dir);
+	await sh("git", ["merge", "--quiet", "--ff-only", "FETCH_HEAD"], dir);
+	await sh("bash", ["-c", `for i in 1 2 3; do echo "more $i" >> more.txt; git add more.txt; git commit --quiet -m "more $i"; done`], dir);
+	await sh("git", ["push", "--quiet", authUrl(remote.url, remote.token), "main"], dir);
+
+	const head = await ws.syncBase(remote);
+	assert.equal(head, await sh("git", ["rev-parse", "main"], dir));
+	const outcome = await ws.merge(await ws.fetchTask(remote, "ancient"), "Merge ancient", bot, "merge-commit");
+	assert.equal(outcome.kind, "merged");
+	assert.deepEqual(outcome.kind === "merged" && outcome.changedFiles, ["ancient.txt"]);
+	assert.equal(await ws.push(remote), true);
+	const check = await checkedClone(remote, "deep4-check");
+	assert.equal(await sh("git", ["merge-base", "HEAD^1", "HEAD^2"], check), await sh("git", ["rev-parse", "main~104"], dir));
+	assert.equal(await sh("git", ["show", "HEAD:more.txt"], check), "more 1\nmore 2\nmore 3");
+});
+
+test("a conflict with changes from behind the shallow cut is reported, and nothing is pushed", async () => {
+	const { remote, dir } = await deepRepo("deep5", 120);
+	// Appends to history.txt right where main went on appending 110 more lines.
+	await branchOff(dir, remote, "clash", "main~110", "history.txt", 1);
+	const before = await sh("git", ["rev-parse", "main"], dir);
+	const ws = new Workspace("main", bot);
+	await ws.syncBase(remote);
+	const outcome = await ws.merge(await ws.fetchTask(remote, "clash"), "Merge clash", bot, "merge-commit");
+	assert.equal(outcome.kind, "conflict");
+	assert.deepEqual(outcome.kind === "conflict" && outcome.files, ["history.txt"]);
+	assert.deepEqual(outcome.kind === "conflict" && outcome.changedFiles, ["history.txt"]);
+	const log = await artifacts.call<{ hash: string }[]>("GET", "/repos/deep5/log?ref=main&limit=1");
+	assert.equal(log[0].hash, before);
 });

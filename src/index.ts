@@ -2025,6 +2025,8 @@ repo.post("/pulls/:number/merge", async (c) => {
 		message,
 		author: { name: user.username, email: `${user.username}@users.noreply.${new URL(c.req.url).hostname}` },
 		expectedHead,
+		// The coordinator checks the branch's rules again right before pushing: they may change while this waits its turn.
+		pull: pull.number,
 	});
 	await markPullMerged(db(c.env), pull, user.id, result.commit);
 	closedPull(c, row, pull.number, true);

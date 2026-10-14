@@ -57,9 +57,7 @@ function createAuth(env: Env, origin: string, secret: string) {
 				const capture = capturing.get(`reset:${user.email.toLowerCase()}`);
 				if (capture) return capture(url);
 				const name = (user as { username?: string | null }).username ?? user.name;
-				const sent = await sendMail(env, { to: user.email, ...resetPasswordEmail(name, url) });
-				// Without email delivery the link only reaches the server log (useful in local development).
-				if (!sent) console.log(`[maggot] password reset link for ${name}: ${url}`);
+				await deliver(env, "password reset", name, url, { to: user.email, ...resetPasswordEmail(name, url) });
 			},
 		},
 		emailVerification: {
@@ -71,8 +69,7 @@ function createAuth(env: Env, origin: string, secret: string) {
 				const capture = capturing.get(`verify:${user.email.toLowerCase()}`);
 				if (capture) return capture(url);
 				const name = (user as { username?: string | null }).username ?? user.name;
-				const sent = await sendMail(env, { to: user.email, ...verifyEmail(name, url) });
-				if (!sent) console.log(`[maggot] email verification link for ${name}: ${url}`);
+				await deliver(env, "email verification", name, url, { to: user.email, ...verifyEmail(name, url) });
 			},
 		},
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
@@ -89,6 +86,23 @@ function createAuth(env: Env, origin: string, secret: string) {
 		// Repository URLs start with the username, so it can't change (renames would have to move them all).
 		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername, immutableUsername: true })],
 	});
+}
+
+/**
+ * Sends an account email. It runs after the response (see backgroundTasks), so nothing retries it: a
+ * failure is logged, without the link, and the person asks again (Resend on the verification banner,
+ * or Forgot password). Without email delivery the link only reaches the server log (useful in local
+ * development).
+ */
+async function deliver(env: Env, what: string, name: string, url: string, message: Parameters<typeof sendMail>[1]): Promise<void> {
+	let sent: boolean;
+	try {
+		sent = await sendMail(env, message);
+	} catch (err) {
+		console.error(`[maggot] sending the ${what} email to ${name} failed; they can ask for another`, err);
+		return;
+	}
+	if (!sent) console.log(`[maggot] ${what} link for ${name}: ${url}`);
 }
 
 /** One Better Auth instance per origin per isolate (the base URL is the request's own origin). */

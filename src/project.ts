@@ -29,7 +29,7 @@ import {
 	type WebhookDelivery,
 	type WebhookEvent,
 } from "./api.ts";
-import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db.ts";
+import { approvedAt, closeIssuesByCommits, db as databaseOf, getPull, notify, notifyUser } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
@@ -790,6 +790,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		author: Identity;
 		/** The head commit the merger saw (and reviewers approved); the merge stops if the branch has moved on. */
 		expectedHead?: string;
+		/** The pull request's number, for checking the branch's rules (reviews, Actions) right before pushing. */
+		pull?: number;
 	}): Promise<{ commit: string; changedFiles: string[] }> {
 		const meta = this.meta();
 		this.assertWritable();
@@ -807,8 +809,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			try {
 				for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
 					await ws.syncBase(base);
-					const theirs = await ws.fetchTask(headAccess, input.headBranch).catch((err) => {
-						if (errorCode(err) === "NotFoundError") throw new HttpError(409, "HEAD_GONE", `${input.headBranch} no longer exists, so there's nothing to merge`);
+					const theirs = await ws.fetchTask(headAccess, input.headBranch).catch(async (err) => {
+						if (errorCode(err) !== "NotFoundError") throw err;
+						// Only a branch that's really gone is the pull request's problem; anything else is the
+						// workspace's, which is discarded below.
+						const branches = await listBranches(headAccess).catch(() => null);
+						if (branches && !branches.has(input.headBranch)) throw new HttpError(409, "HEAD_GONE", `${input.headBranch} no longer exists, so there's nothing to merge`);
 						throw err;
 					});
 					if (input.expectedHead && theirs !== input.expectedHead) {
@@ -819,6 +825,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 						throw new HttpError(409, "MERGE_CONFLICT", `These files conflict with ${input.base}: ${outcome.files.join(", ") || "unknown"}. Merge ${input.base} into the branch and push again.`);
 					}
 					if (outcome.kind === "up-to-date") throw new HttpError(409, "NOTHING_TO_MERGE", `${input.base} already has everything in this pull request`);
+					// The rules as they are now, for the commit being merged: an admin may have turned on
+					// required reviews or Actions since the API checked them.
+					if (input.pull !== undefined) await this.assertMergeable(input.pull, input.base, input.headRepo && input.headRepo !== meta.name ? input.headRepo : null, theirs);
 					if (await ws.push(base)) {
 						// Like a push: events, webhooks, the code index, Actions and "fixes #n" all follow.
 						await this.pushed(input.author.name);
@@ -831,6 +840,22 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				throw err;
 			}
 		});
+	}
+
+	/** Refuses a pull request merge of `head` that `base`'s branch rules don't allow right now. */
+	private async assertMergeable(number: number, base: string, headRepo: string | null, head: string): Promise<void> {
+		const rule = protectionFor(this.branchRules(), base);
+		if (rule.requireReview) {
+			const database = databaseOf(this.env);
+			const pull = await getPull(database, this.meta().name, number);
+			if (!pull || pull.decision !== "approved" || !(await approvedAt(database, pull, head))) {
+				throw new HttpError(403, "REVIEW_REQUIRED", `${base} needs an approving review of the latest commit before pull requests merge into it`);
+			}
+		}
+		if (rule.requireChecks) {
+			const checks = await this.ci.pullChecks({ number, base, headRepo, sha: head });
+			if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${base} requires Actions to pass. ${checks.reason}`);
+		}
 	}
 
 	/** Records a pull request event for the feed and webhooks. */
