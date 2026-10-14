@@ -75,6 +75,7 @@ export interface CreateProjectInput {
 	description?: string;
 	defaultBranch?: string;
 	importUrl?: string;
+	importDepth?: number;
 	importBranch?: string;
 	/** The README's heading, when the project name is an internal id. */
 	title?: string;
@@ -267,6 +268,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	// ── Project ──────────────────────────────────────────────────────────────
 
 	async create(input: CreateProjectInput): Promise<Project> {
+		if (input.importDepth !== undefined && (!Number.isInteger(input.importDepth) || input.importDepth < 1 || input.importDepth > 10_000)) throw new HttpError(400, "INVALID_INPUT", "importDepth must be an integer from 1 to 10000");
 		if (this.metaOrNull()) throw new HttpError(409, "ALREADY_EXISTS", `Project ${input.name} already exists`);
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
 		try {
@@ -279,7 +281,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				}
 				return input.importUrl
 					? this.store.import({
-							source: { url: input.importUrl, branch: input.importBranch },
+							source: { url: input.importUrl, branch: input.importBranch, depth: input.importDepth },
 							target: { name: input.name, opts: { description: input.description } },
 						})
 					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });

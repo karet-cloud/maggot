@@ -1585,3 +1585,25 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 	await json(as(ada)(repo, { method: "DELETE" }));
 	assert.deepEqual(await wikiStores(), []);
 });
+
+
+test("shallow imports keep the requested history depth and reject invalid depths", async () => {
+	const exec = promisify(execFile);
+	const git = (args: string[], cwd?: string) => exec("git", args, { cwd });
+	const source = join(root, "shallow-source");
+	await git(["init", "-q", "-b", "master", source]);
+	for (let n = 1; n <= 3; n++) {
+		await writeFile(join(source, "README"), `Linux demo fixture ${n}\n`);
+		await git(["add", "README"], source);
+		await git(["commit", "-q", "-m", `fixture ${n}`], source);
+	}
+	for (const depth of [0, -1, 1.5, 10001, "1"]) {
+		assert.equal((await call("POST", "/projects", { name: `invaliddepth${run}`, importUrl: `file://${source}`, importDepth: depth })).status, 400);
+	}
+	const shallow = `shallow${run}`;
+	assert.equal((await call("POST", "/projects", { name: shallow, importUrl: `file://${source}`, importDepth: 1 })).status, 201);
+	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${shallow}/log`)).json.commits.length, 1);
+	const full = `fullhistory${run}`;
+	assert.equal((await call("POST", "/projects", { name: full, importUrl: `file://${source}` })).status, 201);
+	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${full}/log`)).json.commits.length, 3);
+});

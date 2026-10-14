@@ -606,6 +606,7 @@ interface NewRepo {
 	visibility?: Visibility;
 	defaultBranch?: string;
 	importUrl?: string;
+	importDepth?: number;
 	importBranch?: string;
 	readme?: boolean;
 	/** An organization to create it in (the caller has to be a member); the caller's own account by default. */
@@ -629,6 +630,7 @@ async function newOwner(c: Context<App>, user: { id: string; username: string },
 async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	const user = requireUser(c);
 	requireVerified(c.env, user);
+	if (input.importDepth !== undefined && (!Number.isInteger(input.importDepth) || input.importDepth < 1 || input.importDepth > 10_000)) throw new HttpError(400, "INVALID_INPUT", "importDepth must be an integer from 1 to 10000");
 	const name = assertRepoName(input.name?.trim() ?? "");
 	// A fork of a private repository stays private.
 	const visibility = source?.visibility === "private" ? "private" : (input.visibility ?? source?.visibility ?? "public");
@@ -678,6 +680,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 			defaultBranch: input.importUrl || source ? undefined : defaultBranch,
 			importUrl: source ? undefined : input.importUrl?.trim() || undefined,
 			importBranch: source ? undefined : input.importBranch?.trim() || undefined,
+			importDepth: source ? undefined : input.importDepth,
 			forked: Boolean(source),
 			readme: source ? false : (input.readme ?? false),
 		});
@@ -756,6 +759,7 @@ app.post("/api/projects", async (c) => {
 		description?: string;
 		defaultBranch?: string;
 		importUrl?: string;
+	importDepth?: number;
 		importBranch?: string;
 		readme?: boolean;
 	}>(c);

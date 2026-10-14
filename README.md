@@ -320,7 +320,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
 | GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
 | GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
-| POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, readme? }` | `{ repo, project }` (signed-in users) |
+| POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, importDepth?, readme? }` | `{ repo, project }` (signed-in users) |
 | GET | `/repos/:owner/:repo` | | `{ project, repo }` |
 | PATCH | `/repos/:owner/:repo` | `{ visibility?, description?, name?, archived? }` | `{ repo }` (owner); a new `name` leaves the old one redirecting |
 | GET / POST / DELETE | `/repos/:owner/:repo/transfer` | `{ to }` | the pending offer; offer the repository to user `to`; cancel the offer (owner) |
@@ -371,7 +371,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
 | GET | `/projects` | | `{ projects: Project[] }` |
-| POST | `/projects` | `{ name, description?, defaultBranch? (default `master`), importUrl?, importBranch?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
+| POST | `/projects` | `{ name, description?, defaultBranch? (default `master`), importUrl?, importBranch?, importDepth?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
 | GET | `/projects/:p` | | `{ project: Project }` (head, per-status counts, queue length) |
 | DELETE | `/projects/:p` | | deletes repo, forks, and state |
 | GET | `/projects/:p/tasks` | `?status=` | `{ tasks: Task[] }` newest first |
@@ -494,3 +494,10 @@ npm run typecheck
 - Stacked tasks (a task based on another unmerged task) and splitting merges into batches.
 - Large repos: the coordinator keeps an in-memory clone, so repos near the 128 MB Worker memory
   limit need ArtifactFS or a Sandbox-backed merge.
+
+The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it from
+`torvalds/linux` on `master` with the latest 100 commits and the full source tree. Set a stable
+`MAGGOT_MIRROR_PASSWORD` production environment secret for the mirror service account. Existing
+mirrors are left unchanged; this is a demo snapshot, not continuous upstream synchronization.
+The repository creation API accepts optional `importDepth` (1–10,000) for shallow imports;
+omitting it keeps the existing full-history import behavior.
