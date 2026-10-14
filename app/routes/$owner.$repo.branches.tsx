@@ -51,7 +51,7 @@ function BranchesPage() {
 			<Panel title={`Branches (${others.length})`} actions={<span className="text-[11px] text-faint">ahead / behind {defaultBranch}</span>}>
 				{others.length === 0 ? (
 					<p className="px-4 py-6 text-center text-xs text-faint">
-						No other branches. Push one with <code className="font-mono text-dim">git push maggot my-branch</code>.
+						No other branches. Push one with <code className="font-mono text-dim">git push origin my-branch</code>.
 					</p>
 				) : (
 					<ul className="divide-y divide-line/60">
