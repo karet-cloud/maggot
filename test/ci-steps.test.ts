@@ -123,6 +123,7 @@ test("expressions are filled in as each step starts: outputs, outcomes, conditio
 			step("Fails", { id: "f", run: "exit 3", continueOnError: true }),
 			step("After", { run: 'echo "outcome=${{ steps.f.outcome }} conclusion=${{ steps.f.conclusion }} job=${{ job.status }}"', if: "steps.f.outcome == 'failure'" }),
 			step("Bad expression", { run: "echo ${{ fromJSON('nope') }}", continueOnError: true }),
+			step("Skipped first", { run: "echo ${{ hashFiles(fromJSON('nope')) }}", if: "false" }),
 		],
 		outputs: { d: "${{ steps.a.outputs.dir }}", m: "${{ steps.a.outputs.multi }}" },
 	});
@@ -139,11 +140,12 @@ test("expressions are filled in as each step starts: outputs, outcomes, conditio
 		"Fails: success",
 		"After: success",
 		"Bad expression: success",
+		"Skipped first: skipped",
 		"Complete job: success",
 	]);
 	assert.match(logs.get(3)!, new RegExp(`got out at ${repo.sha} on node 22`));
-	const fileHash = createHash("sha256").update(readFileSync(join(repo.dir, "hello.txt"))).digest("hex");
-	const expected = createHash("sha256").update(`${fileHash}\n`).digest("hex");
+	// GitHub's algorithm: each file's SHA-256 digest (bytes), hashed together.
+	const expected = createHash("sha256").update(createHash("sha256").update(readFileSync(join(repo.dir, "hello.txt"))).digest()).digest("hex");
 	assert.match(logs.get(5)!, new RegExp(`hash=${expected}`));
 	assert.match(logs.get(7)!, /outcome=failure conclusion=success job=success/);
 	assert.match(logs.get(8)!, /fromJSON\(\): "nope" isn't JSON/);
@@ -165,7 +167,7 @@ runs:
     - id: g
       shell: bash
       run: |
-        echo "hi \${{ inputs.who }} from \${{ github.action_path }}"
+        echo "hi \${{ inputs.who }} from \${{ github.action_path }} with $CALLER_ENV"
         echo "msg=hello-\${{ inputs.who }}" >> "$GITHUB_OUTPUT"
 `,
 		".github/actions/js/action.yml": `name: JS
@@ -194,7 +196,7 @@ console.log("main ran in " + process.cwd() + " from " + process.env.GITHUB_ACTIO
 	};
 	const steps = [
 		step("Check out", { kind: "checkout", run: null }),
-		step("Greet", { kind: "action", id: "c", with: { who: "megit" }, uses: { kind: "local", path: ".github/actions/greet" } }),
+		step("Greet", { kind: "action", id: "c", with: { who: "megit" }, env: { CALLER_ENV: "the caller's env" }, uses: { kind: "local", path: ".github/actions/greet" } }),
 		step("Show", { run: 'echo "said ${{ steps.c.outputs.msg }}"' }),
 		step("JS", { kind: "action", id: "j", with: { name: "Ada" }, uses: { kind: "local", path: ".github/actions/js" } }),
 		step("Show JS", { run: 'echo "js said ${{ steps.j.outputs.greeting }}"' }),
@@ -206,7 +208,7 @@ console.log("main ran in " + process.cwd() + " from " + process.env.GITHUB_ACTIO
 	assert.deepEqual(shown(final), ["Set up job: success", "Pre JS: success", "Check out: success", "Greet: success", "Show: success", "JS: success", "Show JS: success", "Post JS: success", "Complete job: success"]);
 	assert.match(logs.get(0)!, /Node\.js v\d+/);
 	assert.match(logs.get(1)!, /pre ran/);
-	assert.match(logs.get(3)!, new RegExp(`hi megit from ${box.workspace}/.github/actions/greet`));
+	assert.match(logs.get(3)!, new RegExp(`hi megit from ${box.workspace}/.github/actions/greet with the caller's env`), "a composite action's steps get the env of the step that used it");
 	assert.match(logs.get(4)!, /said hello-megit/);
 	assert.match(logs.get(5)!, new RegExp(`main ran in ${box.workspace} from ${box.workspace}/.github/actions/js`));
 	assert.match(logs.get(6)!, /js said hello Ada/);
@@ -337,7 +339,7 @@ test("caches and artifacts: saved after a job, restored by key or prefix in the 
 				step("Check out", { kind: "checkout", run: null }),
 				cache("deps-${{ hashFiles('package-lock.json') }}"),
 				step("Build", {
-					run: 'echo "hit=${{ steps.cache.outputs.cache-hit }}"; mkdir -p deps dist/sub ~/.tool; echo cached > deps/a.txt; echo tool > ~/.tool/t; echo built > dist/app.js; echo deep > dist/sub/x.txt',
+					run: 'echo "hit=${{ steps.cache.outputs.cache-hit }}"; mkdir -p deps dist/sub ~/.tool; echo cached > deps/a.txt; echo tool > ~/.tool/t; echo built > dist/app.js; echo deep > dist/sub/x.txt; echo dash > dist/-report.txt; echo back > "dist/back\\\\slash.txt"; echo nl > "dist/new$(printf "\\\\nline").txt"',
 				}),
 				step("Upload", { kind: "upload-artifact", id: "up", with: { name: "dist", path: "dist/" } }),
 				step("Upload nothing", { kind: "upload-artifact", with: { name: "none", path: "missing/**", "if-no-files-found": "warn" } }),
@@ -373,7 +375,7 @@ test("caches and artifacts: saved after a job, restored by key or prefix in the 
 				cache("deps-${{ hashFiles('package-lock.json') }}"),
 				step("Check", { run: 'echo "hit=${{ steps.cache.outputs.cache-hit }}"; cat deps/a.txt ~/.tool/t' }),
 				step("Download", { kind: "download-artifact", id: "down", with: { name: "dist", path: "got" } }),
-				step("Look", { run: 'cat got/app.js got/sub/x.txt; echo "into ${{ steps.down.outputs.download-path }}"' }),
+				step("Look", { run: 'cat got/app.js got/sub/x.txt got/-report.txt "got/back\\\\slash.txt" "got/new$(printf "\\\\nline").txt"; echo "into ${{ steps.down.outputs.download-path }}"' }),
 			],
 		}),
 		box,
@@ -381,7 +383,7 @@ test("caches and artifacts: saved after a job, restored by key or prefix in the 
 	const r2 = second.reports.at(-1)!;
 	assert.equal(r2.conclusion, "success", JSON.stringify([...second.logs]));
 	assert.match(second.logs.get(3)!, /hit=true\ncached\ntool/);
-	assert.match(second.logs.get(5)!, /built\ndeep\ninto .*\/got/);
+	assert.match(second.logs.get(5)!, /built\ndeep\ndash\nback\nnl\ninto .*\/got/, "names starting with -, or with a backslash or a newline, come through");
 	assert.match(second.logs.get(6)!, /restored from its key/);
 
 	// Another key, restored by its restore-keys prefix: files back, but not a hit.
@@ -418,4 +420,32 @@ test("caches and artifacts: saved after a job, restored by key or prefix in the 
 	assert.match(fourth.logs.get(4)!, /already has an artifact called dist/);
 	assert.equal(fourth.reports.at(-1)!.conclusion, "failure");
 	assert.ok(existsSync(box.workspace));
+});
+
+test("uploads: one at a time per name, nothing committed short, and their size checked when they finish", async () => {
+	const bucket = new MemoryR2();
+	const storage = new CiStorage(sqlStorage(new DatabaseSync(":memory:")), bucket as unknown as R2Bucket, () => "repo-1");
+	const grant: JobGrant = { repo: "repo-1", run: 3, job: "a", read: ["refs/heads/x"], write: "refs/heads/x", expires: Date.now() + 60_000 };
+	const part = async (kind: "caches" | "artifacts", id: string, bytes: string) => {
+		const target = storage.uploadTarget(kind, id, grant);
+		storage.recordPart(kind, id, grant, await bucket.resumeMultipartUpload(target.key, target.uploadId).uploadPart(1, new Response(bytes).body!));
+	};
+	// Two reservations at once: one wins, the other is told it exists.
+	const [one, two] = await Promise.allSettled([storage.reserveArtifact(grant, "dist", 3, null, false), storage.reserveArtifact({ ...grant, job: "b" }, "dist", 3, null, false)]);
+	assert.equal(one.status, "fulfilled");
+	assert.equal(two.status, "rejected");
+	assert.match(String((two as PromiseRejectedResult).reason), /already has an artifact called dist \(still being uploaded\)/);
+	const caches = await Promise.all([storage.reserveCache(grant, "k", "a".repeat(64), 5), storage.reserveCache(grant, "k", "a".repeat(64), 5)]);
+	assert.equal(caches.filter(Boolean).length, 1, "the same cache key is saved once");
+	// An upload short of what it reserved isn't committed.
+	const id = (one as PromiseFulfilledResult<string>).value;
+	await part("artifacts", id, "a");
+	await assert.rejects(storage.commit("artifacts", id, grant), /came to 1 bytes, not the 3/);
+	assert.deepEqual(storage.listArtifacts(3), []);
+	const again = await storage.reserveArtifact(grant, "dist", 3, null, false);
+	await part("artifacts", again, "abc");
+	await storage.commit("artifacts", again, grant);
+	assert.deepEqual(storage.listArtifacts(3).map((a) => a.size), [3]);
+	await assert.rejects(storage.reserveArtifact(grant, "dist", 3, null, false), /set overwrite: true/);
+	assert.ok(await storage.reserveArtifact(grant, "dist", 3, null, true), "overwrite replaces it");
 });

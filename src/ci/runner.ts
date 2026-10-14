@@ -139,6 +139,8 @@ export interface JobState {
 		ran: number[];
 		/** What each JavaScript action's main and pre units saved with $GITHUB_STATE, for its post unit (by main unit). */
 		saved: Record<number, Record<string, string>>;
+		/** A composite action's environment, by scope: what the step that used it set (with its own caller's), for its steps. */
+		envs?: Record<string, Record<string, string>>;
 	};
 	/** The job's outputs, worked out when its steps are done. */
 	outputs: Record<string, string> | null;
@@ -379,6 +381,13 @@ const RUNNER_CONTEXT = { os: "Linux", arch: "X64", name: "megit", environment: "
 
 /** Outputs a step may leave, in total: enough for paths and versions, not for files. */
 const MAX_OUTPUT_BYTES = 64 * 1024;
+/**
+ * What a job keeps from its steps for the steps after them ($GITHUB_ENV, outputs, saved state), in all:
+ * it's saved with the job's state every tick, so it stays well under what one stored value may hold.
+ */
+const MAX_CONTEXT_BYTES = 512 * 1024;
+/** A job's outputs, in all, as on GitHub. */
+const MAX_JOB_OUTPUT_BYTES = 1024 * 1024;
 
 /** The base64 checkout token and the token inside it, which the log must never show. */
 function checkoutSecrets(auth: string): string[] {
@@ -456,7 +465,8 @@ export class JobRunner {
 		const { state } = this;
 		state.failed = true;
 		state.error ??= message;
-		const index = state.phase === "provision" || state.phase === "setup" ? 0 : state.step + 1;
+		// The shown step of the unit that was running (state.step indexes units, not shown steps).
+		const index = state.phase === "provision" || state.phase === "setup" ? 0 : (this.launch.plan.units[state.step]?.ui ?? state.states.length - 1);
 		const s = state.states[index];
 		if (s && s.status !== "completed") {
 			this.log(index, `\n${message}\n`);
@@ -757,7 +767,8 @@ export class JobRunner {
 				return index + 1;
 			}
 		}
-		const baseEnv = { ...launch.env, ...state.addedEnv };
+		// Inside a composite action, the env the step that used it set holds for its steps too.
+		const baseEnv = { ...launch.env, ...state.addedEnv, ...(state.ctx.envs?.[unit.scope] ?? {}) };
 		try {
 			const condition = parseCondition(unit.if);
 			const templates = {
@@ -766,34 +777,40 @@ export class JobRunner {
 				run: unit.kind === "run" ? parseTemplate(unit.run) : null,
 				name: parseTemplate(unit.name),
 			};
-			const all = [condition, ...templates.env.flatMap(([, t]) => expressionsIn(t)), ...templates.with.flatMap(([, t]) => expressionsIn(t)), ...(templates.run ? expressionsIn(templates.run) : []), ...expressionsIn(templates.name)];
-			const hashes = await this.hashes(all, this.scope(unit, baseEnv, new Map()));
+			// The condition first, as on GitHub, so a skipped step's other expressions are never evaluated; then
+			// the step's env (which sees the job's env), then the rest (which sees the step's env too). hashFiles
+			// is worked out for each just before, with the environment it's evaluated in.
+			const hashes = await this.hashes([condition], this.scope(unit, baseEnv, new Map()));
 			if (!truthy(evaluate(condition, this.scope(unit, baseEnv, hashes)))) {
 				this.skip(unit);
 				return unit.kind === "enter" ? unit.end + 1 : index + 1;
 			}
-			// The shown name, filled in, for the job's own steps.
-			if (unit.scope === "" && (unit.kind !== "node" || unit.phase === "main")) shown.name = render(templates.name, this.scope(unit, baseEnv, hashes));
 			this.start(unit, shown);
 			state.ctx.ran.push(index);
-			// Step env sees the job's env; the rest see the step's too.
+			for (const [k, v] of await this.hashes(templates.env.flatMap(([, t]) => expressionsIn(t)), this.scope(unit, baseEnv, new Map()))) hashes.set(k, v);
 			const stepEnv = Object.fromEntries(templates.env.map(([k, t]) => [k, render(t, this.scope(unit, baseEnv, hashes))]));
+			const rest = [...templates.with.flatMap(([, t]) => expressionsIn(t)), ...(templates.run ? expressionsIn(templates.run) : []), ...expressionsIn(templates.name)];
+			for (const [k, v] of await this.hashes(rest, this.scope(unit, { ...baseEnv, ...stepEnv }, new Map()))) hashes.set(k, v);
 			const scope = this.scope(unit, { ...baseEnv, ...stepEnv }, hashes);
+			// The shown name, filled in, for the job's own steps.
+			if (unit.scope === "" && (unit.kind !== "node" || unit.phase === "main")) shown.name = render(templates.name, scope);
 			const inputs = Object.fromEntries(templates.with.map(([k, t]) => [k, render(t, scope)]));
 			if (unit.kind === "checkout") {
 				this.log(unit.ui, `The commit was checked out into ${WORKSPACE} when the job was set up.\n`);
 				this.conclude(unit, "success", {});
 				return index + 1;
 			}
+			const callerEnv = { ...(state.ctx.envs?.[unit.scope] ?? {}), ...stepEnv };
 			if (unit.kind === "enter") {
 				state.ctx.inputs[unit.inner] = this.actionInputs(launch.plan.actions[unit.action], inputs, scope, unit.ui);
 				state.ctx.steps[unit.inner] = {};
+				state.ctx.envs = { ...state.ctx.envs, [unit.inner]: callerEnv };
 				return index + 1;
 			}
-			const env = { ...launch.env, ...state.addedEnv, ...stepEnv };
+			const env = { ...launch.env, ...state.addedEnv, ...callerEnv };
 			let file: string;
 			if (unit.kind === "run") {
-				file = stepFile({ run: render(templates.run!, scope), env: stepEnv, workingDirectory: unit.workingDirectory }, launch.env, state.addedEnv, state.addedPath);
+				file = stepFile({ run: render(templates.run!, scope), env: callerEnv, workingDirectory: unit.workingDirectory }, launch.env, state.addedEnv, state.addedPath);
 			} else if (unit.kind === "node") {
 				const action = launch.plan.actions[unit.action];
 				const runs = action.meta.runs as Extract<typeof action.meta.runs, { using: "node" }>;
@@ -884,7 +901,7 @@ export class JobRunner {
 		const enter = launch.plan.units[unit.enter] as Extract<Unit, { kind: "enter" }>;
 		const action = launch.plan.actions[unit.action];
 		const inner: Unit = { ...unit, scope: unit.inner };
-		const scope = this.scope(inner, { ...launch.env, ...state.addedEnv }, new Map());
+		const scope = this.scope(inner, { ...launch.env, ...state.addedEnv, ...(state.ctx.envs?.[unit.inner] ?? {}) }, new Map());
 		const outputs: Record<string, string> = {};
 		for (const [name, value] of Object.entries(action.meta.outputs)) {
 			try {
@@ -898,8 +915,14 @@ export class JobRunner {
 		// The step itself: in the scope its composite action was used from.
 		const outer: Unit = { ...unit, scope: enter.scope, id: enter.id, continueOnError: enter.continueOnError };
 		// A failure inside was already passed up (markFailed); record the step's result without passing it again.
-		const conclusion: Conclusion = failed && !enter.continueOnError ? "failure" : "success";
-		if (outer.id) state.ctx.steps[outer.scope] = { ...state.ctx.steps[outer.scope], [outer.id]: { outputs, outcome: failed ? "failure" : "success", conclusion } };
+		// Cancelled while its steps ran (they were stopped or skipped): cancelled, unless one had failed.
+		const outcome: Conclusion = failed ? "failure" : state.cancelled ? "cancelled" : "success";
+		const conclusion: Conclusion = outcome === "failure" && enter.continueOnError ? "success" : outcome;
+		if (outer.id) state.ctx.steps[outer.scope] = { ...state.ctx.steps[outer.scope], [outer.id]: { outputs, outcome, conclusion } };
+		// Its steps' results and inputs aren't needed once it's over.
+		delete state.ctx.steps[unit.inner];
+		delete state.ctx.inputs[unit.inner];
+		if (state.ctx.envs) delete state.ctx.envs[unit.inner];
 		if (this.ownsShownStep(unit)) Object.assign(state.states[unit.ui], { status: "completed", conclusion, finishedAt: iso(Date.now()) });
 	}
 
@@ -914,6 +937,7 @@ export class JobRunner {
 			try {
 				const text = render(parseTemplate(value), scope);
 				if (this.secrets.some((secret) => secret && text.includes(secret))) this.log(last, `Output ${name} holds a secret, so it isn't passed on\n`);
+				else if (JSON.stringify(out).length + name.length + text.length > MAX_JOB_OUTPUT_BYTES) this.log(last, `Output ${name} would take the job's outputs past ${MAX_JOB_OUTPUT_BYTES / 1024 / 1024} MB, so it's left out\n`);
 				else out[name] = text;
 			} catch (err) {
 				if (!(err instanceof ExpressionError)) throw err;
@@ -939,7 +963,18 @@ export class JobRunner {
 			if (cut) this.log(index, `$GITHUB_${which.toUpperCase()} had ${cut} bytes past the first ${COLLECT_BYTES / 1024} KB, which were left out\n`);
 		}
 		const parsedEnv = parseEnvFile(env, "$GITHUB_ENV");
-		state.addedEnv = { ...state.addedEnv, ...parsedEnv.env };
+		// What's kept for later steps has a budget; past it, this step's additions are left out, saying so.
+		let room = MAX_CONTEXT_BYTES - JSON.stringify(state.ctx).length - JSON.stringify(state.addedEnv).length;
+		const fits = (what: string, value: Record<string, string>) => {
+			const size = JSON.stringify(value).length;
+			if (size <= 2 || size <= room) {
+				room -= size;
+				return true;
+			}
+			this.log(index, `${what} is left out: the job's steps have kept ${MAX_CONTEXT_BYTES / 1024} KB of environment, outputs and state already\n`);
+			return false;
+		};
+		if (fits("What this step wrote to $GITHUB_ENV", parsedEnv.env)) state.addedEnv = { ...state.addedEnv, ...parsedEnv.env };
 		for (const error of parsedEnv.errors) this.log(index, `${error}\n`);
 		for (const dir of parsePathFile(path)) if (!state.addedPath.includes(dir)) state.addedPath.push(dir);
 		const outputs = parseEnvFile(output, "$GITHUB_OUTPUT", false);
@@ -954,7 +989,7 @@ export class JobRunner {
 				return false;
 			}),
 		);
-		return { outputs: bounded, saved: kept.env };
+		return { outputs: fits("This step's outputs", bounded) ? bounded : {}, saved: fits("What this step saved with $GITHUB_STATE", kept.env) ? kept.env : {} };
 	}
 
 	/** Stops the machine and settles the job. */

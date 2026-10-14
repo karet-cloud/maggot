@@ -214,6 +214,25 @@ export function WikiWelcome({ project, canEdit }: { project: string; canEdit: bo
 	);
 }
 
+/** A draft kept in session storage (null when there's none, or storage isn't available). */
+function readDraft(key: string): { title: string; content: string } | null {
+	try {
+		const raw = sessionStorage.getItem(key);
+		return raw ? (JSON.parse(raw) as { title: string; content: string }) : null;
+	} catch {
+		return null;
+	}
+}
+
+function writeDraft(key: string, draft: { title: string; content: string } | null) {
+	try {
+		if (draft) sessionStorage.setItem(key, JSON.stringify(draft));
+		else sessionStorage.removeItem(key);
+	} catch {
+		// Storage full or blocked: the draft just isn't kept.
+	}
+}
+
 /**
  * Creates (no `page`) or edits a page: its title (a new one renames it), its Markdown with a
  * preview, and a commit message. `baseCommit` is the wiki head an edit started from; if the wiki
@@ -223,8 +242,27 @@ export function WikiEditor({ project, index, page, initialTitle = "", baseCommit
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const needsVerification = useNeedsVerification();
-	const [title, setTitle] = useState(page?.title ?? initialTitle);
-	const [content, setContent] = useState(page?.source ?? "");
+	// The text being written is kept in this tab's session storage, so a reload (after a conflict, say) doesn't lose it.
+	const draftKey = `megit-wiki-draft:${project}:${page?.slug ?? "_new"}`;
+	const [draft] = useState(() => readDraft(draftKey));
+	const [restored, setRestored] = useState(draft !== null && (draft.title !== (page?.title ?? initialTitle) || draft.content !== (page?.source ?? "")));
+	const [title, setTitleState] = useState(restored ? draft!.title : (page?.title ?? initialTitle));
+	const [content, setContentState] = useState(restored ? draft!.content : (page?.source ?? ""));
+	const keep = (next: { title?: string; content?: string }) => writeDraft(draftKey, { title: next.title ?? title, content: next.content ?? content });
+	const setTitle = (value: string) => {
+		setTitleState(value);
+		keep({ title: value });
+	};
+	const setContent = (value: string) => {
+		setContentState(value);
+		keep({ content: value });
+	};
+	const discard = () => {
+		writeDraft(draftKey, null);
+		setRestored(false);
+		setTitleState(page?.title ?? initialTitle);
+		setContentState(page?.source ?? "");
+	};
 	const [message, setMessage] = useState("");
 	const [preview, setPreview] = useState(false);
 	const problem = title.trim() ? pageNameProblem(title) : null;
@@ -238,6 +276,7 @@ export function WikiEditor({ project, index, page, initialTitle = "", baseCommit
 			return page ? api.editWikiPage(project, page.slug, input) : api.createWikiPage(project, input);
 		},
 		onSuccess: async (result) => {
+			writeDraft(draftKey, null);
 			await queryClient.invalidateQueries({ queryKey: keys.wiki(project) });
 			void navigate({ to: "/$owner/$repo/wiki/$page", params: { ...repoParams(project), page: result.page } });
 		},
@@ -275,6 +314,14 @@ export function WikiEditor({ project, index, page, initialTitle = "", baseCommit
 		>
 			<Panel title={<span className="normal-case tracking-normal text-fg">{page ? `Edit ${page.title}` : "New page"}</span>}>
 				<div className="space-y-3 p-3">
+					{restored && (
+						<p className="flex flex-wrap items-center gap-2 rounded-md border border-amber-400/30 bg-amber-400/5 px-3 py-2 text-xs text-amber-200">
+							Your unsaved text from before was restored{page ? "; the page may have changed since, so check it against the current version" : ""}.
+							<button type="button" onClick={discard} className="text-accent hover:underline">
+								Discard it
+							</button>
+						</p>
+					)}
 					<Field label="Title" hint={problem ?? (renamed ? `Saving renames the page (its file becomes ${pageSlug(title)}.md).` : "Spaces become hyphens in the page's address and file name.")}>
 						<Input value={title} onChange={(e) => setTitle(e.target.value)} required autoFocus={!page} placeholder="Getting Started" />
 					</Field>
@@ -313,7 +360,7 @@ export function WikiEditor({ project, index, page, initialTitle = "", baseCommit
 					<ErrorNote error={save.error} />
 					{moved && (
 						<button type="button" onClick={() => location.reload()} className="text-xs text-accent hover:underline">
-							Reload the latest version (your edits here will be lost; copy them first)
+							Reload to see the latest version (your text here is kept and comes back after reloading)
 						</button>
 					)}
 					<div className="flex justify-end gap-2">

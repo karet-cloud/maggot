@@ -107,7 +107,14 @@ async function readMeta(read: (path: string) => Promise<string | null>, dir: str
  * Resolves the actions a job's steps use (and, for composite actions, the actions their steps use),
  * step by step: null for steps that use none. `repository` names this repository, for ./ actions.
  */
-export async function resolveActions(steps: StepSpec[], source: ActionSource, repository: string, depth = 0, seen = new Map<string, Promise<ResolvedAction>>()): Promise<(ResolvedAction | null)[]> {
+export async function resolveActions(
+	steps: StepSpec[],
+	source: ActionSource,
+	repository: string,
+	depth = 0,
+	seen = new Map<string, Promise<ResolvedAction>>(),
+	chain: string[] = [],
+): Promise<(ResolvedAction | null)[]> {
 	const out: (ResolvedAction | null)[] = [];
 	for (const s of steps) {
 		if (s.kind !== "action" || !s.uses) {
@@ -115,13 +122,16 @@ export async function resolveActions(steps: StepSpec[], source: ActionSource, re
 			continue;
 		}
 		if (depth >= MAX_ACTION_DEPTH) throw new WorkflowError(`${s.name}: actions use actions more than ${MAX_ACTION_DEPTH} deep`);
-		out.push(await resolveOne(s.uses, s.name, source, repository, depth, seen));
+		out.push(await resolveOne(s.uses, s.name, source, repository, depth, seen, chain));
 	}
 	return out;
 }
 
-async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource, repository: string, depth: number, seen: Map<string, Promise<ResolvedAction>>): Promise<ResolvedAction> {
+async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource, repository: string, depth: number, seen: Map<string, Promise<ResolvedAction>>, chain: string[]): Promise<ResolvedAction> {
 	const key = ref.kind === "local" ? `./${ref.path}` : `${ref.owner}/${ref.repo}/${ref.path}@${ref.ref}`;
+	// Checked before the cache: an action that uses itself would otherwise wait on its own resolution.
+	if (chain.includes(key)) throw new WorkflowError(`${stepName}: actions use each other in a loop: ${[...chain, key].join(" → ")}`);
+	const inner = [...chain, key];
 	// The same action used twice (or by several composite actions) is resolved once and shared.
 	let pending = seen.get(key);
 	if (!pending) {
@@ -129,7 +139,7 @@ async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource
 			if (ref.kind === "local") {
 				const meta = await readMeta((p) => source.readLocal(p), ref.path, `./${ref.path}`);
 				const action: ResolvedAction = { meta, dir: `${WORKSPACE}/${ref.path}`, repository, ref: "", archive: null, nested: [] };
-				if (meta.runs.using === "composite") action.nested = await resolveActions(meta.runs.steps, source, repository, depth + 1, seen);
+				if (meta.runs.using === "composite") action.nested = await resolveActions(meta.runs.steps, source, repository, depth + 1, seen, inner);
 				return action;
 			}
 			const label = `${ref.owner}/${ref.repo}${ref.path ? `/${ref.path}` : ""}@${ref.ref}`;
@@ -137,6 +147,7 @@ async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource
 			try {
 				sha = await source.resolve(ref.owner, ref.repo, ref.ref);
 			} catch (err) {
+				if (err instanceof ActionFetchError) throw new ActionFetchError(`${stepName}: ${label}: ${err.message}`);
 				throw new WorkflowError(`${stepName}: ${label}: ${(err as Error).message}`);
 			}
 			const meta = await readMeta((p) => source.readGitHub(ref.owner, ref.repo, sha, p), ref.path, label);
@@ -149,7 +160,7 @@ async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource
 				archive: { owner: ref.owner, repo: ref.repo, sha, root },
 				nested: [],
 			};
-			if (meta.runs.using === "composite") action.nested = await resolveActions(meta.runs.steps, source, repository, depth + 1, seen);
+			if (meta.runs.using === "composite") action.nested = await resolveActions(meta.runs.steps, source, repository, depth + 1, seen, inner);
 			return action;
 		})();
 		seen.set(key, pending);
@@ -158,6 +169,29 @@ async function resolveOne(ref: ActionRef, stepName: string, source: ActionSource
 }
 
 const GITHUB = "https://github.com";
+
+/** GitHub was unreachable or answered with a server error: worth trying again, unlike a missing action. */
+export class ActionFetchError extends Error {}
+
+/** A fetch, with network failures and 5xx answers as ActionFetchError. */
+async function reach(fetcher: typeof fetch, url: string, what: string): Promise<Response> {
+	let res: Response;
+	try {
+		res = await fetcher(url);
+	} catch (err) {
+		throw new ActionFetchError(`${what}: GitHub couldn't be reached (${(err as Error).message})`);
+	}
+	if (res.status >= 500 || res.status === 429) throw new ActionFetchError(`${what}: GitHub answered HTTP ${res.status}`);
+	return res;
+}
+
+/** Refs resolved lately, so a matrix's jobs (or a busy repository's runs) ask GitHub once. */
+const REF_TTL_MS = 5 * 60_000;
+const resolved = new Map<string, { sha: string; at: number }>();
+/** Archives being copied from GitHub to R2 in this isolate, so jobs asking at once share the copy. */
+const copying = new Map<string, Promise<void>>();
+/** The biggest action archive megit keeps. */
+const MAX_ARCHIVE_BYTES = 100 * 1024 * 1024;
 
 /**
  * GitHub, read the ways that need no token and aren't rate-limited like its REST API: refs over git's
@@ -175,12 +209,20 @@ export class GitHubActions {
 
 	async resolve(owner: string, repo: string, ref: string): Promise<string> {
 		if (/^[0-9a-f]{40}$/i.test(ref)) return ref.toLowerCase();
+		const key = `${owner}/${repo}@${ref}`.toLowerCase();
+		const hit = resolved.get(key);
+		if (hit && Date.now() - hit.at < REF_TTL_MS) return hit.sha;
 		const { branches, tags } = await listRefs({ url: `${GITHUB}/${owner}/${repo}.git`, token: "" }).catch((err: Error) => {
-			throw new Error(`couldn't read it from GitHub (${err.message}); is it a public repository?`);
+			const status = Number(/HTTP (\d+)/.exec(err.message)?.[1] ?? 0);
+			// Missing (or private) repositories answer 401 or 404; anything else may pass.
+			if (status === 401 || status === 403 || status === 404) throw new Error(`couldn't read it from GitHub (${err.message}); is it a public repository?`);
+			throw new ActionFetchError(`couldn't read it from GitHub (${err.message})`);
 		});
 		// A tag first, as GitHub does when a name is both.
 		const sha = tags.get(ref)?.commit ?? branches.get(ref);
 		if (!sha) throw new Error(`${ref} isn't a tag or branch there (use a full commit hash for a commit)`);
+		resolved.set(key, { sha, at: Date.now() });
+		if (resolved.size > 1000) resolved.delete(resolved.keys().next().value!);
 		return sha;
 	}
 
@@ -191,7 +233,7 @@ export class GitHubActions {
 			const text = await kept.text();
 			return kept.customMetadata?.missing === "1" ? null : text;
 		}
-		const res = await this.fetcher(`https://raw.githubusercontent.com/${owner}/${repo}/${sha}/${path.split("/").map(encodeURIComponent).join("/")}`);
+		const res = await reach(this.fetcher, `https://raw.githubusercontent.com/${owner}/${repo}/${sha}/${path.split("/").map(encodeURIComponent).join("/")}`, `reading ${path}`);
 		if (res.status === 404) {
 			await this.bucket?.put(key, "", { customMetadata: { missing: "1" } });
 			return null;
@@ -208,13 +250,43 @@ export class GitHubActions {
 		const key = archiveKey(owner, repo, sha);
 		const kept = await this.bucket.get(key);
 		if (kept) return kept.body;
-		const res = await this.fetcher(`https://codeload.github.com/${owner}/${repo}/tar.gz/${sha}`);
-		if (res.status === 404) return null;
+		let copy = copying.get(key);
+		if (!copy) {
+			copy = this.copy(owner, repo, sha, key).finally(() => copying.delete(key));
+			copying.set(key, copy);
+		}
+		await copy;
+		return (await this.bucket.get(key))?.body ?? null;
+	}
+
+	/** Copies an archive from GitHub to R2, streamed when GitHub says how big it is. A missing one isn't copied. */
+	private async copy(owner: string, repo: string, sha: string, key: string): Promise<void> {
+		const bucket = this.bucket!;
+		const res = await reach(this.fetcher, `https://codeload.github.com/${owner}/${repo}/tar.gz/${sha}`, `downloading ${owner}/${repo}@${sha.slice(0, 7)}`);
+		if (res.status === 404) return;
 		if (!res.ok || !res.body) throw new Error(`downloading ${owner}/${repo}@${sha.slice(0, 7)} from GitHub failed (HTTP ${res.status})`);
-		// Kept whole in R2 first (an action is small), then served from there.
-		const bytes = new Uint8Array(await res.arrayBuffer());
-		await this.bucket.put(key, bytes, { httpMetadata: { contentType: "application/gzip" } });
-		return new Response(bytes).body;
+		const length = Number(res.headers.get("content-length"));
+		if (length > MAX_ARCHIVE_BYTES) throw new Error(`${owner}/${repo}@${sha.slice(0, 7)} is bigger than ${MAX_ARCHIVE_BYTES / 1024 / 1024} MB`);
+		const meta = { httpMetadata: { contentType: "application/gzip" } };
+		if (Number.isInteger(length) && length > 0 && typeof FixedLengthStream !== "undefined") {
+			await bucket.put(key, res.body.pipeThrough(new FixedLengthStream(length)), meta);
+			return;
+		}
+		// No length (a chunked answer): read it, up to the limit.
+		const chunks: Uint8Array[] = [];
+		let size = 0;
+		for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+			size += chunk.length;
+			if (size > MAX_ARCHIVE_BYTES) throw new Error(`${owner}/${repo}@${sha.slice(0, 7)} is bigger than ${MAX_ARCHIVE_BYTES / 1024 / 1024} MB`);
+			chunks.push(chunk);
+		}
+		const bytes = new Uint8Array(size);
+		let at = 0;
+		for (const c of chunks) {
+			bytes.set(c, at);
+			at += c.length;
+		}
+		await bucket.put(key, bytes, meta);
 	}
 }
 

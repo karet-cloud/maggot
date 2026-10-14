@@ -616,13 +616,12 @@ export const expressionsIn = (t: Template): Expression[] => t.filter((p): p is E
  */
 export function parseCondition(text: string): Expression {
 	const trimmed = text.trim();
-	const whole = /^\$\{\{([\s\S]*)\}\}$/.exec(trimmed);
 	let node: Expression;
-	if (whole && !whole[1].includes("}}")) node = parseExpression(whole[1].trim());
-	else if (trimmed.includes("${{")) {
-		// Text around ${{ }} makes a non-empty string, which is always true; GitHub treats it the same way.
+	if (trimmed.includes("${{")) {
+		// One ${{ }} around it all is that expression (found with the quote-aware scanner, so '}}' in a
+		// string is fine); text around ${{ }} makes a non-empty string, which is always true, as on GitHub.
 		const template = parseTemplate(trimmed);
-		node = { kind: "literal", value: template.length > 0 };
+		node = template.length === 1 && typeof template[0] !== "string" ? template[0] : { kind: "literal", value: true };
 	} else node = parseExpression(trimmed);
 	const { functions } = usage(node);
 	if (STATUS_FUNCTIONS.some((f) => functions.has(f))) return node;

@@ -1008,3 +1008,29 @@ test("cache scopes: a branch's own, then its base's and the default branch's", (
 	});
 	assert.deepEqual(cacheScopes({ ...base, event: "schedule", branch: "main", pull: null, baseBranch: null }, "main"), { read: ["refs/heads/main"], write: "refs/heads/main" });
 });
+
+test("a job's failure() and success() count every job before it, not only the ones it needs", async () => {
+	const wf = "on: push\njobs:\n  a:\n    steps:\n      - run: x\n  b:\n    needs: a\n    steps:\n      - run: x\n  c:\n    needs: b\n    if: failure()\n    steps:\n      - run: x\n  d:\n    needs: b\n    if: always()\n    steps:\n      - run: x\n  e:\n    needs: d\n    steps:\n      - run: x\n";
+	const h = harness({ [REPO]: { [SHA]: { "t.yml": wf } } });
+	await withDepot(h);
+	const [run] = await h.ci.onPush("main", SHA, "alice");
+	await h.ci.report(jobsOf(h, run.number)[0].id, done("failure"));
+	const jobs = Object.fromEntries(jobsOf(h, run.number).map((j) => [j.key, [j.status, j.conclusion]]));
+	assert.deepEqual(jobs.b, ["completed", "skipped"]);
+	assert.deepEqual(jobs.c, ["in_progress", null], "a failed two jobs back: failure() is true");
+	assert.deepEqual(jobs.d, ["in_progress", null]);
+	await h.ci.report(jobsOf(h, run.number).find((j) => j.key === "d")!.id, done("success"));
+	const e = jobsOf(h, run.number).find((j) => j.key === "e")!;
+	assert.deepEqual([e.conclusion, e.error], ["skipped", "Skipped: a, b didn't succeed"], "d succeeded, but a job before it failed");
+});
+
+test("actions that use each other in a loop fail the job, rather than hang it", async () => {
+	const loop = "runs:\n  using: composite\n  steps:\n    - uses: ./b\n";
+	const back = "runs:\n  using: composite\n  steps:\n    - uses: ./a\n";
+	const h = harness({ [REPO]: { [SHA]: { "l.yml": "on: push\njobs:\n  x:\n    steps:\n      - uses: ./a\n", "@a/action.yml": loop, "@b/action.yml": back } } });
+	await withDepot(h);
+	const [run] = await h.ci.onPush("main", SHA, null);
+	const job = h.ci.getRun(run.number).jobs[0];
+	assert.equal(job.conclusion, "failure");
+	assert.match(job.error ?? "", /loop: \.\/a → \.\/b → \.\/a/);
+});
