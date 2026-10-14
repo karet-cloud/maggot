@@ -73,3 +73,10 @@ jobs:
             sleep 5
           done
           echo "unexpected status $code" && exit 1
+
+      - name: Seed public Linux demo
+        env:
+          MAGGOT_API_KEY: ${{ secrets.MAGGOT_API_KEY }}
+          MAGGOT_MIRROR_PASSWORD: ${{ secrets.MAGGOT_MIRROR_PASSWORD }}
+          MAGGOT_URL: https://maggot.sarthak7u.workers.dev
+        run: node scripts/seed-linux-demo.ts
