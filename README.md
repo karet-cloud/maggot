@@ -267,7 +267,18 @@ npm run deploy
 CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
 pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
 needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
-Workers" template, plus Artifacts edit and D1 edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
+Workers" template, plus Artifacts edit and D1 edit), a stable `MAGGOT_API_KEY` secret, and a
+`CLOUDFLARE_ACCOUNT_ID` repository variable. Secrets can be scoped to the GitHub `production`
+environment. CI passes the admin key with `--secrets-file` so a new or renamed Worker can deploy
+without a previous version to inherit it from. The temporary secret file is removed when the
+step exits. Set the key once and keep it stable: changing it also changes the derived session
+secret and SSH host key.
+
+To store the key from an existing deployment without printing it, use a file outside the repo:
+
+```sh
+gh secret set MAGGOT_API_KEY --env production < /path/to/admin-key.txt
+```
 The first deploy creates the `maggot` D1 database; tables are created by the Worker on first use, so
 there's no migration step. Better Auth's secret is derived from `MAGGOT_API_KEY` unless a
 `BETTER_AUTH_SECRET` secret is set.
