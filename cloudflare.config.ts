@@ -48,6 +48,8 @@ export default defineConfig(({ mode }) => {
 				MEGIT_POLICY: bindings.text(process.env.MEGIT_POLICY ?? ""),
 				// Users, sessions, repository records and access tokens.
 				DB: bindings.d1({ name: "megit" }),
+				// Actions caches, artifacts, and the copies of third-party actions jobs download.
+				CI_BUCKET: bindings.r2({ name: "megit-ci" }),
 				...(offline
 					? {
 							LOCAL_ARTIFACTS_URL: bindings.text(process.env.LOCAL_ARTIFACTS_URL ?? "http://127.0.0.1:8789"),

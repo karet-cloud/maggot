@@ -4,6 +4,7 @@ import { DepotApi, DepotError, DepotSandbox } from "../src/ci/depot.ts";
 import { DepotMachine, newJobState, type JobLaunch } from "../src/ci/runner.ts";
 import { ExecTimeoutError } from "../src/ci/sandbox.ts";
 import { JobRunner, type JobReport } from "../src/ci/runner.ts";
+import { buildPlan } from "../src/ci/plan.ts";
 import { LocalSandbox } from "./ci-local.ts";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -203,7 +204,7 @@ test("the Depot machine creates once, finds its sandbox again after a restart, a
 		KillSandbox: () => Response.json({ sandbox: { sandboxId: "sb1", status: "SANDBOX_STATUS_CANCELLED" } }),
 	});
 	const machine = new DepotMachine({ token: "t" }, 2, { fetch });
-	const state = newJobState({ ...launch, steps: [], checkout: { url: "", auth: "", ref: "", sha: "" } } as JobLaunch);
+	const state = newJobState({ ...launch, plan: { units: [], ui: ["Set up job", "Complete job"], actions: [] }, checkout: { url: "", auth: "", ref: "", sha: "", depth: 1 } } as JobLaunch);
 	let saves = 0;
 	assert.equal(await machine.provision(state, launch, async () => void saves++), false);
 	assert.equal(state.sandboxId, "sb1");
@@ -228,7 +229,7 @@ test("the Depot machine creates once, finds its sandbox again after a restart, a
 			),
 		GetSandbox: (body) => Response.json({ sandbox: { sandboxId: body.id, status: "SANDBOX_STATUS_RUNNING" } }),
 	});
-	const restarted = newJobState({ ...launch, steps: [], checkout: { url: "", auth: "", ref: "", sha: "" } } as JobLaunch);
+	const restarted = newJobState({ ...launch, plan: { units: [], ui: ["Set up job", "Complete job"], actions: [] }, checkout: { url: "", auth: "", ref: "", sha: "", depth: 1 } } as JobLaunch);
 	assert.equal(await new DepotMachine({ token: "t" }, 2, { fetch: again.fetch }).provision(restarted, launch, async () => {}), true);
 	assert.equal(restarted.sandboxId, "sb9");
 
@@ -237,7 +238,7 @@ test("the Depot machine creates once, finds its sandbox again after a restart, a
 		CreateSandbox: () => Response.json({ sandbox: { sandboxId: "sb2", status: "SANDBOX_STATUS_CREATED" } }),
 		GetSandbox: () => Response.json({ sandbox: { sandboxId: "sb2", status: "SANDBOX_STATUS_FAILED", errorMessage: "no capacity" } }),
 	});
-	const s3 = newJobState({ ...launch, steps: [], checkout: { url: "", auth: "", ref: "", sha: "" } } as JobLaunch);
+	const s3 = newJobState({ ...launch, plan: { units: [], ui: ["Set up job", "Complete job"], actions: [] }, checkout: { url: "", auth: "", ref: "", sha: "", depth: 1 } } as JobLaunch);
 	await assert.rejects(new DepotMachine({ token: "t" }, 2, { fetch: failed.fetch }).provision(s3, launch, async () => {}), /no capacity/);
 });
 
@@ -319,13 +320,20 @@ test("a Depot job never puts secrets or the checkout token in a command's enviro
 		repo: "r",
 		runner: { kind: "depot", vcpus: 2, credentials: { token: "dpt" } },
 		timeoutMinutes: 5,
-		steps: [
-			{ name: "Use", run: `echo "len=\${#API_KEY}"; echo "$API_KEY"; echo "TOK=$API_KEY" >> "$GITHUB_ENV"`, shell: "bash", workingDirectory: null, env: { STEP_SECRET: SECRET }, if: "success", continueOnError: false, timeoutMinutes: null },
-			{ name: "Next", run: `echo "tok-len=\${#TOK}"`, shell: "bash", workingDirectory: null, env: {}, if: "success", continueOnError: false, timeoutMinutes: null },
-		],
+		plan: buildPlan(
+			[
+				{ kind: "run", id: null, uses: null, with: {}, name: "Use", run: `echo "len=\${#API_KEY}"; echo "$API_KEY"; echo "TOK=$API_KEY" >> "$GITHUB_ENV"`, shell: "bash", workingDirectory: null, env: { STEP_SECRET: SECRET }, if: "success()", continueOnError: false, timeoutMinutes: null },
+				{ kind: "run", id: null, uses: null, with: {}, name: "Next", run: `echo "tok-len=\${#TOK}"`, shell: "bash", workingDirectory: null, env: {}, if: "success()", continueOnError: false, timeoutMinutes: null },
+			],
+			[null, null],
+		),
 		env: { API_KEY: SECRET },
+		contexts: { github: {}, matrix: {}, needs: {}, strategy: {}, inputs: {} },
+		secrets: {},
+		outputs: {},
 		mask: [SECRET],
-		checkout: { url: `file://${dir}`, auth: AUTH, ref: "refs/heads/master", sha: git("rev-parse", "HEAD") },
+		checkout: { url: `file://${dir}`, auth: AUTH, ref: "refs/heads/master", sha: git("rev-parse", "HEAD"), depth: 50 },
+		api: { url: "http://127.0.0.1:1", token: "mgjob_depot-test-token" },
 	};
 	const runner = new JobRunner(launch, newJobState(launch), new DepotMachine({ token: "dpt" }, 2, { fetch }));
 	const reports: JobReport[] = [];

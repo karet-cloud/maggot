@@ -4,6 +4,8 @@ import type { RemoteAccess } from "./workspace.ts";
 const ZERO = "0".repeat(40);
 
 function headers(remote: RemoteAccess, extra: Record<string, string> = {}) {
+	// No token: a public repository elsewhere (an action on GitHub), asked anonymously.
+	if (!remote.token) return { "user-agent": "git/megit", ...extra };
 	const secret = remote.token.split("?expires=")[0];
 	return { authorization: `Basic ${btoa(`x:${secret}`)}`, "user-agent": "git/megit", ...extra };
 }

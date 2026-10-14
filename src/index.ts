@@ -71,6 +71,7 @@ import { assertProjectName } from "./names.ts";
 import { measureRepository } from "./git/protocol.ts";
 import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
+import jobApi from "./ci/job-api.ts";
 import actions from "./ci/routes.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { ProjectCoordinator, Registry } from "./project.ts";
@@ -157,6 +158,8 @@ app.on(["GET", "POST"], "/api/auth/*", async (c) => (await auth(c.env, c.req.raw
 
 app.use("/api/*", async (c, next) => {
 	if (c.req.method === "OPTIONS") return next();
+	// Jobs' own API: authorized by the job's token (src/ci/job-api.ts), not a person's credentials.
+	if (c.req.path.startsWith("/api/ci/")) return next();
 	const principal = await guardCredentials(c.env, c.req.raw, () => resolvePrincipal(c.env, c.req.raw));
 	c.set("principal", principal);
 	// The admin key (agents, scripts) isn't limited. Signed-out callers are, by address; signed-in
@@ -1966,6 +1969,7 @@ repo.post("/tasks/:task/abandon", async (c) => c.json({ task: await project(c).a
 
 
 repo.route("/actions", actions);
+app.route("/api/ci", jobApi);
 
 app.route("/api/repos/:owner/:repo", repo);
 app.route("/api/projects/:project", repo);

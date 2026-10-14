@@ -4,18 +4,23 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { CLEANUP_WINDOW_MS, JobRunner, newJobState, RETRY_WINDOW_MS, shouldRun, type JobLaunch, type JobReport, type JobState, type Machine } from "../src/ci/runner.ts";
+import { buildPlan } from "../src/ci/plan.ts";
+import { CLEANUP_WINDOW_MS, JobRunner, newJobState, RETRY_WINDOW_MS, type JobLaunch, type JobReport, type JobState, type Machine } from "../src/ci/runner.ts";
 import type { Sandbox } from "../src/ci/sandbox.ts";
 import type { StepSpec } from "../src/ci/workflow.ts";
 import { LocalSandbox, NamespaceSandbox } from "./ci-local.ts";
 
 const step = (name: string, run: string | null, extra: Partial<StepSpec> = {}): StepSpec => ({
+	kind: run === null ? "checkout" : "run",
+	id: null,
 	name,
 	run,
+	uses: null,
+	with: {},
 	shell: "bash",
 	workingDirectory: null,
 	env: {},
-	if: "success",
+	if: "success()",
 	continueOnError: false,
 	timeoutMinutes: null,
 	...extra,
@@ -41,10 +46,14 @@ function launchFor(steps: StepSpec[], repo = repository()): JobLaunch {
 		repo: "repo-1",
 		runner: { kind: "cloudflare" },
 		timeoutMinutes: 5,
-		steps,
+		plan: buildPlan(steps, steps.map(() => null)),
 		env: { CI: "true", API_KEY: SECRET },
+		contexts: { github: { sha: repo.sha, ref: "refs/heads/master" }, matrix: {}, needs: {}, strategy: {}, inputs: {} },
+		secrets: {},
+		outputs: {},
 		mask: [SECRET],
-		checkout: { url: repo.url, auth: btoa(`x:${TOKEN}`), ref: "refs/heads/master", sha: repo.sha },
+		checkout: { url: repo.url, auth: btoa(`x:${TOKEN}`), ref: "refs/heads/master", sha: repo.sha, depth: 50 },
+		api: { url: "http://127.0.0.1:1", token: "mgjob_test-job-token" },
 	};
 }
 
@@ -111,8 +120,8 @@ test("a job checks out, runs steps with their environment, masks secrets and set
 		step("Fails", "echo before; exit 4", { continueOnError: true }),
 		step("Fails hard", "exit 2"),
 		step("Skipped", "echo never"),
-		step("Always", "echo cleanup", { if: "always" }),
-		step("On failure", "echo it failed", { if: "failure" }),
+		step("Always", "echo cleanup", { if: "always()" }),
+		step("On failure", "echo it failed", { if: "failure()" }),
 	];
 	const launch = launchFor(steps);
 	const state = newJobState(launch);
@@ -165,7 +174,7 @@ test("lost report answers are resent with the same number, so logs arrive once",
 });
 
 test("a cancel stops the running step, then runs always() and cancelled() steps", async () => {
-	const launch = launchFor([step("Long", "echo started; sleep 30"), step("Next", "echo no"), step("Cleanup", "echo cleaning", { if: "always" }), step("Cancelled", "echo was cancelled", { if: "cancelled" })]);
+	const launch = launchFor([step("Long", "echo started; sleep 30"), step("Next", "echo no"), step("Cleanup", "echo cleaning", { if: "always()" }), step("Cancelled", "echo was cancelled", { if: "cancelled()" })]);
 	const runner = new JobRunner(launch, newJobState(launch), new LocalMachine());
 	const started = Date.now();
 	const { reports, logs } = await run(runner, {
@@ -325,19 +334,6 @@ test("a cancel before the machine is up ends the job straight away", async () =>
 	assert.ok(machine.destroyed);
 });
 
-test("step conditions follow GitHub's", () => {
-	assert.ok(shouldRun("success", false, false));
-	assert.ok(!shouldRun("success", true, false));
-	assert.ok(!shouldRun("success", false, true));
-	assert.ok(shouldRun("failure", true, false));
-	assert.ok(!shouldRun("failure", true, true));
-	assert.ok(shouldRun("always", true, true));
-	assert.ok(shouldRun("cancelled", false, true));
-	assert.ok(!shouldRun("cancelled", false, false));
-	assert.ok(shouldRun("notCancelled", true, false));
-	assert.ok(!shouldRun("notCancelled", false, true));
-});
-
 test("a machine that won't stop is tried again, with backoff, until it does", async () => {
 	const launch = launchFor([step("S", "echo hi")]);
 	const machine = new LocalMachine();
@@ -377,7 +373,7 @@ test("a job isn't settled while its machine runs, and wakes for the next try", a
 });
 
 test("a cancel leaves a running always() step to finish", async () => {
-	const launch = launchFor([step("Cleanup", "echo begin; sleep 1; echo end", { if: "always" }), step("Next", "echo no")]);
+	const launch = launchFor([step("Cleanup", "echo begin; sleep 1; echo end", { if: "always()" }), step("Next", "echo no")]);
 	const runner = new JobRunner(launch, newJobState(launch), new LocalMachine());
 	const { reports, logs } = await run(runner, {
 		onTick: (_, seen) => {

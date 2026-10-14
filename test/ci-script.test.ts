@@ -30,12 +30,16 @@ import { LocalSandbox } from "./ci-local.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const step = (run: string, extra: Partial<StepSpec> = {}): StepSpec => ({
+	kind: "run",
+	id: null,
+	uses: null,
+	with: {},
 	name: "s",
 	run,
 	shell: "bash",
 	workingDirectory: null,
 	env: {},
-	if: "success",
+	if: "success()",
 	continueOnError: false,
 	timeoutMinutes: null,
 	...extra,
@@ -118,7 +122,8 @@ test("poll output parses strictly: exit codes and states, nothing else", () => {
 });
 
 test("collect prints only sizes", () => {
-	assert.deepEqual(parseCollectSizes("8\n70000\n"), { env: 8, path: 70000 });
+	assert.deepEqual(parseCollectSizes("8\n70000\n0\n12\n"), [8, 70000, 0, 12]);
+	assert.throws(() => parseCollectSizes("8\n70000\n"), ScriptOutputError, "all four files");
 	assert.throws(() => parseCollectSizes("nope"), ScriptOutputError);
 	assert.throws(() => parseCollectSizes(`8\n${btoa("A=1")}\n`), ScriptOutputError);
 });
@@ -247,11 +252,17 @@ test("the kill script stops a step's whole process group", async () => {
 	await killOwnGroup(box, "2");
 });
 
-test("the collect script copies $GITHUB_ENV and $GITHUB_PATH to files, prints only sizes, and empties them", async () => {
+test("the collect script copies $GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT and $GITHUB_STATE to files, prints only sizes, and empties them", async () => {
 	const box = new LocalSandbox();
-	await box.exec(["sh", "-c", `mkdir -p ${box.user} && printf 'TOK=s3cr3t-value\\n' > ${box.user}/github-env && head -c ${COLLECT_BYTES + 5} /dev/zero | tr '\\0' 'x' > ${box.user}/github-path`]);
+	await box.exec([
+		"sh",
+		"-c",
+		`mkdir -p ${box.user} && printf 'TOK=s3cr3t-value\\n' > ${box.user}/github-env && head -c ${COLLECT_BYTES + 5} /dev/zero | tr '\\0' 'x' > ${box.user}/github-path && printf 'dir=out\\n' > ${box.user}/github-output`,
+	]);
 	const out = (await box.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MEGIT_ID: "0" } })).stdout;
-	assert.deepEqual(parseCollectSizes(out), { env: 17, path: COLLECT_BYTES + 5 });
+	assert.deepEqual(parseCollectSizes(out), [17, COLLECT_BYTES + 5, 8, 0]);
+	assert.equal(await box.readFile(collectedPath("0", "output")), "dir=out\n");
+	assert.equal(await box.readFile(collectedPath("0", "state")), "", "a file that wasn't there reads as empty");
 	assert.ok(!out.includes("s3cr3t") && !out.includes(btoa("TOK=s3cr3t-value\n").slice(0, 12)), "no content in the output");
 	assert.equal(await box.readFile(collectedPath("0", "env")), "TOK=s3cr3t-value\n");
 	assert.equal((await box.readFile(collectedPath("0", "path"))).length, COLLECT_BYTES);
