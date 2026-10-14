@@ -22,10 +22,12 @@ const pullFilesQuery = (project: string, number: number) => queryOptions({ query
 
 export const Route = createFileRoute("/$owner/$repo/pull/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "commits" || s.tab === "files" ? { tab: s.tab } : {}),
-	loader: ({ context, params }) => {
+	loaderDeps: ({ search }) => ({ tab: search.tab }),
+	// The full diff is costly to work out, so a hover fetches it only for links to the Files tab.
+	loader: ({ context, params, deps }) => {
 		const project = `${params.owner}/${params.repo}`;
 		const number = Number(params.number);
-		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), pullFilesQuery(project, number)) : undefined;
+		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), deps.tab === "files" && pullFilesQuery(project, number)) : undefined;
 	},
 	component: PullPage,
 });
@@ -346,34 +348,12 @@ interface Draft {
 /** The diff, with existing line comments, and a pending review built up line by line. */
 function Files({ project, pull, reviewComments, files }: { project: string; pull: Pull; reviewComments: ReviewComment[]; files: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.pullFiles>>>> }) {
 	const viewer = useViewer();
+	const queryClient = useQueryClient();
 	const [drafts, setDrafts] = useState<Draft[]>([]);
 	const [editing, setEditing] = useState<{ path: string; side: "new" | "old"; line: number } | null>(null);
 	const [text, setText] = useState("");
 	const [finishing, setFinishing] = useState(false);
-	// A review that failed to submit, to start the next attempt from.
-	const [failed, setFailed] = useState<{ state: ReviewState; body: string } | null>(null);
 	const canReview = Boolean(viewer.data) && pull.pullState === "open";
-	// The review and its line comments show at once; the approval decision comes with the refetch.
-	const submit = useOptimistic({
-		mutationFn: (r: { state: ReviewState; body: string; commit: string; drafts: Draft[] }) =>
-			api.review(project, pull.number, { state: r.state, body: r.body, commit: r.commit, comments: r.drafts.map(({ path, side, line, body }) => ({ path, side, line, body })) }),
-		apply: (r) => {
-			const id = `optimistic-${Date.now()}`;
-			const author = viewer.data?.username ?? null;
-			const createdAt = new Date().toISOString();
-			const review: Review = { id, author, state: r.state, body: r.body, commit: r.commit, createdAt };
-			const comments: ReviewComment[] = r.drafts.map((d, i) => ({ ...d, id: `${id}-${i}`, reviewId: id, author, commit: r.commit, createdAt }));
-			return [
-				patch<PullData>(keys.pull(project, pull.number), (old) => ({ ...old, reviews: [...old.reviews, review], reviewComments: [...old.reviewComments, ...comments] }), true),
-			];
-		},
-		invalidate: () => [keys.pulls(project)],
-		onError: (_error, r) => {
-			setDrafts((all) => [...r.drafts, ...all]);
-			setFailed({ state: r.state, body: r.body });
-		},
-		action: "submit the review",
-	});
 
 	const notes: DiffNotes = useMemo(() => {
 		const under = new Map<string, ReactNode>();
@@ -459,13 +439,13 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 				<FinishReview
 					project={project}
 					pull={pull}
+					commit={files.data.head}
 					drafts={drafts}
-					initial={failed}
-					onSubmit={(state, body) => {
-						submit.mutate({ state, body, commit: files.data.head, drafts });
+					onDone={() => {
 						setFinishing(false);
 						setDrafts([]);
-						setFailed(null);
+						void queryClient.invalidateQueries({ queryKey: keys.pull(project, pull.number) });
+						void queryClient.invalidateQueries({ queryKey: keys.pulls(project) });
 					}}
 				/>
 			</Modal>
@@ -473,23 +453,15 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 	);
 }
 
-function FinishReview({
-	project,
-	pull,
-	drafts,
-	initial,
-	onSubmit,
-}: {
-	project: string;
-	pull: Pull;
-	drafts: Draft[];
-	initial: { state: ReviewState; body: string } | null;
-	onSubmit: (state: ReviewState, body: string) => void;
-}) {
+function FinishReview({ project, pull, commit, drafts, onDone }: { project: string; pull: Pull; commit: string; drafts: Draft[]; onDone: () => void }) {
 	const viewer = useViewer();
-	const [body, setBody] = useState(initial?.body ?? "");
-	const [state, setState] = useState<ReviewState>(initial?.state ?? "commented");
+	const [body, setBody] = useState("");
+	const [state, setState] = useState<ReviewState>("commented");
 	const mine = viewer.data?.username === pull.author;
+	const submit = useMutation({
+		mutationFn: () => api.review(project, pull.number, { state, body, commit, comments: drafts.map(({ path, side, line, body: text }) => ({ path, side, line, body: text })) }),
+		onSuccess: onDone,
+	});
 	const option = (value: ReviewState, label: string, hint: string, disabled: boolean) => (
 		<label className={cx("flex items-start gap-2 text-sm", disabled && "opacity-50")}>
 			<input type="radio" className="mt-1" checked={state === value} onChange={() => setState(value)} disabled={disabled} />
@@ -503,7 +475,7 @@ function FinishReview({
 		<form
 			onSubmit={(e) => {
 				e.preventDefault();
-				onSubmit(state, body);
+				submit.mutate();
 			}}
 			className="space-y-3"
 		>
@@ -514,8 +486,9 @@ function FinishReview({
 				{option("changes_requested", "Request changes", "Blocks merging into a branch that requires a review until it's approved.", mine || !pull.canMerge)}
 			</fieldset>
 			<p className="text-xs text-faint">{drafts.length === 1 ? "1 line comment" : `${drafts.length} line comments`} will be posted with it.</p>
+			<ErrorNote error={submit.error} />
 			<div className="flex justify-end">
-				<Button type="submit" variant="primary">
+				<Button type="submit" variant="primary" busy={submit.isPending}>
 					Submit review
 				</Button>
 			</div>

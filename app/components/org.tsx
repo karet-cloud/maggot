@@ -3,6 +3,7 @@ import { Building2, Plus, Trash2, UserMinus, Users, X } from "lucide-react";
 import { useState } from "react";
 import { api, keys, type Org, type OrgRole, type Permission } from "../lib/api.ts";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { useViewer } from "../routes/__root.tsx";
 import { Button, Empty, ErrorNote, Input, Panel } from "./ui.tsx";
 
 /** A person's profile asks this too: only an organization answers it. */
@@ -42,13 +43,16 @@ const editTeam = (org: Org, id: string, edit: (team: Org["teams"][number]) => Or
 /** Members (and pending invitations, for members); owners invite, promote and remove. */
 export function People({ org }: { org: Org }) {
 	const owner = org.role === "owner";
+	const me = useViewer().data?.username;
+	// The server keeps one active owner at least: the last can't step down or be removed.
+	const lastOwner = (m: Org["members"][number]) => m.role === "owner" && m.state === "active" && org.members.filter((o) => o.role === "owner" && o.state === "active").length === 1;
 	const [username, setUsername] = useState("");
 	const [role, setRole] = useState<OrgRole>("member");
 	const invite = useOrgMutation(org.name, () => api.inviteMember(org.name, username.trim(), role));
 	const change = useOrgEdit(
 		org.name,
 		({ who, to }: { who: string; to: OrgRole }) => api.setMemberRole(org.name, who, to),
-		(old, { who, to }) => ({ ...old, members: old.members.map((m) => (m.username === who ? { ...m, role: to } : m)) }),
+		(old, { who, to }) => ({ ...old, role: who === me ? to : old.role, members: old.members.map((m) => (m.username === who ? { ...m, role: to } : m)) }),
 		"change the role",
 	);
 	const remove = useOrgEdit(
@@ -65,12 +69,12 @@ export function People({ org }: { org: Org }) {
 						<span className="font-mono">{m.username}</span>
 						{m.state === "invited" && <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] text-amber-300">invited</span>}
 						<span className="ml-auto text-xs text-dim">{m.role}</span>
-						{owner && m.state === "active" && (
+						{owner && m.state === "active" && !lastOwner(m) && (
 							<Button className="text-xs" onClick={() => change.mutate({ who: m.username, to: m.role === "owner" ? "member" : "owner" })}>
 								{m.role === "owner" ? "Make member" : "Make owner"}
 							</Button>
 						)}
-						{owner && (
+						{owner && !lastOwner(m) && (
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"

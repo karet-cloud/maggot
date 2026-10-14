@@ -6,7 +6,6 @@ import { useState, type ReactNode } from "react";
 import { Toaster } from "../components/toast.tsx";
 import { Button } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
-import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { configQuery, preload, viewerQuery } from "../lib/queries.ts";
 import css from "../styles.css?url";
 
@@ -176,14 +175,12 @@ function TopBar() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const viewer = useViewer();
-	const signOut = useOptimistic({
+	const signOut = useMutation({
 		mutationFn: api.signOut,
-		apply: () => [patch(keys.me, () => null, true)],
 		onSuccess: async () => {
 			await queryClient.resetQueries();
 			void navigate({ to: "/" });
 		},
-		action: "sign out",
 	});
 	const me = viewer.data;
 	return (

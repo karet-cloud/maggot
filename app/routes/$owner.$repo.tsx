@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Archive, BookOpen, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -11,14 +11,12 @@ import { api, ApiError, keys, repoParams, type RepoInfo, type Task } from "../li
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { preload, projectQuery, tasksQuery, useProjectTasks } from "../lib/queries.ts";
-import { LiveContext, useProjectLive, type LiveStatus } from "../lib/live.ts";
+import { eventsQuery, LiveContext, useProjectLive, type LiveStatus } from "../lib/live.ts";
 
 export const Route = createFileRoute("/$owner/$repo")({
 	loader: ({ context, params }) => {
 		const project = `${params.owner}/${params.repo}`;
-		// The same key, fetcher and staleTime as useProjectLive's history.
-		const events = queryOptions({ queryKey: keys.events(project), queryFn: () => api.events(project, 300), staleTime: Infinity });
-		return preload(context.queryClient, projectQuery(project), tasksQuery(project), events);
+		return preload(context.queryClient, projectQuery(project), tasksQuery(project), eventsQuery(project));
 	},
 	component: ProjectLayout,
 });

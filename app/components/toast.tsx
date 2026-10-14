@@ -37,7 +37,7 @@ export function Toaster() {
 	const list = useSyncExternalStore(subscribe, () => toasts, () => NONE);
 	if (!list.length) return null;
 	return (
-		<div className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-80 flex-col gap-2" role="status" aria-live="polite">
+		<div className="pointer-events-none fixed right-4 bottom-4 z-50 flex w-80 flex-col gap-2" role="alert">
 			{list.map((t) => (
 				<div key={t.id} className="pointer-events-auto flex items-start gap-2 rounded-md border border-red-500/40 bg-panel px-3 py-2 text-sm text-red-200 shadow-lg">
 					<span className="min-w-0 flex-1 break-words">{t.message}</span>

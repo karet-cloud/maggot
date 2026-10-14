@@ -17,11 +17,12 @@ export const Route = createFileRoute("/$owner/$repo/compare")({
 		head: typeof s.head === "string" && s.head ? s.head : undefined,
 	}),
 	loaderDeps: ({ search }) => ({ base: search.base, head: search.head }),
-	loader: ({ context, params, deps }) => {
+	loader: ({ context, params, deps, preload: hover }) => {
 		const project = `${params.owner}/${params.repo}`;
 		// Without a base in the URL, compare against the default branch if the layout already knows it.
 		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
-		return preload(context.queryClient, branchNamesQuery(project), Boolean(base && deps.head) && compareQuery(project, base as string, deps.head as string));
+		// A comparison is a diff, costly to work out: fetched on the visit, not the hover.
+		return preload(context.queryClient, branchNamesQuery(project), !hover && Boolean(base && deps.head) && compareQuery(project, base as string, deps.head as string));
 	},
 	component: ComparePage,
 });

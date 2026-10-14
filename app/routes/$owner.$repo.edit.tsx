@@ -4,8 +4,8 @@ import { GitBranch, GitCommitHorizontal } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, ApiError, repoParams } from "../lib/api.ts";
-import { useNeedsVerification, useViewer } from "./__root.tsx";
 import { projectQuery } from "../lib/queries.ts";
+import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { ref?: string; path?: string; dir?: string };
 

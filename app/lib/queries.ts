@@ -17,6 +17,7 @@ type AnyOptions = FetchQueryOptions<any, any, any, any> | FetchInfiniteQueryOpti
  * Warms the cache for a route's queries from its loader, so hovering a link fetches the next page
  * and clicking it renders at once. Cached data (even stale) renders immediately and refreshes behind
  * it; uncached data holds the navigation for at most WAIT_MS. Never throws: the page shows errors.
+ * Loaders leave out costly queries (diffs, file contents) when `preload` is set: a hover isn't a visit.
  * The API is same-origin and cookie-authenticated, so this runs in the browser only.
  */
 export function preload(queryClient: QueryClient, ...options: (AnyOptions | false | "" | null | undefined)[]): Promise<void> | undefined {
@@ -24,9 +25,11 @@ export function preload(queryClient: QueryClient, ...options: (AnyOptions | fals
 	const waits: Promise<unknown>[] = [];
 	for (const o of options) {
 		if (!o) continue;
-		const cached = queryClient.getQueryData(o.queryKey) !== undefined;
-		const fetch = "initialPageParam" in o ? queryClient.prefetchInfiniteQuery(o as FetchInfiniteQueryOptions) : queryClient.prefetchQuery(o as FetchQueryOptions);
-		if (!cached) waits.push(fetch);
+		// Cached data (or a cached error, such as a person's profile asked for as an organization) is left
+		// to the page, which refreshes what's stale when it mounts: hovers don't refetch it.
+		const state = queryClient.getQueryState(o.queryKey);
+		if (state?.data !== undefined || state?.status === "error") continue;
+		waits.push("initialPageParam" in o ? queryClient.prefetchInfiniteQuery(o as FetchInfiniteQueryOptions) : queryClient.prefetchQuery(o as FetchQueryOptions));
 	}
 	if (!waits.length) return;
 	return Promise.race([Promise.all(waits), new Promise((ok) => setTimeout(ok, WAIT_MS))]).then(() => undefined);

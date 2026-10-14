@@ -5,8 +5,8 @@ import { useRef, useState, type DragEvent } from "react";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { formatBytes } from "../lib/format.ts";
-import { useNeedsVerification, useViewer } from "./__root.tsx";
 import { projectQuery } from "../lib/queries.ts";
+import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { ref?: string; dir?: string };
 

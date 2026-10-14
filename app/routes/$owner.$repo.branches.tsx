@@ -3,6 +3,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Bot, GitBranch, GitCompareArrows, ShieldCheck, Trash2 } from "lucide-react";
 import { protectionFor } from "../../src/branch-rules.ts";
 import type { ReactNode } from "react";
+import { branchRulesQuery } from "../components/branch-protection.tsx";
 import { Button, Empty, ErrorNote, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type Branches, type BranchSummary, repoParams, type Task } from "../lib/api.ts";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
@@ -17,8 +18,6 @@ export const Route = createFileRoute("/$owner/$repo/branches")({
 });
 
 const branchesQuery = (project: string) => queryOptions({ queryKey: keys.branches(project), queryFn: () => api.branches(project) });
-// The same key and fetcher as the branch protection settings.
-const branchRulesQuery = (project: string) => queryOptions({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
 
 function BranchesPage() {
 	const { owner, repo } = Route.useParams();
@@ -31,7 +30,8 @@ function BranchesPage() {
 	const protectedBranch = (name: string) => protectionFor(rules.data ?? [], name).patterns.length > 0;
 	const deletable = (name: string) => {
 		const p = protectionFor(rules.data ?? [], name);
-		return !p.blockDeletions && !p.requireMergeQueue;
+		// The same rules the server refuses a deletion under.
+		return !p.blockDeletions && !p.requireMergeQueue && !p.requireReview && !p.requireChecks;
 	};
 	// Covers the "names" variant the branch pickers use too.
 	const remove = useOptimistic({

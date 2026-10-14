@@ -32,11 +32,6 @@ function Profile() {
 	const repos = useQuery({
 		...reposQuery(owner, tab),
 		enabled: tab !== "people" && tab !== "teams",
-		// Keep the list up while switching tabs, but not while switching to someone else's profile.
-		placeholderData: (previous, query) => {
-			const f = query?.queryKey[1] as RepoFilter | undefined;
-			return f?.owner === owner || f?.starredBy === owner ? previous : undefined;
-		},
 	});
 	// The same URLs serve people and organizations; an organization answers this.
 	const org = useQuery(orgQuery(owner));

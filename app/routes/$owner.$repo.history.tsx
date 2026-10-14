@@ -1,4 +1,4 @@
-import { infiniteQueryOptions, keepPreviousData, queryOptions, useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitBranch, GitCommitHorizontal, Tag } from "lucide-react";
 import { useMemo } from "react";
@@ -73,7 +73,7 @@ function HistoryPage() {
 }
 
 function Commits({ project, refName }: { project: string; refName?: string }) {
-	const log = useQuery({ ...logQuery(project, refName), placeholderData: keepPreviousData });
+	const log = useQuery(logQuery(project, refName));
 	if (log.isPending) return <Spinner />;
 	if (log.error) return <ErrorNote error={log.error} />;
 	if (log.data.length === 0) return <Empty icon={<GitCommitHorizontal className="size-6" />} title="No commits yet" />;
@@ -86,7 +86,7 @@ function Commits({ project, refName }: { project: string; refName?: string }) {
 
 /** The commits that changed one file, a page at a time. */
 function FileCommits({ project, refName, path }: { project: string; refName?: string; path: string }) {
-	const pages = useInfiniteQuery({ ...fileHistoryQuery(project, path, refName), placeholderData: keepPreviousData });
+	const pages = useInfiniteQuery(fileHistoryQuery(project, path, refName));
 	if (pages.isPending) return <Spinner />;
 	if (pages.error) return <ErrorNote error={pages.error} />;
 	const commits = pages.data.pages.flatMap((p) => p.commits);

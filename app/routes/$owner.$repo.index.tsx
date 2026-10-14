@@ -1,4 +1,4 @@
-import { keepPreviousData, queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -21,12 +21,13 @@ export const Route = createFileRoute("/$owner/$repo/")({
 		file: typeof s.file === "string" && s.file ? s.file : undefined,
 	}),
 	loaderDeps: ({ search }) => ({ ref: search.ref, path: search.path ?? "", file: search.file }),
-	loader: ({ context, params, deps }) => {
+	loader: ({ context, params, deps, preload: hover }) => {
 		const project = `${params.owner}/${params.repo}`;
 		return preload(
 			context.queryClient,
 			treeQuery(project, deps.ref, deps.path),
-			deps.file !== undefined && !IMAGE.test(deps.file) && fileQuery(project, deps.ref, deps.file),
+			// Not on hover: running down the tree would download every file it passed.
+			!hover && deps.file !== undefined && !IMAGE.test(deps.file) && fileQuery(project, deps.ref, deps.file),
 			branchNamesQuery(project),
 			tagNamesQuery(project),
 		);
@@ -49,8 +50,12 @@ function Code() {
 	const { ref, path = "", file } = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
 	const info = useQuery(projectQuery(project));
-	// The previous listing stays up while the next directory or ref loads.
-	const tree = useQuery({ ...treeQuery(project, ref, path), placeholderData: keepPreviousData });
+	// The previous listing stays up while the next directory on the same ref loads; another ref's
+	// would offer that ref's commit (permalinks) for the new one.
+	const tree = useQuery({
+		...treeQuery(project, ref, path),
+		placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === project && prevQuery.queryKey[4] === (ref ?? "") ? prev : undefined),
+	});
 	const readme = !file ? tree.data?.entries.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name)) : undefined;
 	const shown = file ?? readme?.path;
 	// Archived repositories are read-only, even for their owner.
@@ -59,7 +64,7 @@ function Code() {
 	const onBranch = isBranch(ref);
 
 	// Links from READMEs guess whether a path is a file or a directory; correct the guess either way.
-	const listedAsDir = file !== undefined && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
+	const listedAsDir = file !== undefined && !tree.isPlaceholderData && tree.data?.entries.some((e) => e.path === file && e.type === "tree");
 	const missing = path !== "" && tree.error instanceof ApiError && tree.error.status === 404;
 	const notADirectory = !file && missing && /not a directory/.test(tree.error?.message ?? "");
 	useEffect(() => {

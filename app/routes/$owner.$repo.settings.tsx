@@ -40,8 +40,9 @@ function RepoSettings() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const info = useQuery(projectQuery(project));
-	const [description, setDescription] = useState("");
-	useEffect(() => setDescription(info.data?.repo.description ?? ""), [info.data?.repo.description]);
+	// What's being typed, else the saved description; a failed save gives the typed text back.
+	const [draft, setDraft] = useState<string | null>(null);
+	const description = draft ?? info.data?.repo.description ?? "";
 	const refresh = () => {
 		void queryClient.invalidateQueries({ queryKey: keys.project(project) });
 		void queryClient.invalidateQueries({ queryKey: ["repos"] });
@@ -63,6 +64,9 @@ function RepoSettings() {
 				),
 				patch<RepoInfo[]>(["repos"], (old) => old.map((r) => (r.fullName === name ? { ...r, ...change } : r))),
 			];
+		},
+		onError: (_error, change) => {
+			if (change.description !== undefined) setDraft(change.description ?? "");
 		},
 		action: "save the settings",
 	});
@@ -93,11 +97,12 @@ function RepoSettings() {
 						onSubmit={(e) => {
 							e.preventDefault();
 							edit.mutate({ description: description.trim() || null });
+							setDraft(null);
 						}}
 						className="space-y-3 p-4"
 					>
 						<Field label="Description">
-							<Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" disabled={archived} />
+							<Input value={description} onChange={(e) => setDraft(e.target.value)} placeholder="Optional" disabled={archived} />
 						</Field>
 						<Button type="submit" disabled={archived}>
 							Save
