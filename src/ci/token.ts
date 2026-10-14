@@ -1,6 +1,7 @@
 /**
- * Credentials a CI job uses inside its sandbox, both derived from MEGIT_API_KEY:
+ * Credentials a CI job uses inside its sandbox, all derived from MEGIT_API_KEY:
  * - a checkout token (`mgci_…`): read-only, for named repositories, expiring with the job;
+ * - a job token (`mgjob_…`): for megit's Actions API (caches, artifacts, actions' files), for one job;
  * - an AES-GCM key per repository, which keeps CI secrets and the Depot token encrypted at rest.
  */
 
@@ -23,10 +24,61 @@ function fromBase64url(text: string): Uint8Array<ArrayBuffer> | null {
 	}
 }
 
-async function hmacKey(apiKey: string): Promise<CryptoKey> {
+async function hmacKey(apiKey: string, purpose = "megit-ci-checkout-v1"): Promise<CryptoKey> {
 	const base = await crypto.subtle.importKey("raw", encoder.encode(apiKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const derived = new Uint8Array(await crypto.subtle.sign("HMAC", base, encoder.encode("megit-ci-checkout-v1")));
+	const derived = new Uint8Array(await crypto.subtle.sign("HMAC", base, encoder.encode(purpose)));
 	return crypto.subtle.importKey("raw", derived, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+}
+
+async function sign(apiKey: string, purpose: string, prefix: string, claims: unknown): Promise<string> {
+	const payload = base64url(encoder.encode(JSON.stringify(claims)));
+	const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(apiKey, purpose), encoder.encode(payload)));
+	return `${prefix}${payload}.${base64url(mac)}`;
+}
+
+/** The claims in a token signed for `purpose`, or null if it's forged or malformed. */
+async function open(apiKey: string, purpose: string, prefix: string, token: string): Promise<unknown> {
+	if (!token.startsWith(prefix)) return null;
+	const [payload, mac] = token.slice(prefix.length).split(".");
+	const macBytes = mac ? fromBase64url(mac) : null;
+	if (!payload || !macBytes) return null;
+	if (!(await crypto.subtle.verify("HMAC", await hmacKey(apiKey, purpose), macBytes, encoder.encode(payload)))) return null;
+	const json = fromBase64url(payload);
+	if (!json) return null;
+	try {
+		return JSON.parse(new TextDecoder().decode(json)) as unknown;
+	} catch {
+		return null;
+	}
+}
+
+export const JOB_TOKEN_PREFIX = "mgjob_";
+
+/** What a job's token lets it do with megit's Actions API. */
+export interface JobGrant {
+	/** The repository (coordinator) the job belongs to. */
+	repo: string;
+	run: number;
+	job: string;
+	/** Cache scopes it may restore from, in order (its own first), and the one it saves to. */
+	read: string[];
+	write: string;
+	/** Milliseconds since the epoch. */
+	expires: number;
+}
+
+export function mintJobToken(apiKey: string, grant: JobGrant): Promise<string> {
+	return sign(apiKey, "megit-ci-job-v1", JOB_TOKEN_PREFIX, grant);
+}
+
+/** The grant a job token carries, or null if it's forged, malformed or expired. */
+export async function verifyJobToken(apiKey: string, token: string): Promise<JobGrant | null> {
+	const g = (await open(apiKey, "megit-ci-job-v1", JOB_TOKEN_PREFIX, token)) as Partial<JobGrant> | null;
+	if (!g || typeof g !== "object") return null;
+	const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+	if (typeof g.repo !== "string" || typeof g.run !== "number" || typeof g.job !== "string" || !strings(g.read) || typeof g.write !== "string" || typeof g.expires !== "number") return null;
+	if (g.expires < Date.now()) return null;
+	return g as JobGrant;
 }
 
 export const CHECKOUT_TOKEN_PREFIX = "mgci_";

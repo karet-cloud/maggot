@@ -1388,4 +1388,51 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	await assert.rejects(git(dir, "-c", header, "ls-remote", `${api}/${bob.username}/ci.git`), /not found|404/);
 	const expired = await mintCheckoutToken("dev", { repos: [repoId], expires: Date.now() - 1 });
 	assert.equal((await fetch(`${api}/${ada.username}/ci.git/info/refs?service=git-upload-pack`, { headers: { authorization: `Basic ${btoa(`x:${expired}`)}` } })).status, 401);
+
+	// A matrix makes a job per combination; a schedule shows on the workflow.
+	const matrix = "on:\n  push:\n  schedule:\n    - cron: '0 3 * * *'\njobs:\n  test:\n    strategy:\n      matrix:\n        n: [1, 2]\n    steps:\n      - run: echo ${{ matrix.n }}\n";
+	await json(as(ada)(`${repo}/contents`, { method: "POST", body: JSON.stringify({ branch: "master", newBranch: "matrix", message: "Add a matrix", files: [{ path: ".megit/workflows/matrix.yml", content: matrix }] }) }), 201);
+	const matrixRun = await until(async () => {
+		const list = await json<{ runs: (Run & { path: string })[] }>(as(null)(`${actions}/runs?workflow=.megit/workflows/matrix.yml`));
+		return list.runs.find((r) => r.status === "completed");
+	});
+	const matrixJobs = (await json<{ jobs: { key: string; name: string }[] }>(as(null)(`${actions}/runs/${matrixRun.number}`))).jobs;
+	assert.deepEqual(matrixJobs.map((j) => [j.key, j.name]), [["test.1", "test (1)"], ["test.2", "test (2)"]]);
+	const listed = await json<{ workflows: { path: string; schedule: string[] }[] }>(as(null)(`${actions}/workflows?ref=matrix`));
+	assert.deepEqual(listed.workflows.find((w) => w.path.endsWith("matrix.yml"))?.schedule, ["0 3 * * *"]);
+
+	// Jobs reach /api/ci with their own token, not a person's; caches and artifacts go to R2 through it.
+	const { mintJobToken } = await import("../../src/ci/token.ts");
+	assert.equal((await fetch(`${api}/api/ci/artifacts`)).status, 401);
+	assert.equal((await fetch(`${api}/api/ci/artifacts`, { headers: { authorization: `Bearer ${ada.token}` } })).status, 401, "a person's token isn't a job's");
+	const jobToken = await mintJobToken("dev", { repo: repoId, run: pushed.number, job: "job", read: ["refs/heads/master"], write: "refs/heads/master", expires: Date.now() + 60_000 });
+	const ci = (path: string, init: RequestInit = {}) => fetch(`${api}/api/ci${path}`, { ...init, headers: { authorization: `Bearer ${jobToken}`, ...init.headers } });
+	const version = "a".repeat(64);
+	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204, "nothing saved yet");
+	const cached = new TextEncoder().encode("cached bytes");
+	const reserve = await ci("/caches", { method: "POST", body: new URLSearchParams({ key: "k1", version, size: String(cached.length) }) });
+	assert.equal(reserve.status, 201, await reserve.clone().text());
+	const cacheId = (await reserve.text()).trim();
+	assert.equal((await ci(`/caches/${cacheId}/parts/1`, { method: "PUT", body: cached })).status, 200);
+	assert.equal((await ci(`/caches/${cacheId}/commit`, { method: "POST" })).status, 200);
+	assert.equal((await ci("/caches", { method: "POST", body: new URLSearchParams({ key: "k1", version, size: "1" }) })).status, 409, "saved once per scope");
+	assert.equal((await (await ci(`/caches?keys=${encodeURIComponent("k2\nk")}&version=${version}`)).text()).trim(), `${cacheId}\tk1\t${cached.length}`, "a restore key matches by prefix");
+	assert.equal(await (await ci(`/caches/${cacheId}`)).text(), "cached bytes");
+	assert.deepEqual((await json<{ caches: { key: string; scope: string }[] }>(as(ada)(`${actions}/caches`))).caches.map((c) => [c.key, c.scope]), [["k1", "refs/heads/master"]]);
+	const artifact = await ci("/artifacts", { method: "POST", body: new URLSearchParams({ name: "dist", size: "3" }) });
+	assert.equal(artifact.status, 201);
+	const artifactId = (await artifact.text()).trim();
+	await ci(`/artifacts/${artifactId}/parts/1`, { method: "PUT", body: "abc" });
+	assert.equal((await ci(`/artifacts/${artifactId}/commit`, { method: "POST" })).status, 200);
+	assert.equal((await ci("/artifacts", { method: "POST", body: new URLSearchParams({ name: "dist", size: "3" }) })).status, 409, "one artifact per name, unless overwritten");
+	const runArtifacts = await json<{ artifacts: { id: string; name: string; size: number }[] }>(as(null)(`${actions}/runs/${pushed.number}/artifacts`));
+	assert.deepEqual(runArtifacts.artifacts.map((a) => [a.name, a.size]), [["dist", 3]]);
+	const download = await as(null)(`${actions}/runs/${pushed.number}/artifacts/${artifactId}/download`);
+	assert.equal(await download.text(), "abc");
+	assert.match(download.headers.get("content-disposition") ?? "", /attachment; filename="dist\.tar\.gz"/);
+	assert.equal((await as(bob)(`${actions}/runs/${pushed.number}/artifacts/${artifactId}`, { method: "DELETE" })).status, 403);
+	await json(as(ada)(`${actions}/runs/${pushed.number}/artifacts/${artifactId}`, { method: "DELETE" }));
+	assert.deepEqual((await json<{ artifacts: unknown[] }>(as(null)(`${actions}/runs/${pushed.number}/artifacts`))).artifacts, []);
+	await json(as(ada)(`${actions}/caches/${cacheId}`, { method: "DELETE" }));
+	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204);
 });

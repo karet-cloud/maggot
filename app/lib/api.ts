@@ -45,6 +45,8 @@ import type {
 	WebhookDelivery,
 	WebhookEvent,
 	Notification,
+	CiArtifact,
+	CiCache,
 	CiLogChunk,
 	CiRun,
 	CiRunList,
@@ -270,6 +272,12 @@ export const api = {
 	ciSetSecret: (project: string, name: string, value: string) =>
 		call<CiSettings>("PUT", `${p(project)}/actions/secrets/${encodeURIComponent(name)}`, { value }),
 	ciDeleteSecret: (project: string, name: string) => call<CiSettings>("DELETE", `${p(project)}/actions/secrets/${encodeURIComponent(name)}`),
+	ciArtifacts: (project: string, run: number) => call<{ artifacts: CiArtifact[] }>("GET", `${p(project)}/actions/runs/${run}/artifacts`).then((r) => r.artifacts),
+	ciDeleteArtifact: (project: string, run: number, id: string) => call<{ deleted: true }>("DELETE", `${p(project)}/actions/runs/${run}/artifacts/${encodeURIComponent(id)}`),
+	/** A plain URL (the session cookie authenticates it), for the download link. */
+	ciArtifactUrl: (project: string, run: number, id: string) => `/api${p(project)}/actions/runs/${run}/artifacts/${encodeURIComponent(id)}/download`,
+	ciCaches: (project: string) => call<{ caches: CiCache[] }>("GET", `${p(project)}/actions/caches`).then((r) => r.caches),
+	ciDeleteCache: (project: string, id: string) => call<{ deleted: true }>("DELETE", `${p(project)}/actions/caches/${encodeURIComponent(id)}`),
 
 	/** Commits files from the web editor; `content: null` deletes a file. */
 	commitFiles: (
@@ -389,4 +397,7 @@ export const keys = {
 	ciChecks: (project: string, filter: { sha?: string; pull?: number }) => ["project", project, "actions", "runs", "for", filter.sha ?? "", filter.pull ?? 0] as const,
 	ciWorkflows: (project: string, ref?: string) => ["project", project, "actions", "workflows", ref ?? ""] as const,
 	ciSettings: (project: string) => ["project", project, "actions", "settings"] as const,
+	/** Under ciRun, so refreshing the run refreshes its artifacts. */
+	ciArtifacts: (project: string, run: number) => ["project", project, "actions", "runs", run, "artifacts"] as const,
+	ciCaches: (project: string) => ["project", project, "actions", "caches"] as const,
 };

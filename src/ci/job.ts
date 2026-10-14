@@ -125,9 +125,11 @@ function scrub(launch: JobLaunch, keepCredentials: boolean): JobLaunch {
 	return {
 		...launch,
 		runner: launch.runner.kind === "depot" && !keepCredentials ? { kind: "depot", vcpus: launch.runner.vcpus, credentials: { token: "" } } : launch.runner,
-		steps: [],
+		plan: { units: [], ui: launch.plan.ui, actions: [] },
 		env: {},
+		secrets: {},
 		mask: [],
 		checkout: { ...launch.checkout, auth: "" },
+		api: { ...launch.api, token: "" },
 	};
 }

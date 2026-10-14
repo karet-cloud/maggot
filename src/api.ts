@@ -607,7 +607,7 @@ export interface Invitation {
 
 /** Where jobs run: a Cloudflare container, or a Depot sandbox paid for with the repository's Depot token. */
 export type CiRunner = "cloudflare" | "depot";
-export type CiEvent = "push" | "pull_request" | "workflow_dispatch";
+export type CiEvent = "push" | "pull_request" | "workflow_dispatch" | "schedule";
 /** `waiting`: a run from a fork's pull request, until someone who can merge approves it. */
 export type CiStatus = "queued" | "waiting" | "in_progress" | "completed";
 export type CiConclusion = "success" | "failure" | "cancelled" | "skipped";
@@ -697,6 +697,28 @@ export interface CiWorkflow {
 	/** Why the file can't run, if it can't. */
 	error: string | null;
 	dispatch: boolean;
+	/** Its cron schedules (UTC), if it runs on a schedule. */
+	schedule: string[];
+}
+
+/** A file a run uploaded (actions/upload-artifact), kept for its retention days. */
+export interface CiArtifact {
+	id: string;
+	name: string;
+	/** Compressed (.tar.gz) size in bytes. */
+	size: number;
+	createdAt: string;
+	expiresAt: string;
+}
+
+/** A saved cache (actions/cache). `scope` is the branch (or pull request) it was saved from. */
+export interface CiCache {
+	id: string;
+	key: string;
+	scope: string;
+	size: number;
+	createdAt: string;
+	usedAt: string;
 }
 
 export interface CiSettings {

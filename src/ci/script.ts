@@ -13,6 +13,7 @@
  * and the mask files, all root's and private, are out of their reach.
  */
 
+import type { ResolvedAction } from "./plan.ts";
 import type { StepSpec } from "./workflow.ts";
 
 export const WORKSPACE = "/workspace";
@@ -50,9 +51,28 @@ export function secretsIn(script: string, secrets: string[]): string[] {
 export const ENV_FILE = `${USER_DIR}/github-env`;
 export const PATH_FILE = `${USER_DIR}/github-path`;
 const OUTPUT_FILE = `${USER_DIR}/github-output`;
+const STATE_FILE = `${USER_DIR}/github-state`;
 const SUMMARY_FILE = `${USER_DIR}/github-step-summary`;
-/** Where a step's $GITHUB_ENV and $GITHUB_PATH are copied after it, to be read back as files. */
-export const collectedPath = (id: string, which: "env" | "path") => `${USER_DIR}/collect-${id}.${which}`;
+/** RUNNER_TEMP and RUNNER_TOOL_CACHE: the steps' user's, kept for the whole job. */
+const TEMP_DIR = `${USER_DIR}/temp`;
+const TOOL_CACHE = `${USER_DIR}/tool-cache`;
+/** The $GITHUB_* files and runner folders every step gets. */
+const STEP_FILES = {
+	GITHUB_ENV: ENV_FILE,
+	GITHUB_PATH: PATH_FILE,
+	GITHUB_OUTPUT: OUTPUT_FILE,
+	GITHUB_STATE: STATE_FILE,
+	GITHUB_STEP_SUMMARY: SUMMARY_FILE,
+	RUNNER_TEMP: TEMP_DIR,
+	RUNNER_TOOL_CACHE: TOOL_CACHE,
+};
+/** Where actions' files are downloaded to, and where the Node.js that runs JavaScript actions is. */
+export const ACTIONS_DIR = `${USER_DIR}/actions`;
+const NODE = `${USER_DIR}/node/bin/node`;
+/** The files a step's results are read back from after it, in COLLECT_SCRIPT's order. */
+export const COLLECTED = ["env", "path", "output", "state"] as const;
+/** Where a step's $GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT and $GITHUB_STATE are copied after it, to be read back as files. */
+export const collectedPath = (id: string, which: (typeof COLLECTED)[number]) => `${USER_DIR}/collect-${id}.${which}`;
 
 /** The id of the checkout in the sandbox's state directory; steps use their index. */
 export const SETUP_ID = "setup";
@@ -76,13 +96,14 @@ const OWNER = `owner="\${SUDO_UID:-$(id -u)}:\${SUDO_GID:-$(id -g)}"`;
 export function checkoutFile(c: { url: string; auth: string; ref: string; sha: string; depth: number }): string {
 	return `${exports({ MEGIT_CLONE_URL: c.url, MEGIT_CLONE_AUTH: c.auth, MEGIT_REF: c.ref, MEGIT_SHA: c.sha, MEGIT_DEPTH: String(c.depth) }).join("\n")}
 ${OWNER}
-if ! command -v git >/dev/null 2>&1; then
-  echo "Installing git…"
+# git checks the commit out; curl fetches actions, caches and artifacts.
+if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+  echo "Installing git and curl…"
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends git ca-certificates >/dev/null
+    apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends git curl ca-certificates >/dev/null
   else
-    echo "git isn't installed in this image and there's no apt-get to install it" >&2
+    echo "git or curl isn't installed in this image and there's no apt-get to install it" >&2
     exit 1
   fi
 fi
@@ -121,9 +142,8 @@ if [ "$(id -u)" = 0 ]; then chown -R "$owner" ${WORKSPACE}; fi
  * `bash --noprofile --norc -eo pipefail` and sh steps with `sh -e`; so does this. `added` is what
  * earlier steps wrote to $GITHUB_ENV, and `path` what they wrote to $GITHUB_PATH.
  */
-export function stepFile(step: StepSpec, env: Record<string, string>, added: Record<string, string> = {}, path: string[] = []): string {
-	const files = { GITHUB_ENV: ENV_FILE, GITHUB_PATH: PATH_FILE, GITHUB_OUTPUT: OUTPUT_FILE, GITHUB_STEP_SUMMARY: SUMMARY_FILE };
-	const lines = exports({ ...env, ...added, ...step.env, ...files });
+export function stepFile(step: Pick<StepSpec, "run" | "env" | "workingDirectory">, env: Record<string, string>, added: Record<string, string> = {}, path: string[] = []): string {
+	const lines = exports({ ...env, ...added, ...step.env, ...STEP_FILES });
 	if (path.length) lines.push(`export PATH=${shellQuote(path.toReversed().join(":"))}:"$PATH"`);
 	const dir = step.workingDirectory ? `${WORKSPACE}/${step.workingDirectory}` : WORKSPACE;
 	lines.push(`cd ${shellQuote(dir)}`);
@@ -218,8 +238,11 @@ fi
 discard
 printf '%s' ${shellQuote(WRAPPER)} > "$f.wrap" || broken "Couldn't write the step's wrapper"
 : > "$f.log" || broken "Couldn't create the step's log"
-for g in ${ENV_FILE} ${PATH_FILE} ${OUTPUT_FILE} ${SUMMARY_FILE}; do
+for g in ${ENV_FILE} ${PATH_FILE} ${OUTPUT_FILE} ${STATE_FILE} ${SUMMARY_FILE}; do
   [ -e "$g" ] || { : > "$g" && own "$owner" "$g"; } || broken "Couldn't create the step's environment files"
+done
+for d in ${TEMP_DIR} ${TOOL_CACHE}; do
+  [ -d "$d" ] || { mkdir -p "$d" && own "$owner" "$d"; } || broken "Couldn't create the runner's folders"
 done
 umask 022
 if command -v setsid >/dev/null 2>&1; then
@@ -288,8 +311,8 @@ out=${USER_DIR}/collect-$MEGIT_ID
 if [ ! -e "$out.sizes" ]; then
   umask 077
   rm -f "$out.sizes.tmp"
-  for g in env path; do
-    if [ "$g" = env ]; then src=${ENV_FILE}; else src=${PATH_FILE}; fi
+  for g in ${COLLECTED.join(" ")}; do
+    case "$g" in env) src=${ENV_FILE} ;; path) src=${PATH_FILE} ;; output) src=${OUTPUT_FILE} ;; *) src=${STATE_FILE} ;; esac
     wc -c < "$src" 2>/dev/null >> "$out.sizes.tmp" || echo 0 >> "$out.sizes.tmp"
     head -c ${COLLECT_BYTES} "$src" > "$out.$g.tmp" 2>/dev/null || : > "$out.$g.tmp"
     # Readable by whichever user the provider reads files as; it's what the step itself wrote.
@@ -297,7 +320,7 @@ if [ ! -e "$out.sizes" ]; then
     mv "$out.$g.tmp" "$out.$g"
   done
   mv "$out.sizes.tmp" "$out.sizes"
-  for src in ${ENV_FILE} ${PATH_FILE}; do : > "$src"; done
+  for src in ${ENV_FILE} ${PATH_FILE} ${OUTPUT_FILE} ${STATE_FILE}; do : > "$src" 2>/dev/null || true; done
 fi
 tr -d ' ' < "$out.sizes"
 `;
@@ -339,47 +362,53 @@ export function parsePoll(stdout: string): PollResult {
 	return { state, size: Number(second), bytes: decodeBase64(encoded) };
 }
 
-/** The full sizes of $GITHUB_ENV and $GITHUB_PATH that COLLECT_SCRIPT prints, one per line. */
-export function parseCollectSizes(stdout: string): { env: number; path: number } {
-	const lines = stdout.split("\n").map((l) => l.trim());
-	if (lines.length < 2 || !/^\d+$/.test(lines[0]) || !/^\d+$/.test(lines[1])) throw new ScriptOutputError("Collecting $GITHUB_ENV and $GITHUB_PATH printed something unexpected");
-	return { env: Number(lines[0]), path: Number(lines[1]) };
+/** The full sizes of the files COLLECT_SCRIPT copies (in COLLECTED's order), one per line. */
+export function parseCollectSizes(stdout: string): number[] {
+	const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+	if (lines.length < COLLECTED.length || lines.slice(0, COLLECTED.length).some((l) => !/^\d+$/.test(l))) {
+		throw new ScriptOutputError("Collecting the step's $GITHUB_* files printed something unexpected");
+	}
+	return lines.slice(0, COLLECTED.length).map(Number);
 }
 
 /** Names $GITHUB_ENV may not set, as on GitHub. */
 const PROTECTED = new Set(["NODE_OPTIONS", "PATH", "GITHUB_ENV", "GITHUB_PATH", "GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY"]);
 
 /**
- * Reads $GITHUB_ENV: `NAME=value` lines and `NAME<<DELIMITER` blocks. Anything malformed is reported
- * rather than guessed at.
+ * Reads $GITHUB_ENV (and $GITHUB_OUTPUT and $GITHUB_STATE, which share its format): `NAME=value` lines
+ * and `NAME<<DELIMITER` blocks. Anything malformed is reported rather than guessed at. Environment
+ * variables can't set the names in PROTECTED; outputs may have - in their names.
  */
-export function parseEnvFile(text: string): { env: Record<string, string>; errors: string[] } {
+export function parseEnvFile(text: string, label = "$GITHUB_ENV", variables = true): { env: Record<string, string>; errors: string[] } {
 	const env = new Map<string, string>();
 	const errors: string[] = [];
 	const lines = text.split(/\r?\n/);
+	const name = variables ? "[A-Za-z_][A-Za-z0-9_]*" : "[A-Za-z_][A-Za-z0-9_-]*";
+	const heredocLine = new RegExp(`^(${name})<<(.+)$`);
+	const assignLine = new RegExp(`^(${name})=(.*)$`);
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		if (!line.trim()) continue;
-		const heredoc = /^([A-Za-z_][A-Za-z0-9_]*)<<(.+)$/.exec(line);
-		const assign = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
-		let name: string;
+		const heredoc = heredocLine.exec(line);
+		const assign = assignLine.exec(line);
+		let key: string;
 		let value: string;
 		if (heredoc) {
-			name = heredoc[1];
+			key = heredoc[1];
 			const end = lines.indexOf(heredoc[2], i + 1);
 			if (end === -1) {
-				errors.push(`$GITHUB_ENV: ${name}'s value never ends (no line with just ${heredoc[2]})`);
+				errors.push(`${label}: ${key}'s value never ends (no line with just ${heredoc[2]})`);
 				break;
 			}
 			value = lines.slice(i + 1, end).join("\n");
 			i = end;
-		} else if (assign) [, name, value] = assign;
+		} else if (assign) [, key, value] = assign;
 		else {
-			errors.push(`$GITHUB_ENV: "${line.slice(0, 80)}" isn't NAME=value or NAME<<DELIMITER`);
+			errors.push(`${label}: "${line.slice(0, 80)}" isn't NAME=value or NAME<<DELIMITER`);
 			continue;
 		}
-		if (PROTECTED.has(name)) errors.push(`$GITHUB_ENV can't set ${name}`);
-		else env.set(name, value);
+		if (variables && PROTECTED.has(key)) errors.push(`${label} can't set ${key}`);
+		else env.set(key, value);
 	}
 	// fromEntries defines own properties, so a variable called __proto__ is kept rather than setting the prototype.
 	return { env: Object.fromEntries(env), errors };
@@ -515,4 +544,323 @@ export class LogMasker {
 		this.pending = "";
 		return out;
 	}
+}
+
+// ── Expressions, actions, caches and artifacts ───────────────────────────────
+
+/**
+ * hashFiles(): the files under the workspace that $MEGIT_PATTERNS (one per line; `!` excludes) match,
+ * each hashed, then the list hashed: one SHA-256, or an empty line when nothing matches. Run as root
+ * with exec; it prints only the hash.
+ */
+export const HASH_SCRIPT = `set -euo pipefail
+cd "$MEGIT_WORKSPACE" 2>/dev/null || { echo; exit 0; }
+shopt -s globstar nullglob
+declare -A keep=()
+# Globs expand into whole lines (names with spaces stay whole).
+IFS=$'\\n'
+# Read line by line: an unquoted $MEGIT_PATTERNS would be globbed before the loop sees it.
+while IFS= read -r p; do
+  [ -z "$p" ] && continue
+  neg=0
+  case "$p" in '!'*) neg=1; p="\${p:1}" ;; esac
+  p="\${p#./}"
+  case "$p" in "$MEGIT_WORKSPACE"/*) p="\${p#"$MEGIT_WORKSPACE"/}" ;; /*) continue ;; esac
+  for f in $p; do
+    [ -f "$f" ] || continue
+    if [ "$neg" = 1 ]; then unset 'keep[$f]'; else keep[$f]=1; fi
+  done
+done <<< "$MEGIT_PATTERNS"
+if [ \${#keep[@]} -eq 0 ]; then echo; exit 0; fi
+printf '%s\\n' "\${!keep[@]}" | LC_ALL=C sort | while IFS= read -r f; do sha256sum -- "$f" | cut -c1-64; done | sha256sum | cut -c1-64
+`;
+
+export function parseHashOutput(stdout: string): string {
+	const hash = stdout.trim();
+	if (hash && !/^[0-9a-f]{64}$/.test(hash)) throw new ScriptOutputError(`hashFiles printed ${JSON.stringify(hash.slice(0, 80))}`);
+	return hash;
+}
+
+/** The version of Node.js installed for JavaScript actions when the machine has none (or one older than 20). */
+const NODE_VERSION = "24";
+
+/**
+ * Setup's second half, run as the steps' user: downloads the actions the steps use (from megit, which
+ * keeps a copy of each in R2) and makes sure Node.js 20 or later is at hand for JavaScript actions.
+ * Null when there's nothing to do.
+ */
+export function prepareActionsFile(actions: ResolvedAction[], api: { url: string; token: string }): string | null {
+	const downloads = new Map<string, { owner: string; repo: string; sha: string }>();
+	for (const a of actions) if (a.archive) downloads.set(a.archive.root, a.archive);
+	const node = actions.some((a) => a.meta.runs.using === "node");
+	if (downloads.size === 0 && !node) return null;
+	const lines = [
+		...exports({ MEGIT_API: api.url, MEGIT_TOKEN: api.token }),
+		`mkdir -p ${ACTIONS_DIR}`,
+		`fetch_action() {
+  [ -d "$4" ] && return 0
+  echo "Downloading $1/$2@\${3:0:7}"
+  rm -rf "$4.tmp" && mkdir -p "$4.tmp"
+  curl -fsSL --retry 3 -H "Authorization: Bearer $MEGIT_TOKEN" "$MEGIT_API/api/ci/actions/$1/$2/$3" | tar -xzf - -C "$4.tmp" --strip-components=1
+  mv "$4.tmp" "$4"
+}`,
+		...[...downloads].map(([dir, a]) => `fetch_action ${shellQuote(a.owner)} ${shellQuote(a.repo)} ${shellQuote(a.sha)} ${shellQuote(dir)}`),
+	];
+	if (node) {
+		lines.push(`mkdir -p ${USER_DIR}/node/bin
+if [ ! -x ${NODE} ]; then
+  if command -v node >/dev/null 2>&1 && node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 20 ? 0 : 1)'; then
+    ln -sf "$(command -v node)" ${NODE}
+  else
+    echo "Installing Node.js ${NODE_VERSION} for the JavaScript actions…"
+    base=https://nodejs.org/dist/latest-v${NODE_VERSION}.x
+    file=$(curl -fsSL --retry 3 "$base/SHASUMS256.txt" | awk '/linux-x64\\.tar\\.gz$/ { print $2; exit }')
+    [ -n "$file" ] || { echo "Couldn't find Node.js ${NODE_VERSION} for linux-x64" >&2; exit 1; }
+    curl -fsSL --retry 3 "$base/$file" | tar -xzf - -C ${USER_DIR}/node --strip-components=1
+  fi
+fi
+echo "Node.js $(${NODE} --version) runs the JavaScript actions"`);
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+/** The INPUT_<NAME> variable a JavaScript action reads an input from, as GitHub names it. */
+export const inputVariable = (name: string) => `INPUT_${name.replaceAll(" ", "_").toUpperCase()}`;
+
+/** A JavaScript action's pre, main or post script, run with Node.js from the workspace, as on GitHub. */
+export function actionStepFile(o: {
+	env: Record<string, string>;
+	path: string[];
+	inputs: Record<string, string>;
+	/** What its main (and pre) script saved with $GITHUB_STATE; post scripts read it as STATE_<name>. */
+	saved: Record<string, string>;
+	action: { dir: string; script: string; repository: string; ref: string };
+}): string {
+	const vars: Record<string, string> = {
+		...o.env,
+		...STEP_FILES,
+		...Object.fromEntries(Object.entries(o.inputs).map(([k, v]) => [inputVariable(k), v])),
+		...Object.fromEntries(Object.entries(o.saved).map(([k, v]) => [`STATE_${k}`, v])),
+		GITHUB_ACTION_PATH: o.action.dir,
+		GITHUB_ACTION_REPOSITORY: o.action.repository,
+		GITHUB_ACTION_REF: o.action.ref,
+	};
+	// Variable names a shell can't export (inputs with dashes) go through env(1) instead.
+	const plain = Object.entries(vars).filter(([k]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+	const odd = Object.entries(vars).filter(([k]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+	const lines = exports(Object.fromEntries(plain));
+	if (o.path.length) lines.push(`export PATH=${shellQuote(o.path.toReversed().join(":"))}:"$PATH"`);
+	lines.push(`cd ${WORKSPACE}`);
+	const script = `${o.action.dir}/${o.action.script}`;
+	const viaEnv = odd.length ? `env ${odd.map(([k, v]) => shellQuote(`${k}=${v}`)).join(" ")} ` : "";
+	lines.push(`exec ${viaEnv}${NODE} ${shellQuote(script)}`);
+	return `${lines.join("\n")}\n`;
+}
+
+/** The R2-backed caches and artifacts: how big a piece of an upload is (R2 multipart parts, under the Workers request limit). */
+export const UPLOAD_PART_BYTES = 64 * 1024 * 1024;
+
+/** Shell helpers the cache and artifact steps share: matching paths, and talking to megit's API. */
+const STORAGE_HELPERS = `api() { curl -sS --retry 3 -H "Authorization: Bearer $MEGIT_TOKEN" "$@"; }
+out() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+keep() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_STATE"; }
+# The files (and empty folders) in folder $1; hidden ones only when $2 is "hidden".
+list_dir() {
+  if [ "$2" = hidden ]; then find "$1" \\( -type f -o -type l -o -type d -empty \\) -print
+  else find "$1" -mindepth 1 -name '.*' -prune -o \\( -type f -o -type l -o -type d -empty \\) -print
+  fi
+}
+# Every file (and empty folder) the path lines in $1 match, one absolute path per line; ! lines exclude.
+matches() {
+  local p f neg
+  shopt -s globstar nullglob
+  [ "\${2:-}" = hidden ] && shopt -s dotglob
+  declare -A seen=()
+  local IFS=$'\\n'
+  cd "$GITHUB_WORKSPACE"
+  # Line by line, so the patterns aren't globbed before they're looked at.
+  while IFS= read -r p; do
+    p="\${p#"\${p%%[![:space:]]*}"}"; p="\${p%"\${p##*[![:space:]]}"}"
+    [ -z "$p" ] && continue
+    neg=0; case "$p" in '!'*) neg=1; p="\${p:1}" ;; esac
+    case "$p" in '~') p="$HOME" ;; '~/'*) p="$HOME/\${p:2}" ;; esac
+    for f in $p; do
+      [ -e "$f" ] || continue
+      case "$f" in /*) ;; *) f="$GITHUB_WORKSPACE/\${f#./}" ;; esac
+      if [ -d "$f" ]; then
+        while IFS= read -r g; do if [ "$neg" = 1 ]; then unset 'seen[$g]'; else seen[$g]=1; fi; done < <(list_dir "$f" "\${2:-}")
+      elif [ "$neg" = 1 ]; then unset 'seen[$f]'
+      else seen[$f]=1
+      fi
+    done
+  done <<< "$1"
+  [ \${#seen[@]} -gt 0 ] && printf '%s\\n' "\${!seen[@]}" | LC_ALL=C sort
+  return 0
+}
+# Uploads the file $1 in parts to the upload $2 (cache or artifact $3), then finishes it.
+upload() {
+  local dir n=0 part code
+  dir=$(mktemp -d "$RUNNER_TEMP/megit-parts.XXXXXX")
+  split -b ${UPLOAD_PART_BYTES} -a 4 -d "$1" "$dir/part-"
+  for part in "$dir"/part-*; do
+    n=$((n + 1))
+    code=$(api -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$part" -H 'content-type: application/octet-stream' "$MEGIT_API/api/ci/$3/$2/parts/$n")
+    [ "$code" = 200 ] || { echo "Uploading part $n failed (HTTP $code)" >&2; rm -rf "$dir"; return 1; }
+  done
+  rm -rf "$dir"
+  code=$(api -o "$RUNNER_TEMP/megit-commit" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/$3/$2/commit")
+  [ "$code" = 200 ] || { echo "Finishing the upload failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-commit")" >&2; return 1; }
+}
+cache_version() { printf '%s\\n%s\\n' "$1" "megit-tar-gz-1" | sha256sum | cut -c1-64; }
+`;
+
+const CACHE_RESTORE = `key="$MEGIT_IN_KEY"
+version=$(cache_version "$MEGIT_IN_PATH")
+keys=$(printf '%s\\n%s' "$key" "\${MEGIT_IN_RESTORE_KEYS:-}")
+keep key "$key"
+keep version "$version"
+out cache-primary-key "$key"
+code=$(api -o "$RUNNER_TEMP/megit-cache" -w '%{http_code}' -G "$MEGIT_API/api/ci/caches" --data-urlencode "keys=$keys" --data-urlencode "version=$version" || echo 000)
+if [ "$code" = 204 ]; then
+  echo "No cache was found for $key"
+  out cache-hit false
+  [ "\${MEGIT_IN_FAIL_ON_CACHE_MISS:-false}" = true ] && { echo "fail-on-cache-miss is set, so the step fails" >&2; exit 1; }
+  exit 0
+fi
+if [ "$code" != 200 ]; then
+  echo "Warning: looking up the cache failed (HTTP $code), so the step goes on without it"
+  out cache-hit false
+  exit 0
+fi
+IFS=$'\\t' read -r id matched size < "$RUNNER_TEMP/megit-cache"
+out cache-matched-key "$matched"
+exact=false; [ "$matched" = "$key" ] && exact=true
+out cache-hit "$exact"
+keep exact "$exact"
+if [ "\${MEGIT_IN_LOOKUP_ONLY:-false}" = true ]; then
+  echo "A cache was found for $matched (not downloaded: lookup-only)"
+  exit 0
+fi
+echo "Restoring the cache for $matched ($size bytes)"
+if ! api -f -L "$MEGIT_API/api/ci/caches/$id" | tar -xzf - -P; then
+  echo "Warning: restoring the cache failed, so the step goes on without it"
+  out cache-hit false
+  keep exact false
+  exit 0
+fi
+echo "Restored the cache for $matched"
+`;
+
+const CACHE_SAVE = `key="\${MEGIT_SAVED_KEY:-$MEGIT_IN_KEY}"
+version=$(cache_version "$MEGIT_IN_PATH")
+list="$RUNNER_TEMP/megit-cache-files"
+matches "$MEGIT_IN_PATH" hidden > "$list"
+if [ ! -s "$list" ]; then
+  echo "Warning: nothing matched the cache's path, so nothing was saved"
+  exit 0
+fi
+archive="$RUNNER_TEMP/megit-cache.tar.gz"
+tar -czf "$archive" -P -T "$list" 2>/dev/null || tar -czf "$archive" -P -T "$list"
+size=$(wc -c < "$archive" | tr -d ' ')
+code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/caches" --data-urlencode "key=$key" --data-urlencode "version=$version" --data-urlencode "size=$size" || echo 000)
+if [ "$code" = 409 ]; then
+  echo "A cache for $key already exists, so it isn't saved again"
+  rm -f "$archive"
+  exit 0
+fi
+if [ "$code" != 201 ]; then
+  echo "Warning: saving the cache failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-reserve")"
+  rm -f "$archive"
+  exit 0
+fi
+read -r id < "$RUNNER_TEMP/megit-reserve"
+if upload "$archive" "$id" caches; then echo "Saved the cache for $key ($size bytes)"; else echo "Warning: saving the cache failed"; fi
+rm -f "$archive"
+`;
+
+const UPLOAD_ARTIFACT = `name="\${MEGIT_IN_NAME:-artifact}"
+list="$RUNNER_TEMP/megit-artifact-files"
+hidden=""; [ "\${MEGIT_IN_INCLUDE_HIDDEN_FILES:-false}" = true ] && hidden=hidden
+matches "$MEGIT_IN_PATH" $hidden > "$list"
+if [ ! -s "$list" ]; then
+  case "\${MEGIT_IN_IF_NO_FILES_FOUND:-warn}" in
+    error) echo "No files were found for the path given, so there's nothing to upload" >&2; exit 1 ;;
+    ignore) echo "No files were found for the path given; nothing was uploaded"; exit 0 ;;
+    *) echo "Warning: no files were found for the path given, so there's nothing to upload"; exit 0 ;;
+  esac
+fi
+# Paths inside the artifact are relative to the folder all the files share, as on GitHub.
+root=$(dirname "$(head -n 1 "$list")")
+while IFS= read -r f; do while [ "$root" != / ] && case "$f" in "$root"/*) false ;; *) true ;; esac; do root=$(dirname "$root"); done; done < "$list"
+rel="$RUNNER_TEMP/megit-artifact-rel"
+prefix="\${root%/}/"
+while IFS= read -r f; do printf '%s\n' "\${f#"$prefix"}"; done < "$list" > "$rel"
+archive="$RUNNER_TEMP/megit-artifact.tar.gz"
+tar -czf "$archive" -C "$root" -T "$rel"
+size=$(wc -c < "$archive" | tr -d ' ')
+count=$(wc -l < "$list" | tr -d ' ')
+code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/artifacts" --data-urlencode "name=$name" --data-urlencode "size=$size" --data-urlencode "retention-days=\${MEGIT_IN_RETENTION_DAYS:-}" --data-urlencode "overwrite=\${MEGIT_IN_OVERWRITE:-false}" || echo 000)
+if [ "$code" != 201 ]; then
+  echo "Uploading the artifact failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-reserve")" >&2
+  exit 1
+fi
+read -r id < "$RUNNER_TEMP/megit-reserve"
+upload "$archive" "$id" artifacts || exit 1
+rm -f "$archive"
+echo "Uploaded $name: $count files, $size bytes compressed"
+out artifact-id "$id"
+out artifact-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+`;
+
+const DOWNLOAD_ARTIFACT = `dest="\${MEGIT_IN_PATH:-$GITHUB_WORKSPACE}"
+case "$dest" in '~') dest="$HOME" ;; '~/'*) dest="$HOME/\${dest:2}" ;; /*) ;; *) dest="$GITHUB_WORKSPACE/$dest" ;; esac
+code=$(api -o "$RUNNER_TEMP/megit-artifacts" -w '%{http_code}' "$MEGIT_API/api/ci/artifacts" || echo 000)
+[ "$code" = 200 ] || { echo "Listing the run's artifacts failed (HTTP $code)" >&2; exit 1; }
+found=0
+while IFS=$'\\t' read -r id name size; do
+  [ -z "$id" ] && continue
+  if [ -n "\${MEGIT_IN_NAME:-}" ]; then [ "$name" = "$MEGIT_IN_NAME" ] || continue
+  elif [ -n "\${MEGIT_IN_PATTERN:-}" ]; then [[ "$name" == $MEGIT_IN_PATTERN ]] || continue
+  fi
+  target="$dest"
+  if [ -z "\${MEGIT_IN_NAME:-}" ] && [ "\${MEGIT_IN_MERGE_MULTIPLE:-false}" != true ]; then target="$dest/$name"; fi
+  mkdir -p "$target"
+  echo "Downloading $name ($size bytes) into $target"
+  api -f -L "$MEGIT_API/api/ci/artifacts/$id" | tar -xzf - -C "$target" || { echo "Downloading $name failed" >&2; exit 1; }
+  found=$((found + 1))
+done < "$RUNNER_TEMP/megit-artifacts"
+if [ "$found" = 0 ]; then
+  if [ -n "\${MEGIT_IN_NAME:-}" ]; then echo "This run has no artifact called $MEGIT_IN_NAME" >&2; exit 1; fi
+  echo "No artifacts matched"
+fi
+out download-path "$dest"
+`;
+
+const BUILT_IN_SCRIPTS = {
+	"cache-restore": CACHE_RESTORE,
+	"cache-save": CACHE_SAVE,
+	"upload-artifact": UPLOAD_ARTIFACT,
+	"download-artifact": DOWNLOAD_ARTIFACT,
+};
+
+/** The variable a built-in action's script reads an input from. */
+const builtInVariable = (name: string) => `MEGIT_IN_${name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
+
+/** The script of one of megit's own actions (cache, artifacts), with its inputs and megit's API. */
+export function builtInStepFile(
+	kind: keyof typeof BUILT_IN_SCRIPTS,
+	o: { env: Record<string, string>; path: string[]; inputs: Record<string, string>; api: { url: string; token: string }; github: Record<string, string>; saved: Record<string, string> },
+): string {
+	const vars: Record<string, string> = {
+		...o.env,
+		...STEP_FILES,
+		...Object.fromEntries(Object.entries(o.inputs).map(([k, v]) => [builtInVariable(k), v])),
+		MEGIT_API: o.api.url,
+		MEGIT_TOKEN: o.api.token,
+		GITHUB_WORKSPACE: WORKSPACE,
+		...(kind === "cache-save" && o.saved.key ? { MEGIT_SAVED_KEY: o.saved.key } : {}),
+	};
+	const lines = exports(vars);
+	if (o.path.length) lines.push(`export PATH=${shellQuote(o.path.toReversed().join(":"))}:"$PATH"`);
+	return `${lines.join("\n")}\nset -uo pipefail\n${STORAGE_HELPERS}${BUILT_IN_SCRIPTS[kind]}`;
 }

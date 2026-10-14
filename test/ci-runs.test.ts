@@ -3,44 +3,17 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
-import { CiRuns, type CiHost, type JobStub, type PullTrigger } from "../src/ci/runs.ts";
+import { cacheScopes, CiRuns, type CiHost, type JobStub, type PullTrigger } from "../src/ci/runs.ts";
 import type { JobLaunch, JobReport } from "../src/ci/job.ts";
-import { sealSecret, verifyCheckoutToken } from "../src/ci/token.ts";
+import { sealSecret, verifyCheckoutToken, verifyJobToken } from "../src/ci/token.ts";
 import { HttpError } from "../src/errors.ts";
+import { sqlStorage } from "./sql.ts";
 
 const API_KEY = "test-api-key";
 const REPO = "repo-1";
 const FORK = "fork-1";
 const SHA = "a".repeat(40);
 const SHA2 = "b".repeat(40);
-
-/** SqlStorage's cursor, as far as runs.ts uses it. */
-function sqlStorage(db: DatabaseSync): SqlStorage {
-	const cursor = (rows: Record<string, unknown>[], written: number) => ({
-		toArray: () => rows,
-		one: () => {
-			if (rows.length !== 1) throw new Error(`expected one row, got ${rows.length}`);
-			return rows[0];
-		},
-		rowsWritten: written,
-		[Symbol.iterator]: () => rows[Symbol.iterator](),
-	});
-	return {
-		exec(query: string, ...params: unknown[]) {
-			if (params.length === 0 && query.split(";").filter((q) => q.trim()).length > 1) {
-				db.exec(query);
-				return cursor([], 0);
-			}
-			const stmt = db.prepare(query);
-			const args = params as (string | number | null)[];
-			if (stmt.columns().length > 0) {
-				const rows = stmt.all(...args) as Record<string, unknown>[];
-				return cursor(rows, /^\s*(INSERT|UPDATE|DELETE)/i.test(query) ? rows.length : 0);
-			}
-			return cursor([], Number(stmt.run(...args).changes));
-		},
-	} as unknown as SqlStorage;
-}
 
 type Files = Record<string, string>;
 
@@ -64,12 +37,17 @@ function memoryStore(repos: Record<string, Record<string, Files>>, refs: Record<
 					const files = commits[sha];
 					if (kind === "root") return [{ name: ".megit", type: "tree", hash: `megit:${sha}` }];
 					if (kind === "megit") return [{ name: "workflows", type: "tree", hash: `wf:${sha}` }];
-					if (kind === "wf") return Object.keys(files).map((f) => ({ name: f, type: "blob", hash: `file:${sha}:${f}` }));
+					// Keys starting with @ are other files in the commit (actions' metadata), not workflows.
+					if (kind === "wf") return Object.keys(files).filter((f) => !f.startsWith("@")).map((f) => ({ name: f, type: "blob", hash: `file:${sha}:${f}` }));
 					return null;
 				},
 				async readBlob(hash: string) {
 					const [, sha, file] = hash.split(":");
 					return new Blob([commits[sha][file]]);
+				},
+				async readFile({ ref, path }: { ref: string; path: string }) {
+					const text = commits[ref]?.[`@${path}`];
+					return text === undefined ? null : new Blob([text]);
 				},
 				[Symbol.dispose]() {},
 			};
@@ -91,7 +69,7 @@ interface Harness {
 	archived: { on: boolean };
 }
 
-function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_CLOUDFLARE?: string } = {}): Harness {
+function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_CLOUDFLARE?: string } = {}, github?: CiHost["github"]): Harness {
 	const db = new DatabaseSync(":memory:");
 	db.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
 	const h = {
@@ -132,6 +110,7 @@ function harness(repos: Record<string, Record<string, Files>>, env: { MEGIT_CI_C
 		changed: () => {},
 		wake: async () => {},
 		archived: () => h.archived.on,
+		github,
 	};
 	return { ...h, ci: new CiRuns(host) };
 }
@@ -243,7 +222,10 @@ test("push: matching workflows run from the pushed commit, broken files fail vis
 	const launch = h.starts[0];
 	assert.equal(launch.repo, REPO);
 	assert.deepEqual(launch.runner, { kind: "depot", vcpus: 2, credentials: { token: "depot-token", orgId: "org1" } });
-	assert.equal(launch.steps[1].run, `echo "s3cret-value at ${SHA}"`);
+	// Steps are filled in on the machine, as they run; the launch carries the secrets they use.
+	assert.equal(launch.plan.units[1].kind === "run" && launch.plan.units[1].run, 'echo "${{ secrets.TOKEN }} at ${{ github.sha }}"');
+	assert.deepEqual(launch.secrets, { TOKEN: "s3cret-value" });
+	assert.equal(launch.contexts.github.sha, SHA);
 	assert.equal(launch.env.TOKEN, "s3cret-value");
 	assert.deepEqual(launch.mask, ["s3cret-value"]);
 	assert.equal(launch.checkout.sha, SHA);
@@ -323,7 +305,7 @@ test("forks: a fork's pull request waits for approval and never gets secrets; a 
 	assert.equal(approved.status, "in_progress");
 	const launch = h.starts[0];
 	assert.equal(launch.env.TOKEN, "", "secrets are empty for a fork");
-	assert.equal(launch.steps[1].run, `echo " at ${SHA}"`);
+	assert.deepEqual(launch.secrets, {});
 	assert.deepEqual(launch.mask, []);
 	assert.equal(launch.checkout.url, pull.cloneUrl);
 	assert.deepEqual((await verifyCheckoutToken(API_KEY, atob(launch.checkout.auth).slice(2)))?.repos, [FORK]);
@@ -821,7 +803,7 @@ test("re-running a run of the base's required definition runs that definition ag
 	await finishAll(h, "failure");
 	const again = await h.ci.rerun(run.number, "alice");
 	assert.equal(again.workflow, "PR", "the base's definition, as it ran");
-	assert.equal(h.starts.at(-1)?.steps.length, h.starts[0].steps.length);
+	assert.equal(h.starts.at(-1)?.plan.units.length, h.starts[0].plan.units.length);
 });
 
 test("a pull request closed before its opening event is acted on starts nothing", async () => {
@@ -846,4 +828,183 @@ test("a job's steps are its runner's: setup, the workflow's steps, then cleanup;
 	assert.equal(steps.at(-1)?.name, "Complete job");
 	assert.equal(steps[0].conclusion, "failure", "no Depot token: setup failed");
 	assert.ok(steps.slice(1).every((s) => s.conclusion === "skipped"));
+});
+
+const jobsOf = (h: Harness, run: number) =>
+	h.db.prepare("SELECT id, key, status, conclusion, error FROM ci_jobs WHERE run = ? ORDER BY rowid").all(run) as { id: string; key: string; status: string; conclusion: string | null; error: string | null }[];
+
+test("matrix: one job per combination, max-parallel, fail-fast cancelling the rest, and an always() job after", async () => {
+	const h = harness({
+		[REPO]: {
+			[SHA]: {
+				"m.yml": "on: push\njobs:\n  test:\n    strategy:\n      max-parallel: 1\n      matrix:\n        n: [1, 2, 3]\n    steps:\n      - run: echo ${{ matrix.n }}\n  after:\n    needs: test\n    if: always()\n    steps:\n      - run: echo ${{ needs.test.result }}\n",
+			},
+		},
+	});
+	await withDepot(h);
+	const [run] = await h.ci.onPush("main", SHA, "alice");
+	assert.deepEqual(
+		jobsOf(h, run.number).map((j) => [j.key, j.status]),
+		[
+			["test.1", "in_progress"],
+			["test.2", "queued"],
+			["test.3", "queued"],
+			["after", "queued"],
+		],
+		"max-parallel: 1 starts one at a time",
+	);
+	assert.deepEqual(h.starts[0].contexts.matrix, { n: 1 });
+	assert.deepEqual(h.starts[0].contexts.strategy, { "fail-fast": true, "max-parallel": 1, "job-index": 0, "job-total": 3 });
+	await h.ci.report(jobsOf(h, run.number)[0].id, done("failure"));
+	const after = jobsOf(h, run.number);
+	assert.deepEqual(
+		after.map((j) => [j.key, j.conclusion]),
+		[
+			["test.1", "failure"],
+			["test.2", "cancelled"],
+			["test.3", "cancelled"],
+			["after", null],
+		],
+	);
+	assert.match(after[1].error ?? "", /fail-fast/);
+	const last = h.starts.at(-1)!;
+	assert.deepEqual(last.contexts.needs, { test: { result: "failure", outputs: {} } }, "always() runs after a failure, and sees it");
+});
+
+test("matrix without fail-fast: the others carry on; a job needing it is skipped (its if: is success())", async () => {
+	const h = harness({ [REPO]: { [SHA]: { "m.yml": "on: push\njobs:\n  test:\n    strategy:\n      fail-fast: false\n      matrix:\n        n: [1, 2]\n    steps:\n      - run: x\n  next:\n    needs: test\n    steps:\n      - run: x\n" } } });
+	await withDepot(h);
+	const [run] = await h.ci.onPush("main", SHA, "alice");
+	const [one, two] = jobsOf(h, run.number);
+	await h.ci.report(one.id, done("failure"));
+	assert.equal(jobsOf(h, run.number)[1].status, "in_progress", "not cancelled");
+	await h.ci.report(two.id, done("success"));
+	const next = jobsOf(h, run.number)[2];
+	assert.deepEqual([next.conclusion, next.error], ["skipped", "Skipped: test didn't succeed"]);
+	assert.equal(h.ci.getRun(run.number).conclusion, "failure");
+});
+
+test("job outputs reach the jobs that need them, in needs.* and their env; a false job if: skips it", async () => {
+	const wf = `on: push
+jobs:
+  a:
+    outputs:
+      v: \${{ steps.s.outputs.v }}
+    steps:
+      - id: s
+        run: echo "v=1" >> "$GITHUB_OUTPUT"
+  b:
+    needs: a
+    env:
+      V: \${{ needs.a.outputs.v }}-\${{ needs.a.result }}
+    steps:
+      - run: echo $V
+  c:
+    needs: a
+    if: github.event_name == 'pull_request'
+    steps:
+      - run: x
+`;
+	const h = harness({ [REPO]: { [SHA]: { "o.yml": wf } } });
+	await withDepot(h);
+	const [run] = await h.ci.onPush("main", SHA, "alice");
+	assert.deepEqual(h.starts[0].outputs, { v: "${{ steps.s.outputs.v }}" });
+	await h.ci.report(jobsOf(h, run.number)[0].id, { ...done("success"), outputs: { v: "1" } });
+	const b = h.starts.at(-1)!;
+	assert.equal(b.env.V, "1-success");
+	assert.deepEqual(b.contexts.needs, { a: { result: "success", outputs: { v: "1" } } });
+	const c = jobsOf(h, run.number)[2];
+	assert.deepEqual([c.conclusion, c.error], ["skipped", "Skipped: its if: was false"]);
+});
+
+test("schedules: recorded from the default branch, run when due on its head, once, and not when long overdue", async () => {
+	const wf = "on:\n  schedule:\n    - cron: '*/30 * * * *'\njobs:\n  nightly:\n    steps:\n      - run: x\n";
+	const h = harness({ [REPO]: { [SHA]: { "s.yml": wf } } });
+	h.refs[REPO] = { main: SHA };
+	await h.ci.onPush("main", SHA, "alice");
+	const next = h.ci.nextSchedule();
+	assert.ok(next !== null && next > Date.now() && next - Date.now() <= 30 * 60_000);
+	// Not on a branch other than the default.
+	await h.ci.onPush("topic", SHA, "alice");
+	assert.equal((h.db.prepare("SELECT COUNT(*) AS n FROM ci_schedules").get() as { n: number }).n, 1);
+	// Due, but no runner to run on: skipped (and moved on to the next time).
+	h.db.prepare("UPDATE ci_schedules SET next_at = ?").run(Date.now() - 1000);
+	await h.ci.tick();
+	assert.equal(h.ci.listRuns({}).runs.length, 0);
+	await withDepot(h);
+	h.db.prepare("UPDATE ci_schedules SET next_at = ?").run(Date.now() - 1000);
+	await h.ci.tick();
+	const [run] = h.ci.listRuns({}).runs;
+	assert.deepEqual([run.event, run.branch, run.sha], ["schedule", "main", SHA]);
+	assert.equal(h.starts.at(-1)?.contexts.github.event_name, "schedule");
+	await h.ci.tick();
+	assert.equal(h.ci.listRuns({}).runs.length, 1, "once per due time");
+	h.db.prepare("UPDATE ci_schedules SET next_at = ?").run(Date.now() - 3600_000);
+	await h.ci.tick();
+	assert.equal(h.ci.listRuns({}).runs.length, 1, "an hour late: skipped to the next time");
+	assert.ok(h.ci.nextSchedule()! > Date.now());
+	// The file's schedule removed on the default branch: forgotten.
+	const SHA3 = "c".repeat(40);
+	const h2 = harness({ [REPO]: { [SHA]: { "s.yml": wf }, [SHA3]: { "s.yml": "on: push\njobs:\n  a:\n    steps:\n      - run: x\n" } } });
+	await h2.ci.onPush("main", SHA, null);
+	await h2.ci.onPush("main", SHA3, null);
+	assert.equal(h2.ci.nextSchedule(), null);
+});
+
+test("actions a job uses are pinned and read before it starts; its job token is scoped to its branch's caches", async () => {
+	const PIN = "c".repeat(40);
+	const files: Record<string, string> = {
+		"actions/setup-node/action.yml": "name: Setup Node\ninputs:\n  node-version:\n    default: ''\nruns:\n  using: node20\n  main: dist/setup/index.js\n  post: dist/cache-save/index.js\n",
+		"owner/tool/sub/action.yml": "runs:\n  using: composite\n  steps:\n    - shell: bash\n      run: echo tool\n",
+	};
+	const resolved: string[] = [];
+	const github: CiHost["github"] = {
+		async resolve(owner, repo, ref) {
+			resolved.push(`${owner}/${repo}@${ref}`);
+			if (repo === "missing") throw new Error("v1 isn't a tag or branch there");
+			return PIN;
+		},
+		async readFile(owner, repo, sha, path) {
+			assert.equal(sha, PIN);
+			return files[`${owner}/${repo}/${path}`] ?? null;
+		},
+	};
+	const wf = "on: push\njobs:\n  build:\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 22\n      - uses: ./act\n      - uses: actions/cache@v4\n        with:\n          key: k\n          path: p\n";
+	const local = "runs:\n  using: composite\n  steps:\n    - uses: owner/tool/sub@v2\n    - shell: sh\n      run: echo local\n";
+	const h = harness({ [REPO]: { [SHA]: { "a.yml": wf, "@act/action.yml": local } } }, {}, github);
+	await withDepot(h);
+	await h.ci.onPush("topic", SHA, "alice");
+	const launch = h.starts[0];
+	assert.deepEqual(resolved, ["actions/setup-node@v4", "owner/tool@v2"]);
+	assert.deepEqual(launch.plan.ui, ["Set up job", "Check out the code", "Run actions/setup-node@v4", "Run ./act", "Run actions/cache@v4", "Post Run actions/cache@v4", "Post Run actions/setup-node@v4", "Complete job"]);
+	assert.deepEqual(
+		launch.plan.actions.map((a) => [a.repository, a.dir, a.archive?.sha ?? null]),
+		[
+			["actions/setup-node", `/tmp/megit-user/actions/actions/setup-node/${PIN}`, PIN],
+			["alice/app", "/workspace/act", null],
+			["owner/tool", `/tmp/megit-user/actions/owner/tool/${PIN}/sub`, PIN],
+		],
+	);
+	const grant = await verifyJobToken(API_KEY, launch.api.token);
+	assert.deepEqual([grant?.run, grant?.read, grant?.write], [1, ["refs/heads/topic", "refs/heads/main"], "refs/heads/topic"]);
+	assert.equal(launch.api.url, "https://megit.test");
+
+	// An action that can't be resolved fails the job with the reason, before any machine starts.
+	const h2 = harness({ [REPO]: { [SHA]: { "a.yml": "on: push\njobs:\n  b:\n    steps:\n      - uses: someone/missing@v1\n" } } }, {}, github);
+	await withDepot(h2);
+	const [run] = await h2.ci.onPush("main", SHA, null);
+	const job = h2.ci.getRun(run.number).jobs[0];
+	assert.equal(job.conclusion, "failure");
+	assert.match(job.error ?? "", /someone\/missing@v1: v1 isn't a tag or branch there/);
+	assert.equal(h2.starts.length, 0);
+});
+
+test("cache scopes: a branch's own, then its base's and the default branch's", () => {
+	const base = { sha: SHA, headRepo: null, cloneUrl: "", fromFork: false, actor: null } as const;
+	assert.deepEqual(cacheScopes({ ...base, event: "push", branch: "topic", pull: null, baseBranch: null }, "main"), { read: ["refs/heads/topic", "refs/heads/main"], write: "refs/heads/topic" });
+	assert.deepEqual(cacheScopes({ ...base, event: "pull_request", branch: "feature", pull: 4, baseBranch: "release" }, "main"), {
+		read: ["refs/pull/4", "refs/heads/release", "refs/heads/main"],
+		write: "refs/pull/4",
+	});
+	assert.deepEqual(cacheScopes({ ...base, event: "schedule", branch: "main", pull: null, baseBranch: null }, "main"), { read: ["refs/heads/main"], write: "refs/heads/main" });
 });

@@ -1,8 +1,8 @@
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { BookOpen, GitBranch, Play, Workflow, X } from "lucide-react";
+import { BookOpen, Clock, GitBranch, Play, Workflow, X } from "lucide-react";
 import { useState } from "react";
-import { CiIcon, ciLabel, ciState, Elapsed, isActive, NoWorkflows } from "../components/actions.tsx";
+import { Caches, CiIcon, ciLabel, ciState, Elapsed, isActive, NoWorkflows } from "../components/actions.tsx";
 import { Button, cx, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type CiRunSummary } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
@@ -91,6 +91,7 @@ function Actions() {
 					</div>
 				)}
 			</div>
+			{info.data?.repo.canWrite && <Caches project={project} />}
 		</div>
 	);
 }
@@ -99,6 +100,7 @@ function Actions() {
 export function trigger(run: CiRunSummary) {
 	if (run.event === "pull_request") return `Pull request #${run.pull}${run.fromFork ? " from a fork" : ""}`;
 	if (run.event === "workflow_dispatch") return `Run by ${run.actor ?? "someone"}`;
+	if (run.event === "schedule") return "Scheduled";
 	return `Push${run.actor ? ` by ${run.actor}` : ""}`;
 }
 
@@ -195,6 +197,17 @@ function Workflows({ project, defaultBranch, canRun }: { project: string; defaul
 									{w.name} <span className="font-mono text-[11px] text-faint">{w.path}</span>
 								</p>
 								{w.error && <p className="mt-0.5 font-mono text-[11px] break-words text-rose-300">{w.error}</p>}
+								{!w.error && w.schedule.length > 0 && (
+									<p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-faint">
+										<Clock className="size-3" />
+										{ref === defaultBranch ? "Runs on a schedule (UTC):" : `Would run on a schedule from ${defaultBranch}:`}
+										{w.schedule.map((cron) => (
+											<code key={cron} className="rounded bg-raised px-1 font-mono text-fg/80">
+												{cron}
+											</code>
+										))}
+									</p>
+								)}
 							</div>
 							{canRun && w.dispatch && !w.error && (
 								<Button className="text-xs" busy={dispatch.isPending && dispatch.variables === w.path} onClick={() => dispatch.mutate(w.path)} title={`Run ${w.path} on ${ref} now`}>
@@ -219,26 +232,39 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1-5"    # weekdays at 06:00 UTC
 
 jobs:
   test:
     runs-on: ubuntu-latest   # the repository's default runner
-    timeout-minutes: 15
+    strategy:
+      matrix:
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4   # built in: the commit is always checked out
-      - name: Install
-        run: npm ci
-      - name: Test
-        run: npm test
-        env:
-          NODE_ENV: test
-      - name: Show disk usage
-        if: \${{ always() }}   # runs even when an earlier step failed
-        run: df -h /workspace
+      - uses: actions/setup-node@v4
+        with:
+          node-version: \${{ matrix.node }}
+      - uses: actions/cache@v4      # built in, stored in R2
+        with:
+          path: ~/.npm
+          key: npm-\${{ hashFiles('package-lock.json') }}
+          restore-keys: npm-
+      - run: npm ci && npm test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: logs-\${{ matrix.node }}
+          path: test-results/
   build:
     needs: test
     runs-on: depot-4          # a 4 vCPU Depot sandbox
+    outputs:
+      version: \${{ steps.v.outputs.version }}
     steps:
+      - id: v
+        run: echo "version=$(git describe --always)" >> "$GITHUB_OUTPUT"
       - run: npm ci && npm run build
         env:
           API_TOKEN: \${{ secrets.API_TOKEN }}`;
@@ -258,22 +284,23 @@ function SyntaxGuide() {
 				<div className="overflow-x-auto">
 					<table className="w-full">
 						<tbody className="divide-y divide-line/60">
-							{row("on", "push and pull_request (branches or branches-ignore with * ** ? and !; pull_request types opened, synchronize, reopened), workflow_dispatch (no inputs)")}
+							{row("on", "push and pull_request (branches or branches-ignore with * ** ? and !; pull_request types opened, synchronize, reopened), workflow_dispatch (no inputs), schedule (cron, UTC, at least 5 minutes apart, on the default branch)")}
 							{row("name, env", "The workflow's name and environment")}
 							{row("defaults.run", "shell and working-directory for run steps, at workflow or job level")}
 							{row("permissions", "Read access only: read-all, or scopes set to read or none")}
-							{row("jobs.<id>", "name, runs-on, needs, timeout-minutes (1–360, default 30), env, defaults, permissions, steps. At most 20 jobs")}
+							{row("jobs.<id>", "name, runs-on, needs, if, outputs, strategy, timeout-minutes (1–360, default 30), env, defaults, permissions, steps. At most 50 jobs, 256 once matrices are expanded")}
+							{row("strategy", "matrix (lists of values, include, exclude), fail-fast (default true), max-parallel")}
 							{row("runs-on", "cloudflare, depot, depot-<2|4|8|16|32|64>, or ubuntu-latest / ubuntu-<version> / linux for the repository's default runner. x64 only")}
-							{row("steps[]", "run (bash or sh), name, shell, working-directory, env, if, continue-on-error, id, timeout-minutes. At most 50")}
-							{row("uses", "Only actions/checkout (built in), with fetch-depth (default 50, 0 for all history). Other actions aren't supported yet")}
-							{row("steps[].if", "success(), always(), failure(), cancelled() or !cancelled(); no job-level if")}
-							{row("${{ }}", "secrets.NAME, env.NAME, runner.os, runner.arch, github.sha / ref / ref_name / head_ref / base_ref / repository / event_name / run_number / actor / workspace")}
-							{row("Not yet", "matrix, services, containers, concurrency, artifacts, caches, outputs, reusable workflows, schedules")}
+							{row("steps[]", "run (bash or sh) or uses, name, with, shell, working-directory, env, if, continue-on-error, id, timeout-minutes. At most 50")}
+							{row("uses", "actions/checkout (built in; fetch-depth), actions/cache (and cache/restore, cache/save) and actions/upload-artifact / download-artifact (built in, kept in R2), JavaScript and composite actions from GitHub (owner/repo[/path]@ref) or this repository (./path). Not Docker actions")}
+							{row("${{ }}", "github, env, secrets, matrix, strategy, steps.<id>.outputs / outcome / conclusion, needs.<id>.outputs / result, job, runner, inputs (in composite actions); operators ! == != < <= > >= && ||; contains, startsWith, endsWith, format, join, toJSON, fromJSON, hashFiles, success(), failure(), cancelled(), always()")}
+							{row("Not yet", "services, containers, concurrency, environments, reusable workflows, workflow_dispatch inputs, vars, Docker actions")}
 						</tbody>
 					</table>
 					<p className="mt-3 text-[11px] text-faint">
 						Jobs run on Linux in <code className="font-mono">/workspace</code> with Internet access. Runs from forks' pull requests wait for approval and
-						never get secrets.
+						never get secrets. Caches are scoped like GitHub's: a branch restores its own, then its base's and the default branch's. Artifacts are kept
+						30 days unless retention-days says otherwise (up to 90).
 					</p>
 				</div>
 			</div>

@@ -185,8 +185,10 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   search, label filters, notifications for the owner and everyone in the conversation, `issues`
   webhooks, and the activity feed. A commit landing on the default branch (push or merge queue) that
   says "fixes #12", "closes #12" or "resolves #12" closes it. Posting is limited per user per hour.
-- **Actions**: workflows in `.megit/workflows/*.yml`, a subset of GitHub Actions syntax (shell `run`
-  steps, built-in checkout, `needs`, secrets), run on pushes, pull requests and by hand. Jobs run in a
+- **Actions**: workflows in `.megit/workflows/*.yml` in GitHub Actions syntax (`run` steps, `needs`,
+  matrices, job `if` and outputs, GitHub's expressions, JavaScript and composite actions from GitHub or the
+  repository, and built-in checkout, cache and artifact actions kept in R2), run on pushes, pull
+  requests, schedules and by hand. Jobs run in a
   Depot sandbox paid for with the repository's own Depot token (Settings → Actions), or a Cloudflare
   container when the deploy turns that on. The Actions tab lists runs with live logs, cancel, re-run,
   approval for pull requests from people who can't write (forks' runs never get secrets) and Run
@@ -418,7 +420,7 @@ src/api.ts            Public API types (no runtime deps; import from a UI)
 cli/megit.ts          Agent CLI
 scripts/              local Artifacts server, dev launcher, demo
 test/                 merge engine tests against real git
-docs/actions.md       Actions workflow syntax, runners, Depot, secrets, API
+docs/actions.md       Actions workflow syntax, actions, caches and artifacts, runners, Depot, secrets, API
 .megit/workflows/     This repository's own megit Actions workflow
 test/e2e/             the Worker under vite dev against the local stand-in with simulated fork failures
 ```
@@ -455,7 +457,7 @@ npm run typecheck
 - Git LFS. SSH needs the ProxyCommand: Workers can't take raw TCP on port 22 (Spectrum could, on
   Enterprise plans), and SSH fetches need Git protocol v2 (git 2.26 and newer use it by default).
 - Pull request niceties: suggested changes, threaded replies to line comments, and draft pull requests.
-- Actions: no matrix builds, services, caches, artifacts, schedules or third-party `uses:` actions, and
+- Actions: no services, containers, environments, concurrency, reusable workflows or Docker actions, and
   no status API for external CI to report into (see [`docs/actions.md`](docs/actions.md)).
 - Artifacts push event subscriptions (auto-submit when an agent pushes to its fork). Pushes through megit's
   Git URL already emit `repo.pushed`.

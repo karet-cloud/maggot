@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Ban, CircleCheck, CircleDashed, CircleMinus, CirclePause, CircleX, KeyRound, LoaderCircle, Play, Plus, ShieldCheck, Trash2, Workflow } from "lucide-react";
+import { Archive, Ban, CircleCheck, CircleDashed, CircleMinus, CirclePause, CircleX, Database, Download, KeyRound, LoaderCircle, Play, Plus, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { useState } from "react";
 import { api, keys, repoParams, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
-import { duration } from "../lib/format.ts";
-import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner } from "./ui.tsx";
+import { duration, formatBytes } from "../lib/format.ts";
+import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 /** One word for where a run, job or step stands: its conclusion once finished, else its status. */
 export type CiState = CiConclusion | Exclude<CiStatus, "completed"> | "pending";
@@ -425,5 +425,116 @@ export function NoWorkflows({ project, branch }: { project: string; branch: stri
 			</Link>
 			.
 		</Empty>
+	);
+}
+
+/** The files a run uploaded (actions/upload-artifact): download links, and delete for people who can write. Nothing when there are none. */
+export function RunArtifacts({ project, run, active, canWrite }: { project: string; run: number; active: boolean; canWrite: boolean }) {
+	const queryClient = useQueryClient();
+	const artifacts = useQuery({
+		queryKey: keys.ciArtifacts(project, run),
+		queryFn: () => api.ciArtifacts(project, run),
+		// Jobs upload while they run; the live connection only says when runs start and finish.
+		refetchInterval: active ? 10_000 : false,
+	});
+	const remove = useMutation({
+		mutationFn: (id: string) => api.ciDeleteArtifact(project, run, id),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.ciArtifacts(project, run) }),
+	});
+	if (!artifacts.data?.length) return null;
+	return (
+		<Panel title="Artifacts" actions={<span className="text-[11px] text-faint">.tar.gz, kept until they expire</span>}>
+			<ul className="divide-y divide-line/60">
+				{artifacts.data.map((a) => (
+					<li key={a.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-sm">
+						<Archive className="size-4 shrink-0 text-faint" />
+						<a href={api.ciArtifactUrl(project, run, a.id)} download className="min-w-0 flex-1 truncate font-medium text-fg hover:text-accent">
+							{a.name}
+						</a>
+						<span className="text-[11px] text-faint">
+							{formatBytes(a.size)} · expires <TimeAgo at={a.expiresAt} />
+						</span>
+						<a href={api.ciArtifactUrl(project, run, a.id)} download className="inline-flex items-center gap-1 text-xs text-accent hover:underline" aria-label={`Download ${a.name}`}>
+							<Download className="size-3.5" />
+							Download
+						</a>
+						{canWrite && (
+							<Button
+								variant="ghost"
+								className="text-xs"
+								busy={remove.isPending && remove.variables === a.id}
+								onClick={() => confirm(`Delete the artifact ${a.name}?`) && remove.mutate(a.id)}
+								aria-label={`Delete ${a.name}`}
+							>
+								<Trash2 className="size-3.5" />
+							</Button>
+						)}
+					</li>
+				))}
+			</ul>
+			<div className="px-4 empty:hidden">
+				<ErrorNote error={remove.error} />
+			</div>
+		</Panel>
+	);
+}
+
+/** The repository's saved caches (actions/cache), newest use first, with delete. For people who can write. */
+export function Caches({ project }: { project: string }) {
+	const queryClient = useQueryClient();
+	const [open, setOpen] = useState(false);
+	const caches = useQuery({ queryKey: keys.ciCaches(project), queryFn: () => api.ciCaches(project), enabled: open });
+	const remove = useMutation({
+		mutationFn: (id: string) => api.ciDeleteCache(project, id),
+		onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.ciCaches(project) }),
+	});
+	const total = caches.data?.reduce((n, c) => n + c.size, 0) ?? 0;
+	return (
+		<Panel
+			title="Caches"
+			actions={
+				<button type="button" onClick={() => setOpen(!open)} className="text-[11px] text-accent hover:underline">
+					{open ? "Hide" : "Show"}
+				</button>
+			}
+		>
+			{!open ? (
+				<p className="px-4 py-2.5 text-xs text-dim">What actions/cache saved. Each branch restores its own, then the default branch's.</p>
+			) : caches.isPending ? (
+				<Spinner className="m-4" />
+			) : caches.error ? (
+				<div className="p-4">
+					<ErrorNote error={caches.error} />
+				</div>
+			) : caches.data.length === 0 ? (
+				<p className="px-4 py-2.5 text-sm text-dim">No caches yet.</p>
+			) : (
+				<>
+					<p className="border-b border-line px-4 py-2 text-[11px] text-faint">
+						{caches.data.length} cache{caches.data.length === 1 ? "" : "s"}, {formatBytes(total)}. Unused ones go after a week, and the least recently used once the repository passes 10 GB.
+					</p>
+					<ul className="divide-y divide-line/60">
+						{caches.data.map((c) => (
+							<li key={c.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-sm">
+								<Database className="size-4 shrink-0 text-faint" />
+								<span className="min-w-0 flex-1 truncate font-mono text-xs text-fg" title={c.key}>
+									{c.key}
+								</span>
+								<span className="font-mono text-[11px] text-faint">{c.scope.replace(/^refs\/(heads|pull)\//, (_, k: string) => (k === "pull" ? "#" : ""))}</span>
+								<span className="text-[11px] text-faint">
+									{formatBytes(c.size)} · used <TimeAgo at={c.usedAt} />
+								</span>
+								<Button variant="ghost" className="text-xs" busy={remove.isPending && remove.variables === c.id} onClick={() => remove.mutate(c.id)} aria-label={`Delete the cache ${c.key}`}>
+									<Trash2 className="size-3.5" />
+								</Button>
+							</li>
+						))}
+					</ul>
+				</>
+			)}
+			<div className="px-4 empty:hidden">
+				<ErrorNote error={remove.error} />
+			</div>
+		</Panel>
 	);
 }

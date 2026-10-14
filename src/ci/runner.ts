@@ -8,8 +8,15 @@
 
 import { DepotApi, DepotError, DepotSandbox, isTerminal, type DepotCredentials } from "./depot.ts";
 import { CloudflareSandbox, ExecTimeoutError, type ContainerLike, type Sandbox } from "./sandbox.ts";
+import { evaluate, ExpressionError, hashFileCalls, parseCondition, parseTemplate, render, truthy, expressionsIn, type Expression, type Scope, type Value } from "./expr.ts";
+import type { Plan, Unit } from "./plan.ts";
 import {
+	actionStepFile,
+	builtInStepFile,
 	checkoutFile,
+	HASH_SCRIPT,
+	parseHashOutput,
+	prepareActionsFile,
 	inboxMaskPath,
 	inboxPath,
 	maskFile,
@@ -22,6 +29,7 @@ import {
 	LogMasker,
 	parseCollectSizes,
 	collectedPath,
+	COLLECTED,
 	secretsIn,
 	parseEnvFile,
 	parsePathFile,
@@ -33,7 +41,7 @@ import {
 	stepInterpreter,
 	WORKSPACE,
 } from "./script.ts";
-import { fetchDepthFor, type StepSpec } from "./workflow.ts";
+import { DEFAULT_FETCH_DEPTH } from "./workflow.ts";
 
 export type StepStatus = "pending" | "in_progress" | "completed";
 export type Conclusion = "success" | "failure" | "cancelled" | "skipped";
@@ -52,12 +60,28 @@ export interface JobLaunch {
 	repo: string;
 	runner: { kind: "cloudflare" } | { kind: "depot"; vcpus: number; credentials: DepotCredentials };
 	timeoutMinutes: number;
-	/** Expressions already filled in. */
-	steps: StepSpec[];
+	/** The units to run, the steps they show as, and the actions they use (see plan.ts). */
+	plan: Plan;
+	/** The job's environment (workflow and job env), filled in. */
 	env: Record<string, string>;
+	/** What expressions see that's fixed for the whole job. */
+	contexts: { github: Record<string, string>; matrix: Value; needs: Value; strategy: Value; inputs: Value };
+	/** The secrets the job's expressions name, by name. */
+	secrets: Record<string, string>;
+	/** The job's `outputs:`, as written; filled in once its steps are done. */
+	outputs: Record<string, string>;
 	/** Values to hide in the log. */
 	mask: string[];
-	checkout: { url: string; auth: string; ref: string; sha: string };
+	checkout: { url: string; auth: string; ref: string; sha: string; depth: number };
+	/** megit's API for caches, artifacts and downloading actions, with the job's own token. */
+	api: { url: string; token: string };
+}
+
+/** What a finished step leaves for the steps after it (steps.<id>). */
+export interface StepResult {
+	outputs: Record<string, string>;
+	outcome: Conclusion;
+	conclusion: Conclusion;
 }
 
 export interface JobReport {
@@ -68,6 +92,8 @@ export interface JobReport {
 	logs: { step: number; text: string }[];
 	startedAt: string | null;
 	finishedAt: string | null;
+	/** The job's outputs, once it has finished. */
+	outputs?: Record<string, string>;
 	/**
 	 * Numbers the reports that carry logs, from 1. A report whose answer was lost is sent again with the
 	 * same number and logs, so the receiver should keep the logs of each number once.
@@ -97,8 +123,25 @@ interface Process {
 
 export interface JobState {
 	phase: "provision" | "setup" | "steps" | "done";
-	/** Index into launch.steps of the step running or next. */
+	/** Setup checks the commit out, then fetches the actions the steps use. */
+	setupStage?: "checkout" | "actions";
+	/** Index into launch.plan.units of the unit running or next. */
 	step: number;
+	/** The running unit's script, filled in when it started, so later ticks run the same one. */
+	prepared: { file: string; interpreter: string; asUser: boolean; mask: string[] } | null;
+	/** What expressions see that changes as the job goes: steps' results and composite actions' inputs, by scope. */
+	ctx: {
+		steps: Record<string, Record<string, StepResult>>;
+		inputs: Record<string, Record<string, string>>;
+		/** Composite actions' scopes in which a step has failed. */
+		failedScopes: string[];
+		/** Units that ran (their post units run only then). */
+		ran: number[];
+		/** What each JavaScript action's main and pre units saved with $GITHUB_STATE, for its post unit (by main unit). */
+		saved: Record<number, Record<string, string>>;
+	};
+	/** The job's outputs, worked out when its steps are done. */
+	outputs: Record<string, string> | null;
 	process: Process;
 	failed: boolean;
 	cancelled: boolean;
@@ -274,6 +317,9 @@ export class DepotMachine implements Machine {
 	}
 }
 
+/** The id of the process that fetches actions during setup. */
+const ACTIONS_ID = "setup-actions";
+
 /** The exit code given to a process that ended without recording one. */
 const LOST = -1;
 
@@ -297,7 +343,11 @@ export function newJobState(launch: JobLaunch, nowMs = Date.now()): JobState {
 	const deadline = nowMs + launch.timeoutMinutes * 60_000;
 	return {
 		phase: "provision",
+		setupStage: "checkout",
 		step: 0,
+		prepared: null,
+		ctx: { steps: { "": {} }, inputs: {}, failedScopes: [], ran: [], saved: {} },
+		outputs: null,
 		process: freshProcess(deadline),
 		failed: false,
 		cancelled: false,
@@ -312,7 +362,7 @@ export function newJobState(launch: JobLaunch, nowMs = Date.now()): JobState {
 		nextCleanupAt: 0,
 		addedEnv: {},
 		addedPath: [],
-		states: [step("Set up job"), ...launch.steps.map((s) => step(s.name)), step("Complete job")],
+		states: launch.plan.ui.map(step),
 		pending: [],
 		unacked: null,
 		seq: 0,
@@ -322,15 +372,13 @@ export function newJobState(launch: JobLaunch, nowMs = Date.now()): JobState {
 	};
 }
 
-/** Whether a step's `if` lets it run, given how the job has gone so far. */
-export function shouldRun(condition: StepSpec["if"], failed: boolean, cancelled: boolean): boolean {
-	if (condition === "always") return true;
-	if (condition === "cancelled") return cancelled;
-	if (cancelled) return false;
-	if (condition === "failure") return failed;
-	if (condition === "notCancelled") return true;
-	return !failed;
-}
+/** The runner's own folders, and what runner.* says about the machine. */
+export const RUNNER_TEMP = "/tmp/megit-user/temp";
+export const RUNNER_TOOL_CACHE = "/tmp/megit-user/tool-cache";
+const RUNNER_CONTEXT = { os: "Linux", arch: "X64", name: "megit", environment: "self-hosted", temp: RUNNER_TEMP, tool_cache: RUNNER_TOOL_CACHE };
+
+/** Outputs a step may leave, in total: enough for paths and versions, not for files. */
+const MAX_OUTPUT_BYTES = 64 * 1024;
 
 /** The base64 checkout token and the token inside it, which the log must never show. */
 function checkoutSecrets(auth: string): string[] {
@@ -355,7 +403,7 @@ export class JobRunner {
 		this.state = state;
 		this.machine = machine;
 		this.save = save;
-		this.secrets = [...launch.mask, ...checkoutSecrets(launch.checkout.auth)];
+		this.secrets = [...launch.mask, ...checkoutSecrets(launch.checkout.auth), launch.api.token].filter(Boolean);
 	}
 
 	get done(): boolean {
@@ -427,8 +475,8 @@ export class JobRunner {
 			state.deadline = Math.min(state.deadline, now + CANCEL_GRACE_MS);
 			state.process.deadline = Math.min(state.process.deadline, state.deadline);
 			// A step that would run anyway once cancelled (always(), cancelled()) is left to finish, as on GitHub.
-			const spec = this.launch.steps[state.step];
-			if (state.process.launched && !state.process.stopping && spec && !shouldRun(spec.if, state.failed, true)) await this.stop("cancelled", false);
+			const unit = this.launch.plan.units[state.step];
+			if (state.process.launched && !state.process.stopping && unit && !this.keepsRunningOnCancel(unit)) await this.stop("cancelled", false);
 		}
 		if (now > state.deadline) {
 			if (!state.cancelled) this.fail(`The job ran longer than its ${this.launch.timeoutMinutes}-minute limit (timeout-minutes), so it was stopped`);
@@ -451,9 +499,9 @@ export class JobRunner {
 		} else if (!(await this.machine.alive(state))) {
 			throw new MachineLost("The machine running the job stopped unexpectedly");
 		}
-		if (state.phase === "setup") {
+		if (state.phase === "setup" && (state.setupStage ?? "checkout") === "checkout") {
 			const { launch } = this;
-			const file = checkoutFile({ ...launch.checkout, depth: fetchDepthFor(launch.steps) });
+			const file = checkoutFile({ ...launch.checkout, depth: launch.checkout.depth ?? DEFAULT_FETCH_DEPTH });
 			// The checkout runs as root; its log is masked for the checkout token alone.
 			const result = await this.drive(SETUP_ID, 0, file, "sh -e", false, checkoutSecrets(launch.checkout.auth));
 			if (result.exitCode === null) return result.more;
@@ -461,6 +509,22 @@ export class JobRunner {
 				this.fail(`Checking out ${launch.checkout.sha.slice(0, 7)} failed (${result.exitCode === LOST ? "the checkout ended without an exit code" : `exit code ${result.exitCode}`})`);
 				await this.finish();
 				return false;
+			}
+			state.setupStage = "actions";
+			state.process = freshProcess(state.deadline);
+		}
+		if (state.phase === "setup") {
+			const { launch } = this;
+			// Actions the steps use are downloaded (and Node.js found or installed) before the first step.
+			const file = prepareActionsFile(launch.plan.actions, launch.api);
+			if (file !== null) {
+				const result = await this.drive(ACTIONS_ID, 0, file, "bash --noprofile --norc -eo pipefail", true, [launch.api.token]);
+				if (result.exitCode === null) return result.more;
+				if (result.exitCode !== 0) {
+					this.fail(`Getting the actions the steps use failed (${result.exitCode === LOST ? "it ended without an exit code" : `exit code ${result.exitCode}`})`);
+					await this.finish();
+					return false;
+				}
 			}
 			Object.assign(setup, { status: "completed", conclusion: "success", finishedAt: iso(Date.now()) });
 			state.phase = "steps";
@@ -477,7 +541,7 @@ export class JobRunner {
 	/** Tells the current process to stop: SIGTERM, then SIGKILL once the grace is up. */
 	private async stop(reason: "cancelled" | "timeout", hard: boolean) {
 		const { process } = this.state;
-		const id = this.state.phase === "setup" ? SETUP_ID : String(this.state.step);
+		const id = this.state.phase === "setup" ? (this.state.setupStage === "actions" ? ACTIONS_ID : SETUP_ID) : String(this.state.step);
 		await this.machine.sandbox(this.state).exec(["sh", "-c", KILL_SCRIPT], { env: { MEGIT_ID: id, MEGIT_SIGNAL: hard ? "KILL" : "TERM" }, root: true });
 		process.stopping = { reason, at: process.stopping?.at ?? Date.now(), hard };
 	}
@@ -548,58 +612,319 @@ export class JobRunner {
 		return { exitCode: null, more: true };
 	}
 
-	/** Moves the current step along: "next" when it's finished, "more" when there's log to read now. */
+	/** Moves the current unit along: "next" when it's finished, "more" when there's log to read now. */
 	private async runStep(): Promise<"next" | "more" | "wait"> {
 		const { state, launch } = this;
-		if (state.step >= launch.steps.length) {
+		const units = launch.plan.units;
+		if (state.step >= units.length) {
+			this.workOutOutputs();
 			await this.finish();
 			return "wait";
 		}
-		const spec = launch.steps[state.step];
-		const index = state.step + 1;
-		const s = state.states[index];
-		const next = () => {
-			state.step++;
+		const unit = units[state.step];
+		const next = (to = state.step + 1) => {
+			state.step = to;
 			state.process = freshProcess(state.deadline);
+			state.prepared = null;
 			return "next" as const;
 		};
-		if (!state.process.launched && !shouldRun(spec.if, state.failed, state.cancelled)) {
-			Object.assign(s, { status: "completed", conclusion: "skipped" });
-			return next();
+		if (!state.prepared) {
+			const goTo = await this.begin(unit);
+			if (goTo !== null) return next(goTo);
 		}
-		if (spec.run === null) {
-			Object.assign(s, { status: "completed", conclusion: "success", startedAt: iso(Date.now()), finishedAt: iso(Date.now()) });
-			this.log(index, `The commit was checked out into ${WORKSPACE} when the job was set up.\n`);
-			return next();
-		}
-		if (!state.process.launched) {
-			Object.assign(s, { status: "in_progress", startedAt: iso(Date.now()) });
-			if (spec.timeoutMinutes) state.process.deadline = Math.min(state.deadline, Date.now() + spec.timeoutMinutes * 60_000);
-		}
-		const file = stepFile(spec, launch.env, state.addedEnv, state.addedPath);
-		const { exitCode, more } = await this.drive(String(state.step), index, file, stepInterpreter(spec), true, secretsIn(file, launch.mask));
+		const prepared = state.prepared!;
+		const { exitCode, more } = await this.drive(String(state.step), unit.ui, prepared.file, prepared.interpreter, prepared.asUser, prepared.mask);
 		if (exitCode === null) return more ? "more" : "wait";
 		const stopped = state.process.stopping;
 		// As on GitHub, what a step wrote to $GITHUB_ENV counts for the steps after it however it ended.
-		await this.collect(index);
+		const { outputs, saved } = await this.collect(unit.ui);
+		if ((unit.kind === "node" && unit.phase !== "post") || unit.kind === "cache-restore") {
+			const main = (unit.kind === "node" ? unit.main : null) ?? state.step;
+			state.ctx.saved[main] = { ...state.ctx.saved[main], ...saved };
+		}
 		// A step stopped for its time limit failed, whatever its exit code (a TERM trap can exit 0).
 		const ok = exitCode === 0 && stopped?.reason !== "timeout";
-		let conclusion: Conclusion = ok || spec.continueOnError ? "success" : "failure";
+		let conclusion: Conclusion = ok ? "success" : "failure";
 		if (stopped?.reason === "cancelled") {
 			conclusion = "cancelled";
-			this.log(index, "\nThe step was stopped because the run was cancelled\n");
+			this.log(unit.ui, "\nThe step was stopped because the run was cancelled\n");
 		} else if (stopped?.reason === "timeout") {
-			this.log(index, `\nThe step ran past its ${spec.timeoutMinutes ? `${spec.timeoutMinutes}-minute limit` : "job's time limit"}, so it was stopped\n`);
+			this.log(unit.ui, `\nThe step ran past its ${unit.timeoutMinutes ? `${unit.timeoutMinutes}-minute limit` : "job's time limit"}, so it was stopped\n`);
 		} else if (!ok && exitCode !== LOST) {
-			this.log(index, `\nProcess exited with code ${exitCode}${spec.continueOnError ? " (continue-on-error is set, so the job goes on)" : ""}\n`);
+			this.log(unit.ui, `\nProcess exited with code ${exitCode}${unit.continueOnError ? " (continue-on-error is set, so the job goes on)" : ""}\n`);
 		}
-		Object.assign(s, { status: "completed", conclusion, finishedAt: iso(Date.now()) });
-		if (!ok && !spec.continueOnError && stopped?.reason !== "cancelled") state.failed = true;
+		this.conclude(unit, conclusion, outputs);
 		return next();
 	}
 
-	/** Takes in what the step wrote to $GITHUB_ENV and $GITHUB_PATH, for the steps after it. */
-	private async collect(index: number) {
+	/** The composite action whose steps a scope holds: its enter unit. */
+	private enterOf(scope: string): Extract<Unit, { kind: "enter" }> | null {
+		if (scope === "") return null;
+		return (this.launch.plan.units.find((u) => u.kind === "enter" && u.inner === scope) as Extract<Unit, { kind: "enter" }> | undefined) ?? null;
+	}
+
+	/** Whether a step has failed where `scope` can see it: the job's, or in its composite actions. */
+	private failedIn(scope: string): boolean {
+		if (this.state.failed) return true;
+		for (let s: string | null = scope; s; s = this.enterOf(s)?.scope ?? null) if (this.state.ctx.failedScopes.includes(s)) return true;
+		return false;
+	}
+
+	/** A step failed: its composite action (and those around it) fail too, up to one that continues on error, else the job. */
+	private markFailed(scope: string) {
+		let s = scope;
+		for (;;) {
+			if (s === "") {
+				this.state.failed = true;
+				return;
+			}
+			if (!this.state.ctx.failedScopes.includes(s)) this.state.ctx.failedScopes.push(s);
+			const enter = this.enterOf(s);
+			if (!enter || enter.continueOnError) return;
+			s = enter.scope;
+		}
+	}
+
+	/** What expressions in a unit see. `env` is the environment so far; `hashes` holds hashFiles' answers. */
+	private scope(unit: Unit, env: Record<string, string>, hashes?: Map<string, string>, cancelled = this.state.cancelled): Scope {
+		const { launch, state } = this;
+		const failed = this.failedIn(unit.scope);
+		const enter = this.enterOf(unit.scope);
+		const action = enter ? launch.plan.actions[enter.action] : null;
+		return {
+			contexts: {
+				github: { ...launch.contexts.github, ...(action ? { action_path: action.dir, action_repository: action.repository, action_ref: action.ref } : {}) },
+				env,
+				secrets: launch.secrets,
+				matrix: launch.contexts.matrix,
+				needs: launch.contexts.needs,
+				strategy: launch.contexts.strategy,
+				inputs: unit.scope === "" ? launch.contexts.inputs : (state.ctx.inputs[unit.scope] ?? {}),
+				steps: (state.ctx.steps[unit.scope] ?? {}) as unknown as Value,
+				runner: RUNNER_CONTEXT,
+				job: { status: cancelled ? "cancelled" : failed ? "failure" : "success" },
+			},
+			status: { success: !cancelled && !failed, failure: failed, cancelled },
+			hashes,
+		};
+	}
+
+	/** Whether a running unit's condition still lets it run once the run is cancelled (always(), cancelled()). */
+	private keepsRunningOnCancel(unit: Unit): boolean {
+		try {
+			return truthy(evaluate(parseCondition(unit.if), this.scope(unit, { ...this.launch.env, ...this.state.addedEnv }, new Map(), true)));
+		} catch {
+			return false;
+		}
+	}
+
+	/** Works out hashFiles' answers for the expressions in a unit, on the machine. */
+	private async hashes(nodes: Expression[], scope: Scope): Promise<Map<string, string>> {
+		const out = new Map<string, string>();
+		const calls = hashFileCalls(nodes, scope);
+		for (const patterns of calls) {
+			const result = await this.machine.sandbox(this.state).exec(["bash", "-c", HASH_SCRIPT], { env: { MEGIT_WORKSPACE: WORKSPACE, MEGIT_PATTERNS: patterns.join("\n") }, root: true });
+			if (result.exitCode !== 0) throw new ExpressionError(`hashFiles(${patterns.map((p) => `'${p}'`).join(", ")}) failed: ${result.stderr.trim().slice(0, 300)}`);
+			out.set(JSON.stringify(patterns), parseHashOutput(result.stdout));
+		}
+		return out;
+	}
+
+	/**
+	 * Starts a unit: decides whether it runs, fills its expressions in and writes its script (into
+	 * state.prepared). Units with nothing to run on the machine (checkout, composite actions' ends,
+	 * skipped ones) finish here: then it's the index of the unit to go on to, else null.
+	 */
+	private async begin(unit: Unit): Promise<number | null> {
+		const { state, launch } = this;
+		const index = state.step;
+		const shown = state.states[unit.ui];
+		if (unit.kind === "exit") {
+			this.exitComposite(unit);
+			return index + 1;
+		}
+		// Post units run only after their main unit ran; a cache that was hit as asked isn't saved again.
+		if ((unit.kind === "node" && unit.phase === "post") || (unit.kind === "cache-save" && unit.main !== null)) {
+			const main = (unit as { main: number | null }).main!;
+			if (!state.ctx.ran.includes(main)) {
+				this.skip(unit);
+				return index + 1;
+			}
+			if (unit.kind === "cache-save" && state.ctx.saved[main]?.exact === "true") {
+				this.start(unit, shown);
+				this.log(unit.ui, `The cache was restored from its key (${state.ctx.saved[main].key}), so it isn't saved again.\n`);
+				this.conclude(unit, "success", {});
+				return index + 1;
+			}
+		}
+		const baseEnv = { ...launch.env, ...state.addedEnv };
+		try {
+			const condition = parseCondition(unit.if);
+			const templates = {
+				env: Object.entries(unit.env).map(([k, v]) => [k, parseTemplate(v)] as const),
+				with: Object.entries(unit.with).map(([k, v]) => [k, parseTemplate(v)] as const),
+				run: unit.kind === "run" ? parseTemplate(unit.run) : null,
+				name: parseTemplate(unit.name),
+			};
+			const all = [condition, ...templates.env.flatMap(([, t]) => expressionsIn(t)), ...templates.with.flatMap(([, t]) => expressionsIn(t)), ...(templates.run ? expressionsIn(templates.run) : []), ...expressionsIn(templates.name)];
+			const hashes = await this.hashes(all, this.scope(unit, baseEnv, new Map()));
+			if (!truthy(evaluate(condition, this.scope(unit, baseEnv, hashes)))) {
+				this.skip(unit);
+				return unit.kind === "enter" ? unit.end + 1 : index + 1;
+			}
+			// The shown name, filled in, for the job's own steps.
+			if (unit.scope === "" && (unit.kind !== "node" || unit.phase === "main")) shown.name = render(templates.name, this.scope(unit, baseEnv, hashes));
+			this.start(unit, shown);
+			state.ctx.ran.push(index);
+			// Step env sees the job's env; the rest see the step's too.
+			const stepEnv = Object.fromEntries(templates.env.map(([k, t]) => [k, render(t, this.scope(unit, baseEnv, hashes))]));
+			const scope = this.scope(unit, { ...baseEnv, ...stepEnv }, hashes);
+			const inputs = Object.fromEntries(templates.with.map(([k, t]) => [k, render(t, scope)]));
+			if (unit.kind === "checkout") {
+				this.log(unit.ui, `The commit was checked out into ${WORKSPACE} when the job was set up.\n`);
+				this.conclude(unit, "success", {});
+				return index + 1;
+			}
+			if (unit.kind === "enter") {
+				state.ctx.inputs[unit.inner] = this.actionInputs(launch.plan.actions[unit.action], inputs, scope, unit.ui);
+				state.ctx.steps[unit.inner] = {};
+				return index + 1;
+			}
+			const env = { ...launch.env, ...state.addedEnv, ...stepEnv };
+			let file: string;
+			if (unit.kind === "run") {
+				file = stepFile({ run: render(templates.run!, scope), env: stepEnv, workingDirectory: unit.workingDirectory }, launch.env, state.addedEnv, state.addedPath);
+			} else if (unit.kind === "node") {
+				const action = launch.plan.actions[unit.action];
+				const runs = action.meta.runs as Extract<typeof action.meta.runs, { using: "node" }>;
+				const script = unit.phase === "pre" ? runs.pre! : unit.phase === "post" ? runs.post! : runs.main;
+				file = actionStepFile({
+					env,
+					path: state.addedPath,
+					inputs: this.actionInputs(action, inputs, scope, unit.ui),
+					saved: unit.phase === "post" ? (state.ctx.saved[unit.main!] ?? {}) : {},
+					action: { dir: action.dir, script, repository: action.repository, ref: action.ref },
+				});
+			} else {
+				file = builtInStepFile(unit.kind, { env, path: state.addedPath, inputs, api: launch.api, github: launch.contexts.github, saved: unit.kind === "cache-save" && unit.main !== null ? (state.ctx.saved[unit.main] ?? {}) : {} });
+			}
+			const interpreter = unit.kind === "run" ? stepInterpreter(unit) : "bash --noprofile --norc -eo pipefail";
+			// Built-in steps carry the job's token; it's masked like a secret.
+			const mask = secretsIn(file, [...launch.mask, launch.api.token]);
+			state.prepared = { file, interpreter, asUser: true, mask };
+			if (unit.timeoutMinutes) state.process.deadline = Math.min(state.deadline, Date.now() + unit.timeoutMinutes * 60_000);
+			return null;
+		} catch (err) {
+			if (!(err instanceof ExpressionError)) throw err;
+			this.start(unit, shown);
+			this.log(unit.ui, `${err.message}\n`);
+			if (unit.kind === "enter") {
+				// The composite action's step fails as a whole; its steps don't run.
+				if (unit.id) state.ctx.steps[unit.scope] = { ...state.ctx.steps[unit.scope], [unit.id]: { outputs: {}, outcome: "failure", conclusion: unit.continueOnError ? "success" : "failure" } };
+				if (!unit.continueOnError) this.markFailed(unit.scope);
+				if (unit.scope === "") Object.assign(shown, { status: "completed", conclusion: unit.continueOnError ? "success" : "failure", finishedAt: iso(Date.now()) });
+				return unit.end + 1;
+			}
+			this.conclude(unit, "failure", {});
+			return index + 1;
+		}
+	}
+
+	/** An action's inputs: what `with:` gave, else each input's default (filled in), by name. */
+	private actionInputs(action: Plan["actions"][number], given: Record<string, string>, scope: Scope, ui: number): Record<string, string> {
+		const out: Record<string, string> = {};
+		const lower = Object.fromEntries(Object.entries(given).map(([k, v]) => [k.toLowerCase(), v]));
+		for (const [name, input] of Object.entries(action.meta.inputs)) {
+			if (Object.hasOwn(lower, name)) out[name] = lower[name];
+			else if (input.default !== null) out[name] = render(parseTemplate(input.default), scope);
+			else if (input.required) this.log(ui, `Warning: input ${name} is required, but wasn't given\n`);
+		}
+		for (const [name, v] of Object.entries(lower)) {
+			if (!Object.hasOwn(out, name)) {
+				if (!Object.hasOwn(action.meta.inputs, name)) this.log(ui, `Warning: ${action.repository} has no input ${name}\n`);
+				out[name] = v;
+			}
+		}
+		return out;
+	}
+
+	private start(unit: Unit, shown: StepState) {
+		if (shown.status === "pending") Object.assign(shown, { status: "in_progress", startedAt: iso(Date.now()) });
+	}
+
+	/** Whether a unit's result is its shown step's: false for units inside a composite action, which shows as one step. */
+	private ownsShownStep(unit: Unit): boolean {
+		if (unit.kind === "enter") return false;
+		if (unit.kind === "exit") return this.launch.plan.units[unit.enter].scope === "";
+		if (unit.kind === "node" && unit.phase !== "main") return true;
+		if (unit.kind === "cache-save" && unit.main !== null) return true;
+		return unit.scope === "";
+	}
+
+	private skip(unit: Unit) {
+		const { state } = this;
+		if (unit.id) state.ctx.steps[unit.scope] = { ...state.ctx.steps[unit.scope], [unit.id]: { outputs: {}, outcome: "skipped", conclusion: "skipped" } };
+		const shown = state.states[unit.ui];
+		const owns = unit.kind === "enter" ? unit.scope === "" : this.ownsShownStep(unit);
+		if (owns && shown.status !== "completed") Object.assign(shown, { status: "completed", conclusion: "skipped" });
+	}
+
+	/** Records how a unit ended: for steps.<id>, the job's status, and its shown step. */
+	private conclude(unit: Unit, outcome: Conclusion, outputs: Record<string, string>) {
+		const { state } = this;
+		const conclusion: Conclusion = outcome === "failure" && unit.continueOnError ? "success" : outcome;
+		if (unit.id) state.ctx.steps[unit.scope] = { ...state.ctx.steps[unit.scope], [unit.id]: { outputs, outcome, conclusion } };
+		if (outcome === "failure" && !unit.continueOnError) this.markFailed(unit.scope);
+		if (this.ownsShownStep(unit)) Object.assign(state.states[unit.ui], { status: "completed", conclusion, finishedAt: iso(Date.now()) });
+	}
+
+	/** The end of a composite action: its outputs become its step's, and the step ends as its steps did. */
+	private exitComposite(unit: Extract<Unit, { kind: "exit" }>) {
+		const { state, launch } = this;
+		const enter = launch.plan.units[unit.enter] as Extract<Unit, { kind: "enter" }>;
+		const action = launch.plan.actions[unit.action];
+		const inner: Unit = { ...unit, scope: unit.inner };
+		const scope = this.scope(inner, { ...launch.env, ...state.addedEnv }, new Map());
+		const outputs: Record<string, string> = {};
+		for (const [name, value] of Object.entries(action.meta.outputs)) {
+			try {
+				outputs[name] = render(parseTemplate(value), scope);
+			} catch (err) {
+				if (!(err instanceof ExpressionError)) throw err;
+				this.log(unit.ui, `Output ${name}: ${err.message}\n`);
+			}
+		}
+		const failed = state.ctx.failedScopes.includes(unit.inner);
+		// The step itself: in the scope its composite action was used from.
+		const outer: Unit = { ...unit, scope: enter.scope, id: enter.id, continueOnError: enter.continueOnError };
+		// A failure inside was already passed up (markFailed); record the step's result without passing it again.
+		const conclusion: Conclusion = failed && !enter.continueOnError ? "failure" : "success";
+		if (outer.id) state.ctx.steps[outer.scope] = { ...state.ctx.steps[outer.scope], [outer.id]: { outputs, outcome: failed ? "failure" : "success", conclusion } };
+		if (this.ownsShownStep(unit)) Object.assign(state.states[unit.ui], { status: "completed", conclusion, finishedAt: iso(Date.now()) });
+	}
+
+	/** The job's outputs, once its steps are done. Outputs holding a secret are left out, as on GitHub. */
+	private workOutOutputs() {
+		const { state, launch } = this;
+		if (state.outputs !== null) return;
+		const out: Record<string, string> = {};
+		const last = state.states.length - 1;
+		const scope = this.scope({ ...launch.plan.units[0], scope: "" } as Unit, { ...launch.env, ...state.addedEnv }, new Map());
+		for (const [name, value] of Object.entries(launch.outputs)) {
+			try {
+				const text = render(parseTemplate(value), scope);
+				if (this.secrets.some((secret) => secret && text.includes(secret))) this.log(last, `Output ${name} holds a secret, so it isn't passed on\n`);
+				else out[name] = text;
+			} catch (err) {
+				if (!(err instanceof ExpressionError)) throw err;
+				this.log(last, `Output ${name}: ${err.message}\n`);
+			}
+		}
+		state.outputs = out;
+	}
+
+	/** Takes in what the unit wrote to $GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT and $GITHUB_STATE. */
+	private async collect(index: number): Promise<{ outputs: Record<string, string>; saved: Record<string, string> }> {
 		const { state } = this;
 		const sandbox = this.machine.sandbox(state);
 		const id = String(state.step);
@@ -607,17 +932,29 @@ export class JobRunner {
 		const result = await sandbox.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MEGIT_ID: id }, root: true });
 		if (result.exitCode !== 0) throw new ScriptOutputError(`Collecting $GITHUB_ENV failed (exit code ${result.exitCode}): ${result.stderr.trim().slice(0, 300)}`);
 		const sizes = parseCollectSizes(result.stdout);
-		const env = await sandbox.readFile(collectedPath(id, "env"));
-		const path = await sandbox.readFile(collectedPath(id, "path"));
-		const envCut = Math.max(0, sizes.env - COLLECT_BYTES);
-		const pathCut = Math.max(0, sizes.path - COLLECT_BYTES);
-		for (const [name, cut] of [["$GITHUB_ENV", envCut], ["$GITHUB_PATH", pathCut]] as const) {
-			if (cut) this.log(index, `${name} had ${cut} bytes past the first ${COLLECT_BYTES / 1024} KB, which were left out\n`);
+		const files = await Promise.all(COLLECTED.map((which) => sandbox.readFile(collectedPath(id, which))));
+		const [env, path, output, saved] = files;
+		for (const [i, which] of COLLECTED.entries()) {
+			const cut = Math.max(0, (sizes[i] ?? 0) - COLLECT_BYTES);
+			if (cut) this.log(index, `$GITHUB_${which.toUpperCase()} had ${cut} bytes past the first ${COLLECT_BYTES / 1024} KB, which were left out\n`);
 		}
-		const parsed = parseEnvFile(env);
-		state.addedEnv = { ...state.addedEnv, ...parsed.env };
-		for (const error of parsed.errors) this.log(index, `${error}\n`);
+		const parsedEnv = parseEnvFile(env, "$GITHUB_ENV");
+		state.addedEnv = { ...state.addedEnv, ...parsedEnv.env };
+		for (const error of parsedEnv.errors) this.log(index, `${error}\n`);
 		for (const dir of parsePathFile(path)) if (!state.addedPath.includes(dir)) state.addedPath.push(dir);
+		const outputs = parseEnvFile(output, "$GITHUB_OUTPUT", false);
+		const kept = parseEnvFile(saved, "$GITHUB_STATE", false);
+		for (const error of [...outputs.errors, ...kept.errors]) this.log(index, `${error}\n`);
+		let size = 0;
+		const bounded = Object.fromEntries(
+			Object.entries(outputs.env).filter(([k, v]) => {
+				size += k.length + v.length;
+				if (size <= MAX_OUTPUT_BYTES) return true;
+				this.log(index, `Output ${k} goes past the ${MAX_OUTPUT_BYTES / 1024} KB a step's outputs may hold, so it's left out\n`);
+				return false;
+			}),
+		);
+		return { outputs: bounded, saved: kept.env };
 	}
 
 	/** Stops the machine and settles the job. */
@@ -718,6 +1055,7 @@ export class JobRunner {
 			logs: state.unacked?.logs ?? [],
 			startedAt: state.startedAt,
 			finishedAt: done ? state.finishedAt : null,
+			...(done && state.outputs ? { outputs: state.outputs } : {}),
 			...(state.unacked ? { seq: state.unacked.seq } : {}),
 		};
 	}

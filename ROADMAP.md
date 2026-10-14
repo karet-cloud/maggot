@@ -56,7 +56,7 @@ Git-platform features megit doesn't have yet, compared with GitHub. AI assistant
 |---|---------|-------|--------|
 | 23 | **Webhooks** (done) | Push, task, merge, and PR events posted to a URL, HMAC-signed. The event log already exists. | S–M |
 | 24 | **Checks / CI status** (partly done: megit Actions runs show as checks on commits and PRs and can gate merges; an API for external CI is next) | A commit status API (`pending/success/failure`) that external CI can report into, shown on commits, tasks and PRs, and able to gate the queue. Pairs with "checks before merge" in the README. | M |
-| 25 | **Built-in CI runner** (done: megit Actions on Cloudflare Containers or Depot sandboxes; matrix, caches, artifacts and third-party actions next) | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
+| 25 | **Built-in CI runner** (done: megit Actions on Cloudflare Containers or Depot sandboxes, with matrices, schedules, caches and artifacts in R2, and third-party actions; services and environments next) | Run tests in Cloudflare Sandbox or Containers per task or PR. | L |
 | 26 | **Notifications** (in-app done; email next) | An in-app inbox plus email for review requests, mentions, and failed merges. | M |
 | 27 | **Organizations and teams** | Group projects and share permissions. | L |
 | 28 | **Mirror from or to GitHub** | Keep a GitHub repo in sync both ways. Useful for adoption. | M |

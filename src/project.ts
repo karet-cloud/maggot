@@ -42,8 +42,9 @@ import { CodeIndex } from "./search.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
+import type { JobGrant } from "./ci/token.ts";
 import type { CiJob } from "./ci/job.ts";
-import type { CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks } from "./api.ts";
+import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks } from "./api.ts";
 
 const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
 const AGENT_TOKEN_TTL = 6 * 3600;
@@ -616,6 +617,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const meta = this.meta();
 		// Jobs run (and may cost money) in their own objects; stop them before their runs are forgotten.
 		await this.ci.cancelAll("The repository was deleted");
+		await this.ci.storage.dropAll().catch((err) => console.error("deleting Actions caches and artifacts failed", err));
 		const forks = [
 			...this.sql.exec<{ repo: string }>("SELECT repo FROM tasks WHERE status != 'abandoned'").toArray(),
 			...this.sql.exec<{ repo: string }>("SELECT repo FROM cleanup").toArray(),
@@ -1253,6 +1255,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (this.metaOrNull() && this.ci.busy()) await this.scheduleAlarm(Date.now() + 30_000);
 		const expiry = this.metaOrNull() ? this.ci.waitingExpiry() : null;
 		if (expiry !== null) await this.scheduleAlarm(Math.max(expiry, Date.now() + 60_000));
+		// Scheduled workflows: the next one due (the alarm also clears out old caches and artifacts then).
+		const scheduled = this.metaOrNull() ? this.ci.nextSchedule() : null;
+		if (scheduled !== null) await this.scheduleAlarm(Math.max(scheduled, Date.now() + 1_000));
 	}
 
 	private async drainMerges(): Promise<void> {
@@ -1900,6 +1905,68 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.meta();
 		return this.ci.deleteSecret(name);
 	}
+	// ── Actions caches and artifacts (records here, bytes in R2) ─────────────
+
+	async ciCacheLookup(grant: JobGrant, keys: string[], version: string): Promise<{ id: string; key: string; size: number } | null> {
+		this.meta();
+		return this.ci.storage.lookupCache(grant, keys, version);
+	}
+
+	async ciCacheObject(grant: JobGrant, id: string): Promise<string> {
+		this.meta();
+		return this.ci.storage.cacheObject(grant, id);
+	}
+
+	async ciCacheReserve(grant: JobGrant, key: string, version: string, size: number): Promise<string | null> {
+		this.meta();
+		return this.ci.storage.reserveCache(grant, key, version, size);
+	}
+
+	async ciArtifacts(run: number): Promise<CiArtifact[]> {
+		this.meta();
+		return this.ci.storage.listArtifacts(run);
+	}
+
+	async ciArtifactObject(run: number, id: string): Promise<{ key: string; name: string }> {
+		this.meta();
+		return this.ci.storage.artifactObject(run, id);
+	}
+
+	async ciArtifactReserve(grant: JobGrant, name: string, size: number, retentionDays: number | null, overwrite: boolean): Promise<string> {
+		this.meta();
+		return this.ci.storage.reserveArtifact(grant, name, size, retentionDays, overwrite);
+	}
+
+	async ciUploadTarget(kind: "caches" | "artifacts", id: string, grant: JobGrant): Promise<{ key: string; uploadId: string }> {
+		this.meta();
+		return this.ci.storage.uploadTarget(kind, id, grant);
+	}
+
+	async ciUploadPart(kind: "caches" | "artifacts", id: string, grant: JobGrant, part: R2UploadedPart): Promise<void> {
+		this.meta();
+		this.ci.storage.recordPart(kind, id, grant, part);
+	}
+
+	async ciUploadCommit(kind: "caches" | "artifacts", id: string, grant: JobGrant): Promise<void> {
+		this.meta();
+		await this.ci.storage.commit(kind, id, grant);
+	}
+
+	async ciDeleteArtifact(run: number, id: string): Promise<void> {
+		this.meta();
+		await this.ci.storage.deleteArtifact(run, id);
+	}
+
+	async ciCaches(): Promise<CiCache[]> {
+		this.meta();
+		return this.ci.storage.listCaches();
+	}
+
+	async ciDeleteCache(id: string): Promise<void> {
+		this.meta();
+		await this.ci.storage.deleteCache(id);
+	}
+
 
 	// ── Archiving ────────────────────────────────────────────────────────────
 

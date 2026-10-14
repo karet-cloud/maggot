@@ -18,6 +18,8 @@
     "vite.config.ts"
   ],
   "exclude": [
-    "test/ci-runs.test.ts"
+    "test/ci-runs.test.ts",
+    "test/ci-steps.test.ts",
+    "test/sql.ts"
   ]
 }

@@ -1,12 +1,29 @@
-import type { PullChecks, CiConclusion, CiEvent, CiJob as CiJobInfo, CiLogChunk, CiRun, CiRunList, CiRunner, CiRunSummary, CiSettings, CiStatus, CiStep, CiWorkflow } from "../api.ts";
+import type { PullChecks, CiArtifact, CiCache, CiConclusion, CiEvent, CiJob as CiJobInfo, CiLogChunk, CiRun, CiRunList, CiRunner, CiRunSummary, CiSettings, CiStatus, CiStep, CiWorkflow } from "../api.ts";
 import { HttpError } from "../errors.ts";
 import type { RepositoryRef } from "../hooks.ts";
 import type { RepoStore } from "../store.ts";
+import { GitHubActions, resolveActions, type ActionSource } from "./actions.ts";
+import { nextRun, parseCron } from "./cron.ts";
 import { checkDepotCredentials, DepotError, type DepotCredentials } from "./depot.ts";
+import { evaluate, ExpressionError, parseCondition, parseTemplate, propertiesOf, render, truthy, type Expression, type Value } from "./expr.ts";
 import type { JobLaunch, JobReport } from "./job.ts";
+import { buildPlan } from "./plan.ts";
 import { MIN_MASKED_LENGTH } from "./script.ts";
-import { mintCheckoutToken, openSecret, sealSecret } from "./token.ts";
-import { expand, filterAllows, typeAllows, type PullRequestType, parseWorkflow, WORKFLOW_DIR, MAX_WORKFLOWS, WorkflowError, type ExpressionContext, type JobSpec, type WorkflowSpec } from "./workflow.ts";
+import { CiStorage } from "./storage.ts";
+import { mintCheckoutToken, mintJobToken, openSecret, sealSecret, type JobGrant } from "./token.ts";
+import {
+	fetchDepthFor,
+	filterAllows,
+	jobTexts,
+	MAX_WORKFLOWS,
+	parseWorkflow,
+	typeAllows,
+	WORKFLOW_DIR,
+	WorkflowError,
+	type JobSpec,
+	type PullRequestType,
+	type WorkflowSpec,
+} from "./workflow.ts";
 
 /**
  * A repository's Actions runs, kept in its coordinator's SQLite: runs, their jobs, the jobs' logs,
@@ -55,6 +72,12 @@ const TICK_MS = 30_000;
  * sandbox has 10 minutes to come up (runner.ts's PROVISION_MS), and the fetch itself takes the rest.
  */
 const CHECKOUT_TOKEN_MS = 30 * 60_000;
+/** How long after a job's time limit its job token (caches, artifacts, actions) still works: its post steps and cleanup. */
+const JOB_TOKEN_GRACE_MS = 30 * 60_000;
+/** How often caches and artifacts past their time are cleared out. */
+const STORAGE_PRUNE_MS = 3600_000;
+/** A scheduled run that's this late (the alarm was held up) still runs once; later ones are skipped to the next. */
+const SCHEDULE_SLACK_MS = 15 * 60_000;
 
 /** The job's Durable Object, as far as the run engine uses it. */
 export interface JobStub {
@@ -64,8 +87,10 @@ export interface JobStub {
 
 export interface CiHost {
 	sql: SqlStorage;
-	env: { MEGIT_API_KEY?: string; MEGIT_CI_CLOUDFLARE?: string };
+	env: { MEGIT_API_KEY?: string; MEGIT_CI_CLOUDFLARE?: string; CI_BUCKET?: R2Bucket };
 	store: RepoStore;
+	/** Where actions on GitHub are read from (tests pass a stand-in). */
+	github?: Pick<GitHubActions, "resolve" | "readFile">;
 	/** The CiJob Durable Object for a job id. */
 	job(id: string): JobStub;
 	/** This repository's id, also its storage name and its coordinator's name. */
@@ -178,6 +203,10 @@ type JobRow = {
 	cancel_pending: number;
 	report_seq: number;
 	reported_at: number | null;
+	/** The job's id as written; a matrix's jobs share it. Null for jobs made before matrices. */
+	grp: string | null;
+	/** Its outputs (JSON), once it has finished. */
+	outputs: string | null;
 };
 
 type Settings = { defaultRunner?: CiRunner; depotToken?: string; depotOrg?: string | null };
@@ -187,6 +216,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 
 export class CiRuns {
 	private readonly host: CiHost;
+	readonly storage: CiStorage;
 	/** A commit's workflow files never change; checks are polled, so they're kept a while. */
 	private readonly workflowCache = new Map<string, Promise<{ path: string; spec: WorkflowSpec | null; error: string | null }[]>>();
 	/**
@@ -198,6 +228,7 @@ export class CiRuns {
 
 	constructor(host: CiHost) {
 		this.host = host;
+		this.storage = new CiStorage(host.sql, host.env.CI_BUCKET, () => host.repoId());
 		host.sql.exec(`
 			CREATE TABLE IF NOT EXISTS ci_runs (
 				number INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,7 +289,13 @@ export class CiRuns {
 			CREATE TABLE IF NOT EXISTS ci_pulls (pull INTEGER PRIMARY KEY, sha TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1, approved INTEGER NOT NULL DEFAULT 0);
 			-- Which events (opened, reopened, synchronize) each head of a pull request had, for on.pull_request.types.
 			CREATE TABLE IF NOT EXISTS ci_pull_events (pull INTEGER NOT NULL, sha TEXT NOT NULL, action TEXT NOT NULL, PRIMARY KEY (pull, sha, action));
+			-- The default branch's scheduled workflows, and when each schedule next runs (ms).
+			CREATE TABLE IF NOT EXISTS ci_schedules (path TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL, PRIMARY KEY (path, cron));
 		`);
+		// Added with matrices and job outputs: the job's id as written (shared by a matrix's jobs), and its outputs once done.
+		const columns = new Set(host.sql.exec<{ name: string }>("PRAGMA table_info(ci_jobs)").toArray().map((c) => c.name));
+		if (!columns.has("grp")) host.sql.exec("ALTER TABLE ci_jobs ADD COLUMN grp TEXT");
+		if (!columns.has("outputs")) host.sql.exec("ALTER TABLE ci_jobs ADD COLUMN outputs TEXT");
 	}
 
 	private get sql() {
@@ -428,6 +465,7 @@ export class CiRuns {
 			name: w.spec?.name ?? w.path.split("/").pop()!,
 			error: w.error,
 			dispatch: Boolean(w.spec?.on.dispatch),
+			schedule: w.spec?.on.schedule ?? [],
 		}));
 	}
 
@@ -470,7 +508,58 @@ export class CiRuns {
 			else if (w.error) created.push(this.createBrokenRun(w.path, w.error, trigger));
 		}
 		await this.started(created);
+		if (branch === this.host.repository().defaultBranch) await this.refreshSchedules(sha);
 		return created.map((n) => this.summary(this.runRow(n)));
+	}
+
+	// ── Schedules ────────────────────────────────────────────────────────────
+
+	/** Records the default branch's scheduled workflows (as of `sha`), keeping the next run of schedules that didn't change. */
+	async refreshSchedules(sha: string): Promise<void> {
+		const wanted = new Map<string, string>();
+		for (const w of await this.workflowsAt(this.host.repoId(), sha)) for (const cron of w.spec?.on.schedule ?? []) wanted.set(`${w.path}\0${cron}`, cron);
+		const have = this.sql.exec<{ path: string; cron: string }>("SELECT path, cron FROM ci_schedules").toArray();
+		for (const row of have) if (!wanted.has(`${row.path}\0${row.cron}`)) this.sql.exec("DELETE FROM ci_schedules WHERE path = ? AND cron = ?", row.path, row.cron);
+		const now = Date.now();
+		for (const [key, cron] of wanted) {
+			const path = key.split("\0")[0];
+			if (have.some((r) => r.path === path && r.cron === cron)) continue;
+			const at = nextRun(parseCron(cron), now);
+			if (at !== null) this.sql.exec("INSERT OR REPLACE INTO ci_schedules (path, cron, next_at) VALUES (?, ?, ?)", path, cron, at);
+		}
+		const next = this.nextSchedule();
+		if (next !== null) await this.host.wake(next);
+	}
+
+	/** When the next scheduled run is due, if any workflow runs on a schedule. */
+	nextSchedule(): number | null {
+		return this.sql.exec<{ at: number | null }>("SELECT MIN(next_at) AS at FROM ci_schedules").one().at;
+	}
+
+	/** Starts the scheduled runs that are due, on the default branch's head, as GitHub does. */
+	private async runSchedules(): Promise<void> {
+		const now = Date.now();
+		const due = this.sql.exec<{ path: string; cron: string; next_at: number }>("SELECT * FROM ci_schedules WHERE next_at <= ?", now).toArray();
+		if (due.length === 0 || this.host.archived()) return;
+		const branch = this.host.repository().defaultBranch;
+		const sha = await this.tipOf(this.host.repoId(), branch);
+		const started = new Set<string>();
+		const created: number[] = [];
+		for (const row of due) {
+			const at = nextRun(parseCron(row.cron), now);
+			if (at === null) this.sql.exec("DELETE FROM ci_schedules WHERE path = ? AND cron = ?", row.path, row.cron);
+			else this.sql.exec("UPDATE ci_schedules SET next_at = ? WHERE path = ? AND cron = ?", at, row.path, row.cron);
+			// One run per workflow however many of its schedules are due, and none for one long overdue (it runs at its next time).
+			if (!sha || started.has(row.path) || now - row.next_at > SCHEDULE_SLACK_MS) continue;
+			// Nothing to run on: no Depot token and no Cloudflare containers. Scheduled runs would only fail, again and again.
+			if (!this.cloudflareAvailable() && !this.settings().depotToken) continue;
+			const w = (await this.workflowsAt(this.host.repoId(), sha)).find((x) => x.path === row.path);
+			if (!w?.spec?.on.schedule.includes(row.cron)) continue;
+			started.add(row.path);
+			const trigger: Trigger = { event: "schedule", branch, sha, pull: null, headRepo: null, cloneUrl: this.host.repository().cloneUrl, fromFork: false, actor: null, baseBranch: null };
+			created.push(this.createRun(w.path, w.spec, trigger, true, null));
+		}
+		await this.started(created);
 	}
 
 	/**
@@ -737,10 +826,11 @@ export class CiRuns {
 		for (const job of spec.jobs) {
 			const runner = job.runsOn.kind === "default" ? this.defaultRunner() : job.runsOn.kind;
 			this.sql.exec(
-				"INSERT INTO ci_jobs (id, run, key, name, runner, vcpus, needs, status, steps, timeout_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"INSERT INTO ci_jobs (id, run, key, grp, name, runner, vcpus, needs, status, steps, timeout_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 				crypto.randomUUID(),
 				number,
 				job.key,
+				job.group,
 				job.name,
 				runner,
 				runner === "depot" ? (job.runsOn.vcpus ?? 2) : null,
@@ -805,6 +895,7 @@ export class CiRuns {
 			)
 			.toArray();
 		for (const { number } of old) {
+			this.storage.expireRun(number);
 			this.sql.exec("DELETE FROM ci_logs WHERE job IN (SELECT id FROM ci_jobs WHERE run = ?)", number);
 			this.sql.exec("DELETE FROM ci_jobs WHERE run = ?", number);
 			this.sql.exec("DELETE FROM ci_runs WHERE number = ?", number);
@@ -845,12 +936,25 @@ export class CiRuns {
 		return this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ci_jobs WHERE status = 'in_progress'").one().n;
 	}
 
-	/** Starts queued jobs whose needs are done, up to the limit; skips those whose needs failed. */
+	/**
+	 * Starts queued jobs whose needs are done and whose `if:` allows them, up to the limit (and a
+	 * matrix's max-parallel); skips the rest. A failed matrix job cancels its siblings (fail-fast).
+	 */
 	async schedule(): Promise<void> {
 		// Archiving cancels everything; this is the backstop, so nothing is handed a runner afterwards.
 		if (this.host.archived()) return;
+		const specs = new Map<number, { workflow: WorkflowSpec; trigger: Trigger; run: RunRow }>();
+		const runOf = (number: number) => {
+			let hit = specs.get(number);
+			if (!hit) {
+				const run = this.runRow(number);
+				hit = { workflow: JSON.parse(run.spec) as WorkflowSpec, trigger: JSON.parse(run.trigger) as Trigger, run };
+				specs.set(number, hit);
+			}
+			return hit;
+		};
 		for (let pass = 0; pass < 50; pass++) {
-			let changed = false;
+			let changed = await this.failFast(runOf);
 			const queued = this.sql.exec<JobRow>("SELECT * FROM ci_jobs WHERE status = 'queued' ORDER BY run, rowid").toArray();
 			for (const job of queued) {
 				const needs = JSON.parse(job.needs) as string[];
@@ -858,12 +962,17 @@ export class CiRuns {
 					? this.sql.exec<{ key: string; status: CiStatus; conclusion: CiConclusion | null }>(`SELECT key, status, conclusion FROM ci_jobs WHERE run = ? AND key IN (${needs.map(() => "?").join(", ")})`, job.run, ...needs).toArray()
 					: [];
 				if (deps.some((d) => d.status !== "completed")) continue;
-				if (deps.some((d) => d.conclusion !== "success")) {
-					this.finishJob(job, "skipped", `Skipped: ${deps.filter((d) => d.conclusion !== "success").map((d) => d.key).join(", ")} didn't succeed`);
+				const { workflow, trigger, run } = runOf(job.run);
+				const spec = workflow.jobs.find((j) => j.key === job.key);
+				const verdict = spec ? this.jobCondition(spec, run, trigger, deps) : { run: true, reason: null };
+				if (!verdict.run) {
+					this.finishJob(job, "skipped", verdict.reason);
 					changed = true;
 					continue;
 				}
 				if (this.running() >= MAX_RUNNING_JOBS) continue;
+				const maxParallel = spec?.strategy.maxParallel;
+				if (maxParallel && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM ci_jobs WHERE run = ? AND grp = ? AND status = 'in_progress'", job.run, spec.group).one().n >= maxParallel) continue;
 				// Another schedule() may have taken it while this one was waiting on a launch.
 				const t = now();
 				if (this.sql.exec("UPDATE ci_jobs SET status = 'in_progress', started_at = ?, reported_at = ? WHERE id = ? AND status = 'queued'", t, Date.now(), job.id).rowsWritten === 0) continue;
@@ -876,6 +985,97 @@ export class CiRuns {
 			if (pass === 0) this.host.changed();
 		}
 		await this.wakeIfBusy();
+	}
+
+	/**
+	 * Whether a job whose needs are done runs: its `if:` (success() unless it says otherwise), where
+	 * success() means every job it needs succeeded and failure() that one failed.
+	 */
+	private jobCondition(spec: JobSpec, run: RunRow, trigger: Trigger, deps: { key: string; conclusion: CiConclusion | null }[]): { run: boolean; reason: string | null } {
+		const failed = deps.filter((d) => d.conclusion !== "success");
+		try {
+			const ok = truthy(
+				evaluate(parseCondition(spec.if), {
+					contexts: { github: this.githubContext(run, trigger, spec.group), needs: this.needsContext(run.number, spec.needsGroups), inputs: {} },
+					status: { success: failed.length === 0, failure: deps.some((d) => d.conclusion === "failure"), cancelled: deps.some((d) => d.conclusion === "cancelled") },
+				}),
+			);
+			if (ok) return { run: true, reason: null };
+		} catch (err) {
+			if (!(err instanceof ExpressionError)) throw err;
+			return { run: false, reason: `Skipped: its if: couldn't be worked out (${err.message})` };
+		}
+		if (spec.if === "success()" && failed.length) return { run: false, reason: `Skipped: ${[...new Set(failed.map((d) => d.key.split(".")[0]))].join(", ")} didn't succeed` };
+		return { run: false, reason: "Skipped: its if: was false" };
+	}
+
+	/** fail-fast: a matrix job that failed cancels its run's other jobs of the same matrix. True if it cancelled any. */
+	private async failFast(runOf: (n: number) => { workflow: WorkflowSpec }): Promise<boolean> {
+		const failed = this.sql
+			.exec<{ run: number; grp: string }>(
+				`SELECT DISTINCT j.run, j.grp FROM ci_jobs j JOIN ci_runs r ON r.number = j.run
+					WHERE r.status != 'completed' AND j.conclusion = 'failure' AND j.grp IS NOT NULL AND j.key != j.grp
+					AND EXISTS (SELECT 1 FROM ci_jobs s WHERE s.run = j.run AND s.grp = j.grp AND s.status != 'completed')`,
+			)
+			.toArray();
+		let cancelled = false;
+		for (const { run, grp } of failed) {
+			const spec = runOf(run).workflow.jobs.find((j) => j.group === grp);
+			if (!spec?.strategy.failFast) continue;
+			for (const job of this.sql.exec<JobRow>("SELECT * FROM ci_jobs WHERE run = ? AND grp = ? AND status != 'completed'", run, grp).toArray()) {
+				if (job.status === "in_progress") this.sql.exec("UPDATE ci_jobs SET cancel_pending = 1 WHERE id = ?", job.id);
+				this.finishJob(job, "cancelled", "Cancelled: another job of its matrix failed (fail-fast)");
+				cancelled = true;
+			}
+		}
+		if (cancelled) await this.retryCancels();
+		return cancelled;
+	}
+
+	/** The github context: what's fixed for a job of a run. */
+	private githubContext(run: RunRow, trigger: Trigger, job: string): Record<string, string> {
+		const repo = this.host.repository();
+		const ref = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}/merge` : `refs/heads/${trigger.branch}`;
+		return {
+			sha: run.sha,
+			ref,
+			ref_name: trigger.event === "pull_request" ? `${trigger.pull}/merge` : trigger.branch,
+			ref_type: "branch",
+			head_ref: trigger.event === "pull_request" ? trigger.branch : "",
+			base_ref: trigger.baseBranch ?? "",
+			repository: repo.fullName,
+			repository_owner: repo.fullName.split("/")[0] ?? "",
+			server_url: repo.url ? new URL(repo.url).origin : "",
+			api_url: repo.url ? `${new URL(repo.url).origin}/api` : "",
+			event_name: run.event,
+			run_id: String(run.number),
+			run_number: String(run.number),
+			run_attempt: "1",
+			actor: trigger.actor ?? "",
+			triggering_actor: trigger.actor ?? "",
+			workflow: run.workflow,
+			job,
+			workspace: "/workspace",
+		};
+	}
+
+	/** The needs context: each job a job needs, with its result and outputs (a matrix's jobs together). */
+	private needsContext(run: number, groups: string[]): Value {
+		const out: Record<string, Value> = {};
+		for (const grp of groups) {
+			const rows = this.sql.exec<{ conclusion: CiConclusion | null; outputs: string | null }>("SELECT conclusion, outputs FROM ci_jobs WHERE run = ? AND grp = ? ORDER BY rowid", run, grp).toArray();
+			const result = rows.some((r) => r.conclusion === "failure")
+				? "failure"
+				: rows.some((r) => r.conclusion === "cancelled")
+					? "cancelled"
+					: rows.length && rows.every((r) => r.conclusion === "success")
+						? "success"
+						: "skipped";
+			const outputs: Record<string, Value> = {};
+			for (const r of rows) Object.assign(outputs, r.outputs ? (JSON.parse(r.outputs) as Record<string, string>) : {});
+			out[grp] = { result, outputs };
+		}
+		return out;
 	}
 
 	/**
@@ -929,67 +1129,85 @@ export class CiRuns {
 			runner = { kind: "cloudflare" };
 		}
 		// A fork's pull request runs the fork's code, so it never gets this repository's secrets.
-		const secrets = trigger.fromFork ? {} : await this.secrets();
+		const all = trigger.fromFork ? {} : await this.secrets();
+		const used = usedSecrets(workflow, spec);
+		const secret = (name: string) => (Object.hasOwn(all, name) ? all[name] : "");
 		// A value too short to hide in the log could end up in it: the job doesn't run with it.
-		const secret = (name: string) => (Object.hasOwn(secrets, name) ? secrets[name] : "");
-		const short = usedSecrets(workflow, spec).filter((name) => secret(name).length > 0 && secret(name).length < MIN_SECRET_LENGTH);
+		const short = used.filter((name) => secret(name).length > 0 && secret(name).length < MIN_SECRET_LENGTH);
 		if (short.length) {
 			throw new Error(`The secret${short.length === 1 ? "" : "s"} ${short.join(", ")} ${short.length === 1 ? "is" : "are"} shorter than ${MIN_SECRET_LENGTH} characters, so ${short.length === 1 ? "it" : "they"} can't be hidden in logs. Replace ${short.length === 1 ? "it" : "them"} in Settings → Actions.`);
 		}
-		const ref = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}/head` : `refs/heads/${trigger.branch}`;
-		const github: Record<string, string> = {
-			sha: run.sha,
-			ref,
-			ref_name: trigger.branch,
-			ref_type: "branch",
-			head_ref: trigger.event === "pull_request" ? trigger.branch : "",
-			base_ref: trigger.baseBranch ?? "",
-			repository: repo.fullName,
-			repository_owner: repo.fullName.split("/")[0] ?? "",
-			server_url: repo.url ? new URL(repo.url).origin : "",
-			event_name: run.event,
-			run_id: String(run.number),
-			run_number: String(run.number),
-			run_attempt: "1",
-			actor: trigger.actor ?? "",
-			triggering_actor: trigger.actor ?? "",
-			workflow: run.workflow,
-			job: job.key,
-			workspace: "/workspace",
-		};
+		// Only what this job can see: other secrets never reach the sandbox, not even as mask patterns.
+		const secrets = Object.fromEntries(used.filter((name) => secret(name).length > 0).map((name) => [name, secret(name)]));
+		const github = this.githubContext(run, trigger, spec.group);
+		const strategy: Value = { "fail-fast": spec.strategy.failFast, "max-parallel": spec.strategy.maxParallel ?? spec.strategy.total, "job-index": spec.strategy.index, "job-total": spec.strategy.total };
+		const contexts = { github, matrix: spec.matrix ?? {}, needs: this.needsContext(run.number, spec.needsGroups), strategy, inputs: {} };
 		const base: Record<string, string> = {
 			CI: "true",
 			MEGIT_ACTIONS: "true",
 			GITHUB_ACTIONS: "true",
 			RUNNER_OS: "Linux",
 			RUNNER_ARCH: "X64",
+			RUNNER_NAME: "megit",
 			...Object.fromEntries(Object.entries(github).map(([k, v]) => [`GITHUB_${k.toUpperCase()}`, v])),
 		};
-		const ctx = (env: Record<string, string>): ExpressionContext => ({ secrets, github, env });
-		const fill = (values: Record<string, string>, env: Record<string, string>, where: string) =>
-			Object.fromEntries(Object.entries(values).map(([k, v]) => [k, expand(v, ctx(env), `${where}.${k}`)]));
+		// Workflow env, then job env, each filled in as GitHub does (job env sees the workflow's).
+		const fill = (values: Record<string, string>, env: Record<string, string>, where: string) => {
+			const scope = { contexts: { ...contexts, secrets, env } };
+			return Object.fromEntries(
+				Object.entries(values).map(([k, v]) => {
+					try {
+						return [k, render(parseTemplate(v), scope)];
+					} catch (err) {
+						if (err instanceof ExpressionError) throw new Error(`${where}.${k}: ${err.message}`);
+						throw err;
+					}
+				}),
+			);
+		};
 		const workflowEnv = { ...base, ...fill(workflow.env, base, "env") };
-		const jobEnv = { ...workflowEnv, ...fill(spec.env, workflowEnv, `jobs.${spec.key}.env`) };
-		const steps = spec.steps.map((s, i) => {
-			const where = `jobs.${spec.key}.steps[${i}]`;
-			const stepEnv = fill(s.env, jobEnv, `${where}.env`);
-			return { ...s, env: stepEnv, run: s.run === null ? null : expand(s.run, ctx({ ...jobEnv, ...stepEnv }), `${where}.run`) };
-		});
+		const env = { ...workflowEnv, ...fill(spec.env, workflowEnv, `jobs.${spec.group}.env`) };
+		// The actions its steps use, pinned to commits, with their action.yml read.
+		const headRepo = trigger.headRepo ?? this.host.repoId();
+		const source: ActionSource = {
+			resolve: (owner, name, ref) => this.github().resolve(owner, name, ref),
+			readGitHub: (owner, name, sha, path) => this.github().readFile(owner, name, sha, path),
+			readLocal: async (path) => {
+				using handle = await this.host.store.get(headRepo);
+				const blob = await handle.readFile({ ref: run.sha, path });
+				return blob ? blob.text() : null;
+			},
+		};
+		let plan;
+		try {
+			plan = buildPlan(spec.steps, await resolveActions(spec.steps, source, repo.fullName));
+		} catch (err) {
+			if (err instanceof WorkflowError) throw new Error(err.message);
+			throw err;
+		}
+		const expires = Date.now() + spec.timeoutMinutes * 60_000 + JOB_TOKEN_GRACE_MS;
 		// Read-only, for the one repository holding the commit, and gone soon after the job's time limit.
-		const token = await mintCheckoutToken(this.apiKey, { repos: [trigger.headRepo ?? this.host.repoId()], expires: Date.now() + CHECKOUT_TOKEN_MS });
+		const checkoutToken = await mintCheckoutToken(this.apiKey, { repos: [headRepo], expires: Date.now() + CHECKOUT_TOKEN_MS });
+		const grant: JobGrant = { repo: this.host.repoId(), run: run.number, job: job.id, ...cacheScopes(trigger, repo.defaultBranch), expires };
+		const origin = repo.url ? new URL(repo.url).origin : "";
 		return {
 			jobId: job.id,
 			repo: this.host.repoId(),
 			runner,
 			timeoutMinutes: spec.timeoutMinutes,
-			steps,
-			env: jobEnv,
-			// Only what this job can see: other secrets never reach the sandbox, not even as mask patterns.
-			mask: usedSecrets(workflow, spec)
-				.map(secret)
-				.filter((v) => v.length >= MIN_SECRET_LENGTH),
-			checkout: { url: cloneUrl, auth: btoa(`x:${token}`), ref: `refs/heads/${trigger.branch}`, sha: run.sha },
+			plan,
+			env,
+			contexts,
+			secrets,
+			outputs: spec.outputs,
+			mask: Object.values(secrets).filter((v) => v.length >= MIN_SECRET_LENGTH),
+			checkout: { url: cloneUrl, auth: btoa(`x:${checkoutToken}`), ref: `refs/heads/${trigger.branch}`, sha: run.sha, depth: fetchDepthFor(spec.steps) },
+			api: { url: origin, token: await mintJobToken(this.apiKey, grant) },
 		};
+	}
+
+	private github(): Pick<GitHubActions, "resolve" | "readFile"> {
+		return this.host.github ?? new GitHubActions(this.host.env.CI_BUCKET);
 	}
 
 	private finishJob(job: Pick<JobRow, "id" | "steps">, conclusion: CiConclusion, error: string | null) {
@@ -1061,6 +1279,12 @@ export class CiRuns {
 	 */
 	async tick(): Promise<void> {
 		await this.drainPulls();
+		await this.runSchedules();
+		const pruned = Number(this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'ciStoragePruned'").toArray()[0]?.value ?? 0);
+		if (Date.now() - pruned > STORAGE_PRUNE_MS) {
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('ciStoragePruned', ?)", String(Date.now()));
+			await this.storage.prune().catch((err) => console.error("ci: pruning caches and artifacts failed", err));
+		}
 		const stale = new Date(Date.now() - WAITING_TTL_MS).toISOString();
 		for (const { number } of this.sql.exec<{ number: number }>("SELECT number FROM ci_runs WHERE status = 'waiting' AND created_at < ?", stale).toArray()) {
 			await this.cancel(number, `Nobody approved it within ${WAITING_TTL_MS / 86_400_000} days`);
@@ -1120,10 +1344,11 @@ export class CiRuns {
 		this.sql.exec("UPDATE ci_jobs SET steps = ?, reported_at = ?, dispatched = 1 WHERE id = ?", JSON.stringify(report.steps), Date.now(), jobId);
 		if (report.status === "completed") {
 			this.sql.exec(
-				"UPDATE ci_jobs SET status = 'completed', conclusion = ?, error = ?, finished_at = ? WHERE id = ? AND status = 'in_progress'",
+				"UPDATE ci_jobs SET status = 'completed', conclusion = ?, error = ?, finished_at = ?, outputs = ? WHERE id = ? AND status = 'in_progress'",
 				report.conclusion ?? "failure",
 				report.error,
 				report.finishedAt ?? now(),
+				report.outputs ? JSON.stringify(report.outputs) : null,
 				jobId,
 			);
 			await this.schedule();
@@ -1262,10 +1487,30 @@ function jobSteps(names: string[]): CiStep[] {
 	return ["Set up job", ...names, "Complete job"].map((name) => ({ name, status: "pending", conclusion: null, startedAt: null, finishedAt: null }));
 }
 
-/** Secret names a job's expressions name (workflow env, job env, and its steps' env and scripts). */
+/** Secret names a job's expressions name (workflow env, job env and outputs, and its steps). */
 function usedSecrets(workflow: WorkflowSpec, job: JobSpec): string[] {
-	const texts = [...Object.values(workflow.env), ...Object.values(job.env), ...job.steps.flatMap((s) => [...Object.values(s.env), s.run ?? ""])];
 	const names = new Set<string>();
-	for (const text of texts) for (const m of text.matchAll(/\$\{\{\s*secrets\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g)) names.add(m[1]);
+	for (const text of jobTexts(workflow, job)) {
+		try {
+			const parts = text.includes("${{") ? parseTemplate(text) : [];
+			for (const part of parts) if (typeof part !== "string") for (const name of propertiesOf(part, "secrets")) names.add(name);
+			// Conditions are expressions without ${{ }}.
+			if (!text.includes("${{") && /secrets/i.test(text)) for (const name of propertiesOf(parseCondition(text), "secrets")) names.add(name);
+		} catch {
+			// Checked when the workflow was read; a bad expression fails its step, not this.
+		}
+	}
 	return [...names];
+}
+
+/**
+ * The cache scopes a job restores from (its own first) and saves to, as on GitHub: its branch's, or
+ * for a pull request its own; then its base branch's and the default branch's.
+ */
+export function cacheScopes(trigger: Trigger, defaultBranch: string): { read: string[]; write: string } {
+	const write = trigger.event === "pull_request" ? `refs/pull/${trigger.pull}` : `refs/heads/${trigger.branch}`;
+	const read = [write];
+	if (trigger.baseBranch) read.push(`refs/heads/${trigger.baseBranch}`);
+	read.push(`refs/heads/${defaultBranch}`);
+	return { read: [...new Set(read)], write };
 }

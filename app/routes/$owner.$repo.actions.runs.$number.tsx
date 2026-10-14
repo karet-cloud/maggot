@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ChevronRight, CircleStop, Cpu, GitBranch, RotateCw, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CiIcon, ciLabel, ciState, Elapsed, isActive, type CiState } from "../components/actions.tsx";
+import { CiIcon, ciLabel, ciState, Elapsed, isActive, RunArtifacts, type CiState } from "../components/actions.tsx";
 import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type CiJob, type CiLogChunk } from "../lib/api.ts";
 import { trigger } from "./$owner.$repo.actions.index.tsx";
@@ -173,6 +173,7 @@ function RunPage() {
 					{selected && <JobView key={selected.id} project={project} run={r.number} job={selected} />}
 				</div>
 			)}
+			<RunArtifacts project={project} run={r.number} active={isActive(r)} canWrite={canWrite && !info.data?.repo.archivedAt} />
 		</div>
 	);
 }

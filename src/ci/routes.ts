@@ -70,6 +70,34 @@ actions.get("/runs/:number/jobs/:job/logs", async (c) => c.json(await project(c)
 
 actions.post("/runs/:number/cancel", async (c) => c.json(await project(c).ciCancel(runNumber(c))));
 
+actions.get("/runs/:number/artifacts", async (c) => c.json({ artifacts: await project(c).ciArtifacts(runNumber(c)) }));
+
+/** An artifact's files, as the .tar.gz the job uploaded. */
+actions.get("/runs/:number/artifacts/:id/download", async (c) => {
+	const { key, name } = await project(c).ciArtifactObject(runNumber(c), c.req.param("id"));
+	const object = await c.env.CI_BUCKET?.get(key);
+	if (!object) throw new HttpError(404, "NOT_FOUND", "The artifact's files are gone");
+	const file = `${name.replace(/[^\w.-]+/g, "_")}.tar.gz`;
+	return c.body(object.body, 200, {
+		"content-type": "application/gzip",
+		"content-length": String(object.size),
+		"content-disposition": `attachment; filename="${file}"`,
+		"x-content-type-options": "nosniff",
+	});
+});
+
+actions.delete("/runs/:number/artifacts/:id", async (c) => {
+	await project(c).ciDeleteArtifact(runNumber(c), c.req.param("id"));
+	return c.json({ deleted: true });
+});
+
+actions.get("/caches", async (c) => c.json({ caches: await project(c).ciCaches() }));
+
+actions.delete("/caches/:id", async (c) => {
+	await project(c).ciDeleteCache(c.req.param("id"));
+	return c.json({ deleted: true });
+});
+
 actions.post("/runs/:number/rerun", async (c) => {
 	canStart(c);
 	return c.json(await project(c).ciRerun(runNumber(c), actor(c)), 201);
