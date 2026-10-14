@@ -73,7 +73,7 @@ export interface JobLaunch {
 	/** Values to hide in the log. */
 	mask: string[];
 	checkout: { url: string; auth: string; ref: string; sha: string; depth: number };
-	/** megit's API for caches, artifacts and downloading actions, with the job's own token. */
+	/** maggot's API for caches, artifacts and downloading actions, with the job's own token. */
 	api: { url: string; token: string };
 }
 
@@ -283,8 +283,8 @@ export class DepotMachine implements Machine {
 
 	async provision(state: JobState, launch: JobLaunch, save: () => Promise<void>): Promise<boolean> {
 		if (!state.sandboxId) {
-			const name = `megit-${launch.jobId}`;
-			// Its lifetime counts from now; the job's own deadline comes first, so this only reaps it if megit can't.
+			const name = `maggot-${launch.jobId}`;
+			// Its lifetime counts from now; the job's own deadline comes first, so this only reaps it if maggot can't.
 			const minutes = Math.ceil((state.deadline - Date.now()) / 60_000) + 15;
 			try {
 				state.sandboxId = (await this.api.create({ name, vcpus: this.vcpus, timeoutMinutes: minutes })).id;
@@ -292,7 +292,7 @@ export class DepotMachine implements Machine {
 				// Created before a restart lost the answer: find it by its name, unique in the organization.
 				if (!(err instanceof DepotError && err.code === "already_exists")) throw err;
 				const found = await this.api.findByName(name);
-				if (!found) throw new DepotError("already_exists", `Depot has a sandbox called ${name} that megit can't find`);
+				if (!found) throw new DepotError("already_exists", `Depot has a sandbox called ${name} that maggot can't find`);
 				state.sandboxId = found.id;
 			}
 			await save();
@@ -375,9 +375,9 @@ export function newJobState(launch: JobLaunch, nowMs = Date.now()): JobState {
 }
 
 /** The runner's own folders, and what runner.* says about the machine. */
-export const RUNNER_TEMP = "/tmp/megit-user/temp";
-export const RUNNER_TOOL_CACHE = "/tmp/megit-user/tool-cache";
-const RUNNER_CONTEXT = { os: "Linux", arch: "X64", name: "megit", environment: "self-hosted", temp: RUNNER_TEMP, tool_cache: RUNNER_TOOL_CACHE };
+export const RUNNER_TEMP = "/tmp/maggot-user/temp";
+export const RUNNER_TOOL_CACHE = "/tmp/maggot-user/tool-cache";
+const RUNNER_CONTEXT = { os: "Linux", arch: "X64", name: "maggot", environment: "self-hosted", temp: RUNNER_TEMP, tool_cache: RUNNER_TOOL_CACHE };
 
 /** Outputs a step may leave, in total: enough for paths and versions, not for files. */
 const MAX_OUTPUT_BYTES = 64 * 1024;
@@ -552,7 +552,7 @@ export class JobRunner {
 	private async stop(reason: "cancelled" | "timeout", hard: boolean) {
 		const { process } = this.state;
 		const id = this.state.phase === "setup" ? (this.state.setupStage === "actions" ? ACTIONS_ID : SETUP_ID) : String(this.state.step);
-		await this.machine.sandbox(this.state).exec(["sh", "-c", KILL_SCRIPT], { env: { MEGIT_ID: id, MEGIT_SIGNAL: hard ? "KILL" : "TERM" }, root: true });
+		await this.machine.sandbox(this.state).exec(["sh", "-c", KILL_SCRIPT], { env: { MAGGOT_ID: id, MAGGOT_SIGNAL: hard ? "KILL" : "TERM" }, root: true });
 		process.stopping = { reason, at: process.stopping?.at ?? Date.now(), hard };
 	}
 
@@ -576,7 +576,7 @@ export class JobRunner {
 			const mask = maskFile(maskFor);
 			if (mask) await sandbox.writeFile(inboxMaskPath(id, attempt), mask);
 			await sandbox.writeFile(inboxPath(id, attempt), file);
-			const env = { MEGIT_ID: id, MEGIT_ATTEMPT: String(attempt), MEGIT_INTERPRETER: interpreter, MEGIT_AS_USER: asUser ? "1" : "0" };
+			const env = { MAGGOT_ID: id, MAGGOT_ATTEMPT: String(attempt), MAGGOT_INTERPRETER: interpreter, MAGGOT_AS_USER: asUser ? "1" : "0" };
 			const result = await sandbox.exec(["sh", "-c", LAUNCH_SCRIPT], { env, root, detached: true });
 			if (result.exitCode !== 0) throw new Error(`The step couldn't start: ${(result.stderr || result.stdout).trim().slice(0, 500)}`);
 			p.launched = true;
@@ -591,7 +591,7 @@ export class JobRunner {
 		const decoder = new TextDecoder();
 		for (let read = 0; read < READS_PER_TICK; read++) {
 			const max = p.truncated ? 0 : Math.min(POLL_BYTES, MAX_STEP_LOG - p.offset);
-			const out = await sandbox.exec(["sh", "-c", POLL_SCRIPT], { env: { MEGIT_ID: id, MEGIT_OFFSET: String(p.offset), MEGIT_MAX: String(max) }, root });
+			const out = await sandbox.exec(["sh", "-c", POLL_SCRIPT], { env: { MAGGOT_ID: id, MAGGOT_OFFSET: String(p.offset), MAGGOT_MAX: String(max) }, root });
 			if (out.exitCode !== 0) throw new ScriptOutputError(`Checking on the step failed (exit code ${out.exitCode}): ${out.stderr.trim().slice(0, 300)}`);
 			const poll = parsePoll(out.stdout);
 			if (poll.state === "missing") throw new MachineLost("The machine running the job was replaced, and the step with it");
@@ -733,7 +733,7 @@ export class JobRunner {
 		const out = new Map<string, string>();
 		const calls = hashFileCalls(nodes, scope);
 		for (const patterns of calls) {
-			const result = await this.machine.sandbox(this.state).exec(["bash", "-c", HASH_SCRIPT], { env: { MEGIT_WORKSPACE: WORKSPACE, MEGIT_PATTERNS: patterns.join("\n") }, root: true });
+			const result = await this.machine.sandbox(this.state).exec(["bash", "-c", HASH_SCRIPT], { env: { MAGGOT_WORKSPACE: WORKSPACE, MAGGOT_PATTERNS: patterns.join("\n") }, root: true });
 			if (result.exitCode !== 0) throw new ExpressionError(`hashFiles(${patterns.map((p) => `'${p}'`).join(", ")}) failed: ${result.stderr.trim().slice(0, 300)}`);
 			out.set(JSON.stringify(patterns), parseHashOutput(result.stdout));
 		}
@@ -953,7 +953,7 @@ export class JobRunner {
 		const sandbox = this.machine.sandbox(state);
 		const id = String(state.step);
 		// The command prints only sizes; the content (which may hold secrets) comes back as files.
-		const result = await sandbox.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MEGIT_ID: id }, root: true });
+		const result = await sandbox.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MAGGOT_ID: id }, root: true });
 		if (result.exitCode !== 0) throw new ScriptOutputError(`Collecting $GITHUB_ENV failed (exit code ${result.exitCode}): ${result.stderr.trim().slice(0, 300)}`);
 		const sizes = parseCollectSizes(result.stdout);
 		const files = await Promise.all(COLLECTED.map((which) => sandbox.readFile(collectedPath(id, which))));

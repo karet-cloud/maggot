@@ -7,7 +7,7 @@ import { cx, Panel } from "./ui.tsx";
 import { repoParams } from "../lib/api.ts";
 
 type Layout = "unified" | "split";
-const LAYOUT_KEY = "megit.diff.layout";
+const LAYOUT_KEY = "maggot.diff.layout";
 /** Files with more changed lines than this start collapsed. */
 const COLLAPSE_ABOVE = 400;
 

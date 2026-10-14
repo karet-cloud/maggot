@@ -18,15 +18,15 @@ import type { StepSpec } from "./workflow.ts";
 
 export const WORKSPACE = "/workspace";
 /** Root's: locks, logs, exit codes, masks, and the checkout's script. */
-export const STATE_DIR = "/tmp/megit";
+export const STATE_DIR = "/tmp/maggot";
 /** The steps' user's: their scripts and the $GITHUB_* files. */
-export const USER_DIR = "/tmp/megit-user";
+export const USER_DIR = "/tmp/maggot-user";
 /**
  * Where scripts and masks are written (by Sandbox.writeFile, as whichever user the provider writes
  * files as) before a launch takes them. Each try at a launch writes its own files, so a slow launch
  * from an earlier try can never take a file that's being written again.
  */
-export const INBOX_DIR = "/tmp/megit-inbox";
+export const INBOX_DIR = "/tmp/maggot-inbox";
 
 /** Where a process's script waits for its launch, for one try (`attempt`). */
 export const inboxPath = (id: string, attempt: number) => `${INBOX_DIR}/step-${id}.${attempt}.sh`;
@@ -94,7 +94,7 @@ const OWNER = `owner="\${SUDO_UID:-$(id -u)}:\${SUDO_GID:-$(id -g)}"`;
  * directory) is deleted when the checkout ends.
  */
 export function checkoutFile(c: { url: string; auth: string; ref: string; sha: string; depth: number }): string {
-	return `${exports({ MEGIT_CLONE_URL: c.url, MEGIT_CLONE_AUTH: c.auth, MEGIT_REF: c.ref, MEGIT_SHA: c.sha, MEGIT_DEPTH: String(c.depth) }).join("\n")}
+	return `${exports({ MAGGOT_CLONE_URL: c.url, MAGGOT_CLONE_AUTH: c.auth, MAGGOT_REF: c.ref, MAGGOT_SHA: c.sha, MAGGOT_DEPTH: String(c.depth) }).join("\n")}
 ${OWNER}
 # git checks the commit out; curl fetches actions, caches and artifacts.
 if ! command -v git >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
@@ -111,26 +111,26 @@ git --version
 mkdir -p ${WORKSPACE}
 cd ${WORKSPACE}
 git init -q
-git remote add origin "$MEGIT_CLONE_URL" 2>/dev/null || git remote set-url origin "$MEGIT_CLONE_URL"
-export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $MEGIT_CLONE_AUTH"
-target="+$MEGIT_REF:refs/remotes/origin/checkout"
-echo "Fetching $MEGIT_REF from $MEGIT_CLONE_URL"
-if [ "$MEGIT_DEPTH" = 0 ]; then
+git remote add origin "$MAGGOT_CLONE_URL" 2>/dev/null || git remote set-url origin "$MAGGOT_CLONE_URL"
+export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraHeader GIT_CONFIG_VALUE_0="Authorization: Basic $MAGGOT_CLONE_AUTH"
+target="+$MAGGOT_REF:refs/remotes/origin/checkout"
+echo "Fetching $MAGGOT_REF from $MAGGOT_CLONE_URL"
+if [ "$MAGGOT_DEPTH" = 0 ]; then
   git fetch -q --no-tags --prune origin "$target"
 else
-  git fetch -q --no-tags --prune --depth="$MEGIT_DEPTH" origin "$target"
+  git fetch -q --no-tags --prune --depth="$MAGGOT_DEPTH" origin "$target"
   # The branch may have moved past the commit since the run started: dig further back for it.
-  if ! git cat-file -e "$MEGIT_SHA^{commit}" 2>/dev/null; then
+  if ! git cat-file -e "$MAGGOT_SHA^{commit}" 2>/dev/null; then
     git fetch -q --no-tags --unshallow origin "$target" || true
   fi
 fi
-if ! git cat-file -e "$MEGIT_SHA^{commit}" 2>/dev/null; then
-  echo "$MEGIT_SHA isn't on $MEGIT_REF any more (was it force-pushed?)" >&2
+if ! git cat-file -e "$MAGGOT_SHA^{commit}" 2>/dev/null; then
+  echo "$MAGGOT_SHA isn't on $MAGGOT_REF any more (was it force-pushed?)" >&2
   exit 1
 fi
-case "$MEGIT_REF" in
-  refs/heads/*) git checkout -q -B "\${MEGIT_REF#refs/heads/}" "$MEGIT_SHA" ;;
-  *) git -c advice.detachedHead=false checkout -q --detach "$MEGIT_SHA" ;;
+case "$MAGGOT_REF" in
+  refs/heads/*) git checkout -q -B "\${MAGGOT_REF#refs/heads/}" "$MAGGOT_SHA" ;;
+  *) git -c advice.detachedHead=false checkout -q --detach "$MAGGOT_SHA" ;;
 esac
 echo "Checked out $(git log -1 --format='%h %s')"
 if [ "$(id -u)" = 0 ]; then chown -R "$owner" ${WORKSPACE}; fi
@@ -208,24 +208,24 @@ mkdir -p ${STATE_DIR} ${USER_DIR}
 chmod 700 ${STATE_DIR}
 own "$owner" ${USER_DIR}
 chmod 711 ${USER_DIR}
-f=${STATE_DIR}/step-$MEGIT_ID
-in=${INBOX_DIR}/step-$MEGIT_ID.$MEGIT_ATTEMPT
-discard() { rm -f ${INBOX_DIR}/step-$MEGIT_ID.*; }
+f=${STATE_DIR}/step-$MAGGOT_ID
+in=${INBOX_DIR}/step-$MAGGOT_ID.$MAGGOT_ATTEMPT
+discard() { rm -f ${INBOX_DIR}/step-$MAGGOT_ID.*; }
 if [ -d "$f.lock" ]; then discard; exit 0; fi
 if ! mkdir "$f.lock"; then
   [ -d "$f.lock" ] && { discard; exit 0; }
-  echo "Couldn't take the lock for step $MEGIT_ID" >&2
+  echo "Couldn't take the lock for step $MAGGOT_ID" >&2
   exit 1
 fi
 broken() { echo "$1" > "$f.log" || true; discard; echo 126 > "$f.exit.tmp" && mv "$f.exit.tmp" "$f.exit"; echo "$1" >&2; exit 1; }
 [ -f "$in.sh" ] || broken "The step's script never reached the machine"
 user=""
-if [ "$MEGIT_AS_USER" = 1 ] && [ "\${SUDO_UID:-0}" != 0 ]; then
+if [ "$MAGGOT_AS_USER" = 1 ] && [ "\${SUDO_UID:-0}" != 0 ]; then
   command -v setpriv >/dev/null 2>&1 || broken "setpriv (util-linux) is needed to run steps as the machine's user"
   user="$SUDO_UID:\${SUDO_GID:-$SUDO_UID}"
   printf '%s\\n' "$user" > "$f.user"
 fi
-if [ -n "$user" ]; then script=${USER_DIR}/step-$MEGIT_ID.sh; else script="$f.sh"; fi
+if [ -n "$user" ]; then script=${USER_DIR}/step-$MAGGOT_ID.sh; else script="$f.sh"; fi
 mv "$in.sh" "$script" || broken "Couldn't move the step's script into place"
 if [ -n "$user" ]; then own "$user" "$script"; else own 0:0 "$script"; fi
 chmod 600 "$script"
@@ -246,15 +246,15 @@ for d in ${TEMP_DIR} ${TOOL_CACHE}; do
 done
 umask 022
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh "$f.wrap" "$f" "$script" $MEGIT_INTERPRETER > /dev/null 2>&1 < /dev/null &
+  setsid sh "$f.wrap" "$f" "$script" $MAGGOT_INTERPRETER > /dev/null 2>&1 < /dev/null &
 else
-  nohup sh "$f.wrap" "$f" "$script" $MEGIT_INTERPRETER > /dev/null 2>&1 < /dev/null &
+  nohup sh "$f.wrap" "$f" "$script" $MAGGOT_INTERPRETER > /dev/null 2>&1 < /dev/null &
 fi
 echo $! > "$f.pid"
 `;
 
 /**
- * Prints the step's state, the log's size, then up to $MEGIT_MAX bytes of the log from $MEGIT_OFFSET
+ * Prints the step's state, the log's size, then up to $MAGGOT_MAX bytes of the log from $MAGGOT_OFFSET
  * as base64, so byte counts stay exact even when a slice ends inside a UTF-8 character. The state is:
  * - its exit code, once it has ended (written only after the log is complete, and read before it);
  * - `running`, while its wrapper lives (or for a minute after the lock, before the pid is written);
@@ -262,7 +262,7 @@ echo $! > "$f.pid"
  * - `pending`, if its script is waiting for a launch that hasn't run yet (Depot's start detached);
  * - `missing`, if the machine has no trace of it, as after it was replaced.
  */
-export const POLL_SCRIPT = `f=${STATE_DIR}/step-$MEGIT_ID
+export const POLL_SCRIPT = `f=${STATE_DIR}/step-$MAGGOT_ID
 if [ -e "$f.exit" ]; then
   head -n 1 "$f.exit"
 elif [ -d "$f.lock" ]; then
@@ -272,11 +272,11 @@ elif [ -d "$f.lock" ]; then
   elif [ -z "$pid" ] && [ -n "$(find "$f.lock" -maxdepth 0 -mmin -1 2>/dev/null)" ]; then echo running
   else echo lost
   fi
-elif ls ${INBOX_DIR}/step-$MEGIT_ID.*.sh > /dev/null 2>&1; then echo pending
+elif ls ${INBOX_DIR}/step-$MAGGOT_ID.*.sh > /dev/null 2>&1; then echo pending
 else echo missing
 fi
 wc -c < "$f.log" 2>/dev/null || echo 0
-if [ "$MEGIT_MAX" -gt 0 ]; then tail -c +$((MEGIT_OFFSET + 1)) "$f.log" 2>/dev/null | head -c "$MEGIT_MAX" | base64 | tr -d '\\n'; fi
+if [ "$MAGGOT_MAX" -gt 0 ]; then tail -c +$((MAGGOT_OFFSET + 1)) "$f.log" 2>/dev/null | head -c "$MAGGOT_MAX" | base64 | tr -d '\\n'; fi
 echo
 `;
 
@@ -284,12 +284,12 @@ echo
  * Signals the step's process group: TERM first; KILL later, which also takes the wrapper, so it records
  * the exit code itself (137, as a shell reports SIGKILL).
  */
-export const KILL_SCRIPT = `f=${STATE_DIR}/step-$MEGIT_ID
+export const KILL_SCRIPT = `f=${STATE_DIR}/step-$MAGGOT_ID
 [ -e "$f.exit" ] && exit 0
 pid=$(cat "$f.pid" 2>/dev/null) || exit 0
 [ -n "$pid" ] || exit 0
-kill -"$MEGIT_SIGNAL" "-$pid" 2>/dev/null || kill -"$MEGIT_SIGNAL" "$pid" 2>/dev/null || true
-if [ "$MEGIT_SIGNAL" = KILL ]; then
+kill -"$MAGGOT_SIGNAL" "-$pid" 2>/dev/null || kill -"$MAGGOT_SIGNAL" "$pid" 2>/dev/null || true
+if [ "$MAGGOT_SIGNAL" = KILL ]; then
   sleep 1
   [ -e "$f.exit" ] || { echo 137 > "$f.exit.tmp" && mv "$f.exit.tmp" "$f.exit"; }
 fi
@@ -300,14 +300,14 @@ exit 0
 export const COLLECT_BYTES = 64 * 1024;
 
 /**
- * After step $MEGIT_ID: copies up to COLLECT_BYTES of $GITHUB_ENV and $GITHUB_PATH to files of their
+ * After step $MAGGOT_ID: copies up to COLLECT_BYTES of $GITHUB_ENV and $GITHUB_PATH to files of their
  * own (collectedPath), to be read back with Sandbox.readFile, then empties both for the next step.
  * Prints only the two files' full sizes, never their content (which may hold secrets). Run again for the
  * same step (an answer lost), it prints the same sizes without copying again.
  */
 export const COLLECT_SCRIPT = `set -e
 ${OWNER}
-out=${USER_DIR}/collect-$MEGIT_ID
+out=${USER_DIR}/collect-$MAGGOT_ID
 if [ ! -e "$out.sizes" ]; then
   umask 077
   rm -f "$out.sizes.tmp"
@@ -549,28 +549,28 @@ export class LogMasker {
 // ── Expressions, actions, caches and artifacts ───────────────────────────────
 
 /**
- * hashFiles(): the files under the workspace that $MEGIT_PATTERNS (one per line; `!` excludes) match,
+ * hashFiles(): the files under the workspace that $MAGGOT_PATTERNS (one per line; `!` excludes) match,
  * each hashed, then the list hashed: one SHA-256, or an empty line when nothing matches. Run as root
  * with exec; it prints only the hash.
  */
 export const HASH_SCRIPT = `set -euo pipefail
-cd "$MEGIT_WORKSPACE" 2>/dev/null || { echo; exit 0; }
+cd "$MAGGOT_WORKSPACE" 2>/dev/null || { echo; exit 0; }
 shopt -s globstar nullglob
 declare -A keep=()
 # Globs expand into whole lines (names with spaces stay whole).
 IFS=$'\\n'
-# Read line by line: an unquoted $MEGIT_PATTERNS would be globbed before the loop sees it.
+# Read line by line: an unquoted $MAGGOT_PATTERNS would be globbed before the loop sees it.
 while IFS= read -r p; do
   [ -z "$p" ] && continue
   neg=0
   case "$p" in '!'*) neg=1; p="\${p:1}" ;; esac
   p="\${p#./}"
-  case "$p" in "$MEGIT_WORKSPACE"/*) p="\${p#"$MEGIT_WORKSPACE"/}" ;; /*) continue ;; esac
+  case "$p" in "$MAGGOT_WORKSPACE"/*) p="\${p#"$MAGGOT_WORKSPACE"/}" ;; /*) continue ;; esac
   for f in $p; do
     [ -f "$f" ] || continue
     if [ "$neg" = 1 ]; then unset 'keep[$f]'; else keep[$f]=1; fi
   done
-done <<< "$MEGIT_PATTERNS"
+done <<< "$MAGGOT_PATTERNS"
 if [ \${#keep[@]} -eq 0 ]; then echo; exit 0; fi
 # As GitHub does: each file's SHA-256 as bytes, in order, hashed together. Names pass NUL-separated (any name
 # works), and files are read from stdin, so sha256sum never escapes an unusual name.
@@ -590,7 +590,7 @@ export function parseHashOutput(stdout: string): string {
 const NODE_VERSION = "24";
 
 /**
- * Setup's second half, run as the steps' user: downloads the actions the steps use (from megit, which
+ * Setup's second half, run as the steps' user: downloads the actions the steps use (from maggot, which
  * keeps a copy of each in R2) and makes sure Node.js 20 or later is at hand for JavaScript actions.
  * Null when there's nothing to do.
  */
@@ -600,13 +600,13 @@ export function prepareActionsFile(actions: ResolvedAction[], api: { url: string
 	const node = actions.some((a) => a.meta.runs.using === "node");
 	if (downloads.size === 0 && !node) return null;
 	const lines = [
-		...exports({ MEGIT_API: api.url, MEGIT_TOKEN: api.token }),
+		...exports({ MAGGOT_API: api.url, MAGGOT_TOKEN: api.token }),
 		`mkdir -p ${ACTIONS_DIR}`,
 		`fetch_action() {
   [ -d "$4" ] && return 0
   echo "Downloading $1/$2@\${3:0:7}"
   rm -rf "$4.tmp" && mkdir -p "$4.tmp"
-  curl -fsSL --retry 3 -H "Authorization: Bearer $MEGIT_TOKEN" "$MEGIT_API/api/ci/actions/$1/$2/$3" | tar -xzf - -C "$4.tmp" --strip-components=1
+  curl -fsSL --retry 3 -H "Authorization: Bearer $MAGGOT_TOKEN" "$MAGGOT_API/api/ci/actions/$1/$2/$3" | tar -xzf - -C "$4.tmp" --strip-components=1
   mv "$4.tmp" "$4"
 }`,
 		...[...downloads].map(([dir, a]) => `fetch_action ${shellQuote(a.owner)} ${shellQuote(a.repo)} ${shellQuote(a.sha)} ${shellQuote(dir)}`),
@@ -665,10 +665,10 @@ export function actionStepFile(o: {
 /** The R2-backed caches and artifacts: how big a piece of an upload is (R2 multipart parts, under the Workers request limit). */
 export const UPLOAD_PART_BYTES = 64 * 1024 * 1024;
 
-/** Shell helpers the cache and artifact steps share: matching paths, and talking to megit's API. */
-const STORAGE_HELPERS = `api() { curl -sS --retry 3 -H "Authorization: Bearer $MEGIT_TOKEN" "$@"; }
-out() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
-keep() { printf '%s<<MEGIT_EOF\\n%s\\nMEGIT_EOF\\n' "$1" "$2" >> "$GITHUB_STATE"; }
+/** Shell helpers the cache and artifact steps share: matching paths, and talking to maggot's API. */
+const STORAGE_HELPERS = `api() { curl -sS --retry 3 -H "Authorization: Bearer $MAGGOT_TOKEN" "$@"; }
+out() { printf '%s<<MAGGOT_EOF\\n%s\\nMAGGOT_EOF\\n' "$1" "$2" >> "$GITHUB_OUTPUT"; }
+keep() { printf '%s<<MAGGOT_EOF\\n%s\\nMAGGOT_EOF\\n' "$1" "$2" >> "$GITHUB_STATE"; }
 # The files (and empty folders) in folder $1; hidden ones only when $2 is "hidden".
 list_dir() {
   if [ "$2" = hidden ]; then find "$1" \\( -type f -o -type l -o -type d -empty \\) -print0
@@ -706,31 +706,31 @@ matches() {
 # Uploads the file $1 in parts to the upload $2 (cache or artifact $3), then finishes it.
 upload() {
   local dir n=0 part code
-  dir=$(mktemp -d "$RUNNER_TEMP/megit-parts.XXXXXX")
+  dir=$(mktemp -d "$RUNNER_TEMP/maggot-parts.XXXXXX")
   split -b ${UPLOAD_PART_BYTES} -a 4 -d "$1" "$dir/part-"
   for part in "$dir"/part-*; do
     n=$((n + 1))
-    code=$(api -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$part" -H 'content-type: application/octet-stream' "$MEGIT_API/api/ci/$3/$2/parts/$n")
+    code=$(api -o /dev/null -w '%{http_code}' -X PUT --data-binary @"$part" -H 'content-type: application/octet-stream' "$MAGGOT_API/api/ci/$3/$2/parts/$n")
     [ "$code" = 200 ] || { echo "Uploading part $n failed (HTTP $code)" >&2; rm -rf "$dir"; return 1; }
   done
   rm -rf "$dir"
-  code=$(api -o "$RUNNER_TEMP/megit-commit" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/$3/$2/commit")
-  [ "$code" = 200 ] || { echo "Finishing the upload failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-commit")" >&2; return 1; }
+  code=$(api -o "$RUNNER_TEMP/maggot-commit" -w '%{http_code}' -X POST "$MAGGOT_API/api/ci/$3/$2/commit")
+  [ "$code" = 200 ] || { echo "Finishing the upload failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/maggot-commit")" >&2; return 1; }
 }
-cache_version() { printf '%s\\n%s\\n' "$1" "megit-tar-gz-1" | sha256sum | cut -c1-64; }
+cache_version() { printf '%s\\n%s\\n' "$1" "maggot-tar-gz-1" | sha256sum | cut -c1-64; }
 `;
 
-const CACHE_RESTORE = `key="$MEGIT_IN_KEY"
-version=$(cache_version "$MEGIT_IN_PATH")
-keys=$(printf '%s\\n%s' "$key" "\${MEGIT_IN_RESTORE_KEYS:-}")
+const CACHE_RESTORE = `key="$MAGGOT_IN_KEY"
+version=$(cache_version "$MAGGOT_IN_PATH")
+keys=$(printf '%s\\n%s' "$key" "\${MAGGOT_IN_RESTORE_KEYS:-}")
 keep key "$key"
 keep version "$version"
 out cache-primary-key "$key"
-code=$(api -o "$RUNNER_TEMP/megit-cache" -w '%{http_code}' -G "$MEGIT_API/api/ci/caches" --data-urlencode "keys=$keys" --data-urlencode "version=$version" || echo 000)
+code=$(api -o "$RUNNER_TEMP/maggot-cache" -w '%{http_code}' -G "$MAGGOT_API/api/ci/caches" --data-urlencode "keys=$keys" --data-urlencode "version=$version" || echo 000)
 if [ "$code" = 204 ]; then
   echo "No cache was found for $key"
   out cache-hit false
-  [ "\${MEGIT_IN_FAIL_ON_CACHE_MISS:-false}" = true ] && { echo "fail-on-cache-miss is set, so the step fails" >&2; exit 1; }
+  [ "\${MAGGOT_IN_FAIL_ON_CACHE_MISS:-false}" = true ] && { echo "fail-on-cache-miss is set, so the step fails" >&2; exit 1; }
   exit 0
 fi
 if [ "$code" != 200 ]; then
@@ -738,17 +738,17 @@ if [ "$code" != 200 ]; then
   out cache-hit false
   exit 0
 fi
-IFS=$'\\t' read -r id matched size < "$RUNNER_TEMP/megit-cache"
+IFS=$'\\t' read -r id matched size < "$RUNNER_TEMP/maggot-cache"
 out cache-matched-key "$matched"
 exact=false; [ "$matched" = "$key" ] && exact=true
 out cache-hit "$exact"
 keep exact "$exact"
-if [ "\${MEGIT_IN_LOOKUP_ONLY:-false}" = true ]; then
+if [ "\${MAGGOT_IN_LOOKUP_ONLY:-false}" = true ]; then
   echo "A cache was found for $matched (not downloaded: lookup-only)"
   exit 0
 fi
 echo "Restoring the cache for $matched ($size bytes)"
-if ! api -f -L "$MEGIT_API/api/ci/caches/$id" | tar -xzf - -P; then
+if ! api -f -L "$MAGGOT_API/api/ci/caches/$id" | tar -xzf - -P; then
   echo "Warning: restoring the cache failed, so the step goes on without it"
   out cache-hit false
   keep exact false
@@ -757,39 +757,39 @@ fi
 echo "Restored the cache for $matched"
 `;
 
-const CACHE_SAVE = `key="\${MEGIT_SAVED_KEY:-$MEGIT_IN_KEY}"
-version=$(cache_version "$MEGIT_IN_PATH")
-list="$RUNNER_TEMP/megit-cache-files"
-matches "$MEGIT_IN_PATH" hidden > "$list"
+const CACHE_SAVE = `key="\${MAGGOT_SAVED_KEY:-$MAGGOT_IN_KEY}"
+version=$(cache_version "$MAGGOT_IN_PATH")
+list="$RUNNER_TEMP/maggot-cache-files"
+matches "$MAGGOT_IN_PATH" hidden > "$list"
 if [ ! -s "$list" ]; then
   echo "Warning: nothing matched the cache's path, so nothing was saved"
   exit 0
 fi
-archive="$RUNNER_TEMP/megit-cache.tar.gz"
+archive="$RUNNER_TEMP/maggot-cache.tar.gz"
 tar -czf "$archive" -P --null --verbatim-files-from -T "$list"
 size=$(wc -c < "$archive" | tr -d ' ')
-code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/caches" --data-urlencode "key=$key" --data-urlencode "version=$version" --data-urlencode "size=$size" || echo 000)
+code=$(api -o "$RUNNER_TEMP/maggot-reserve" -w '%{http_code}' -X POST "$MAGGOT_API/api/ci/caches" --data-urlencode "key=$key" --data-urlencode "version=$version" --data-urlencode "size=$size" || echo 000)
 if [ "$code" = 409 ]; then
   echo "A cache for $key already exists, so it isn't saved again"
   rm -f "$archive"
   exit 0
 fi
 if [ "$code" != 201 ]; then
-  echo "Warning: saving the cache failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-reserve")"
+  echo "Warning: saving the cache failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/maggot-reserve")"
   rm -f "$archive"
   exit 0
 fi
-read -r id < "$RUNNER_TEMP/megit-reserve"
+read -r id < "$RUNNER_TEMP/maggot-reserve"
 if upload "$archive" "$id" caches; then echo "Saved the cache for $key ($size bytes)"; else echo "Warning: saving the cache failed"; fi
 rm -f "$archive"
 `;
 
-const UPLOAD_ARTIFACT = `name="\${MEGIT_IN_NAME:-artifact}"
-list="$RUNNER_TEMP/megit-artifact-files"
-hidden=""; [ "\${MEGIT_IN_INCLUDE_HIDDEN_FILES:-false}" = true ] && hidden=hidden
-matches "$MEGIT_IN_PATH" $hidden > "$list"
+const UPLOAD_ARTIFACT = `name="\${MAGGOT_IN_NAME:-artifact}"
+list="$RUNNER_TEMP/maggot-artifact-files"
+hidden=""; [ "\${MAGGOT_IN_INCLUDE_HIDDEN_FILES:-false}" = true ] && hidden=hidden
+matches "$MAGGOT_IN_PATH" $hidden > "$list"
 if [ ! -s "$list" ]; then
-  case "\${MEGIT_IN_IF_NO_FILES_FOUND:-warn}" in
+  case "\${MAGGOT_IN_IF_NO_FILES_FOUND:-warn}" in
     error) echo "No files were found for the path given, so there's nothing to upload" >&2; exit 1 ;;
     ignore) echo "No files were found for the path given; nothing was uploaded"; exit 0 ;;
     *) echo "Warning: no files were found for the path given, so there's nothing to upload"; exit 0 ;;
@@ -799,19 +799,19 @@ fi
 IFS= read -r -d '' first < "$list" || true
 root=$(dirname -- "$first")
 while IFS= read -r -d '' f; do while [ "$root" != / ] && case "$f" in "$root"/*) false ;; *) true ;; esac; do root=$(dirname -- "$root"); done; done < "$list"
-rel="$RUNNER_TEMP/megit-artifact-rel"
+rel="$RUNNER_TEMP/maggot-artifact-rel"
 prefix="\${root%/}/"
 while IFS= read -r -d '' f; do printf '%s\\0' "\${f#"$prefix"}"; done < "$list" > "$rel"
-archive="$RUNNER_TEMP/megit-artifact.tar.gz"
+archive="$RUNNER_TEMP/maggot-artifact.tar.gz"
 tar -czf "$archive" -C "$root" --null --verbatim-files-from -T "$rel"
 size=$(wc -c < "$archive" | tr -d ' ')
 count=$(tr -cd '\\0' < "$list" | wc -c | tr -d ' ')
-code=$(api -o "$RUNNER_TEMP/megit-reserve" -w '%{http_code}' -X POST "$MEGIT_API/api/ci/artifacts" --data-urlencode "name=$name" --data-urlencode "size=$size" --data-urlencode "retention-days=\${MEGIT_IN_RETENTION_DAYS:-}" --data-urlencode "overwrite=\${MEGIT_IN_OVERWRITE:-false}" || echo 000)
+code=$(api -o "$RUNNER_TEMP/maggot-reserve" -w '%{http_code}' -X POST "$MAGGOT_API/api/ci/artifacts" --data-urlencode "name=$name" --data-urlencode "size=$size" --data-urlencode "retention-days=\${MAGGOT_IN_RETENTION_DAYS:-}" --data-urlencode "overwrite=\${MAGGOT_IN_OVERWRITE:-false}" || echo 000)
 if [ "$code" != 201 ]; then
-  echo "Uploading the artifact failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/megit-reserve")" >&2
+  echo "Uploading the artifact failed (HTTP $code): $(head -c 300 "$RUNNER_TEMP/maggot-reserve")" >&2
   exit 1
 fi
-read -r id < "$RUNNER_TEMP/megit-reserve"
+read -r id < "$RUNNER_TEMP/maggot-reserve"
 upload "$archive" "$id" artifacts || exit 1
 rm -f "$archive"
 echo "Uploaded $name: $count files, $size bytes compressed"
@@ -819,25 +819,25 @@ out artifact-id "$id"
 out artifact-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 `;
 
-const DOWNLOAD_ARTIFACT = `dest="\${MEGIT_IN_PATH:-$GITHUB_WORKSPACE}"
+const DOWNLOAD_ARTIFACT = `dest="\${MAGGOT_IN_PATH:-$GITHUB_WORKSPACE}"
 case "$dest" in '~') dest="$HOME" ;; '~/'*) dest="$HOME/\${dest:2}" ;; /*) ;; *) dest="$GITHUB_WORKSPACE/$dest" ;; esac
-code=$(api -o "$RUNNER_TEMP/megit-artifacts" -w '%{http_code}' "$MEGIT_API/api/ci/artifacts" || echo 000)
+code=$(api -o "$RUNNER_TEMP/maggot-artifacts" -w '%{http_code}' "$MAGGOT_API/api/ci/artifacts" || echo 000)
 [ "$code" = 200 ] || { echo "Listing the run's artifacts failed (HTTP $code)" >&2; exit 1; }
 found=0
 while IFS=$'\\t' read -r id name size; do
   [ -z "$id" ] && continue
-  if [ -n "\${MEGIT_IN_NAME:-}" ]; then [ "$name" = "$MEGIT_IN_NAME" ] || continue
-  elif [ -n "\${MEGIT_IN_PATTERN:-}" ]; then [[ "$name" == $MEGIT_IN_PATTERN ]] || continue
+  if [ -n "\${MAGGOT_IN_NAME:-}" ]; then [ "$name" = "$MAGGOT_IN_NAME" ] || continue
+  elif [ -n "\${MAGGOT_IN_PATTERN:-}" ]; then [[ "$name" == $MAGGOT_IN_PATTERN ]] || continue
   fi
   target="$dest"
-  if [ -z "\${MEGIT_IN_NAME:-}" ] && [ "\${MEGIT_IN_MERGE_MULTIPLE:-false}" != true ]; then target="$dest/$name"; fi
+  if [ -z "\${MAGGOT_IN_NAME:-}" ] && [ "\${MAGGOT_IN_MERGE_MULTIPLE:-false}" != true ]; then target="$dest/$name"; fi
   mkdir -p "$target"
   echo "Downloading $name ($size bytes) into $target"
-  api -f -L "$MEGIT_API/api/ci/artifacts/$id" | tar -xzf - -C "$target" || { echo "Downloading $name failed" >&2; exit 1; }
+  api -f -L "$MAGGOT_API/api/ci/artifacts/$id" | tar -xzf - -C "$target" || { echo "Downloading $name failed" >&2; exit 1; }
   found=$((found + 1))
-done < "$RUNNER_TEMP/megit-artifacts"
+done < "$RUNNER_TEMP/maggot-artifacts"
 if [ "$found" = 0 ]; then
-  if [ -n "\${MEGIT_IN_NAME:-}" ]; then echo "This run has no artifact called $MEGIT_IN_NAME" >&2; exit 1; fi
+  if [ -n "\${MAGGOT_IN_NAME:-}" ]; then echo "This run has no artifact called $MAGGOT_IN_NAME" >&2; exit 1; fi
   echo "No artifacts matched"
 fi
 out download-path "$dest"
@@ -851,9 +851,9 @@ const BUILT_IN_SCRIPTS = {
 };
 
 /** The variable a built-in action's script reads an input from. */
-const builtInVariable = (name: string) => `MEGIT_IN_${name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
+const builtInVariable = (name: string) => `MAGGOT_IN_${name.replace(/[^A-Za-z0-9]/g, "_").toUpperCase()}`;
 
-/** The script of one of megit's own actions (cache, artifacts), with its inputs and megit's API. */
+/** The script of one of maggot's own actions (cache, artifacts), with its inputs and maggot's API. */
 export function builtInStepFile(
 	kind: keyof typeof BUILT_IN_SCRIPTS,
 	o: { env: Record<string, string>; path: string[]; inputs: Record<string, string>; api: { url: string; token: string }; github: Record<string, string>; saved: Record<string, string> },
@@ -862,10 +862,10 @@ export function builtInStepFile(
 		...o.env,
 		...STEP_FILES,
 		...Object.fromEntries(Object.entries(o.inputs).map(([k, v]) => [builtInVariable(k), v])),
-		MEGIT_API: o.api.url,
-		MEGIT_TOKEN: o.api.token,
+		MAGGOT_API: o.api.url,
+		MAGGOT_TOKEN: o.api.token,
 		GITHUB_WORKSPACE: WORKSPACE,
-		...(kind === "cache-save" && o.saved.key ? { MEGIT_SAVED_KEY: o.saved.key } : {}),
+		...(kind === "cache-save" && o.saved.key ? { MAGGOT_SAVED_KEY: o.saved.key } : {}),
 	};
 	const lines = exports(vars);
 	if (o.path.length) lines.push(`export PATH=${shellQuote(o.path.toReversed().join(":"))}:"$PATH"`);

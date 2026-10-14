@@ -35,10 +35,10 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	};
 	const principal = session.user.principal;
 	if (command.trim() === "") {
-		return fail(`Hi ${principal.username}! You've successfully authenticated, but megit doesn't provide shell access.`);
+		return fail(`Hi ${principal.username}! You've successfully authenticated, but maggot doesn't provide shell access.`);
 	}
 	const parsed = parseGitCommand(command);
-	if (!parsed) return fail("megit only runs git-upload-pack and git-receive-pack over SSH, for git fetch, clone and push.");
+	if (!parsed) return fail("maggot only runs git-upload-pack and git-receive-pack over SSH, for git fetch, clone and push.");
 	try {
 		await limit(env, `user:${principal.id}`, rules.git(policy(env)), "Too many git requests");
 	} catch (err) {
@@ -58,7 +58,7 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 	if (!pushing) {
 		// Protocol v1 fetches keep state between rounds of negotiation, which HTTP requests to storage can't.
 		if (!/(^|:)version=2(:|$)/.test(protocol)) {
-			return fail("ERROR: megit's SSH needs Git protocol version 2. Use git 2.26 or newer, or run: git config --global protocol.version 2");
+			return fail("ERROR: maggot's SSH needs Git protocol version 2. Use git 2.26 or newer, or run: git config --global protocol.version 2");
 		}
 		const headers = { "git-protocol": "version=2" };
 		const advertised = await upstreamFetch(upstream, "info/refs?service=git-upload-pack", { method: "GET", headers, signal: session.signal });

@@ -160,11 +160,11 @@ const BASH = "bash --noprofile --norc -eo pipefail";
 async function launch(box: LocalSandbox, id: string, script: string, opts: { write?: boolean; attempt?: number } = {}) {
 	const attempt = opts.attempt ?? 1;
 	if (opts.write !== false) await box.writeFile(inboxPath(id, attempt), script);
-	return box.exec(["sh", "-c", LAUNCH_SCRIPT], { env: { MEGIT_ID: id, MEGIT_ATTEMPT: String(attempt), MEGIT_INTERPRETER: BASH, MEGIT_AS_USER: "1" }, root: true });
+	return box.exec(["sh", "-c", LAUNCH_SCRIPT], { env: { MAGGOT_ID: id, MAGGOT_ATTEMPT: String(attempt), MAGGOT_INTERPRETER: BASH, MAGGOT_AS_USER: "1" }, root: true });
 }
 
 const poll = async (box: LocalSandbox, id: string, offset = 0, max = 1 << 20) =>
-	parsePoll((await box.exec(["sh", "-c", POLL_SCRIPT], { env: { MEGIT_ID: id, MEGIT_OFFSET: String(offset), MEGIT_MAX: String(max) } })).stdout);
+	parsePoll((await box.exec(["sh", "-c", POLL_SCRIPT], { env: { MAGGOT_ID: id, MAGGOT_OFFSET: String(offset), MAGGOT_MAX: String(max) } })).stdout);
 
 async function waitForExit(box: LocalSandbox, id: string) {
 	for (let i = 0; i < 200; i++) {
@@ -239,7 +239,7 @@ test("the kill script stops a step's whole process group", async () => {
 	const box = new LocalSandbox();
 	await launch(box, "1", "sleep 30 & sleep 30\n");
 	await new Promise((r) => setTimeout(r, 200));
-	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MEGIT_ID: "1", MEGIT_SIGNAL: "TERM" } });
+	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MAGGOT_ID: "1", MAGGOT_SIGNAL: "TERM" } });
 	assert.equal((await waitForExit(box, "1")).state, 143, "the wrapper outlives SIGTERM and records it");
 	const pid = (await box.exec(["cat", `${box.state}/step-1.pid`])).stdout.trim();
 	const alive = await box.exec(["sh", "-c", `ps -o pid= -g ${pid} | grep -v "^ *${pid}$" || true`]);
@@ -247,7 +247,7 @@ test("the kill script stops a step's whole process group", async () => {
 	// A hard kill of a step that ignores SIGTERM still settles it.
 	await launch(box, "2", "trap '' TERM; sleep 30\n");
 	await new Promise((r) => setTimeout(r, 200));
-	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MEGIT_ID: "2", MEGIT_SIGNAL: "KILL" } });
+	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MAGGOT_ID: "2", MAGGOT_SIGNAL: "KILL" } });
 	assert.equal((await waitForExit(box, "2")).state, 137);
 	await killOwnGroup(box, "2");
 });
@@ -259,7 +259,7 @@ test("the collect script copies $GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT and $G
 		"-c",
 		`mkdir -p ${box.user} && printf 'TOK=s3cr3t-value\\n' > ${box.user}/github-env && head -c ${COLLECT_BYTES + 5} /dev/zero | tr '\\0' 'x' > ${box.user}/github-path && printf 'dir=out\\n' > ${box.user}/github-output`,
 	]);
-	const out = (await box.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MEGIT_ID: "0" } })).stdout;
+	const out = (await box.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MAGGOT_ID: "0" } })).stdout;
 	assert.deepEqual(parseCollectSizes(out), [17, COLLECT_BYTES + 5, 8, 0]);
 	assert.equal(await box.readFile(collectedPath("0", "output")), "dir=out\n");
 	assert.equal(await box.readFile(collectedPath("0", "state")), "", "a file that wasn't there reads as empty");
@@ -268,7 +268,7 @@ test("the collect script copies $GITHUB_ENV, $GITHUB_PATH, $GITHUB_OUTPUT and $G
 	assert.equal((await box.readFile(collectedPath("0", "path"))).length, COLLECT_BYTES);
 	assert.equal(await box.readFile(`${box.user}/github-env`), "", "emptied for the next step");
 	// Run again for the same step (its answer lost): the same sizes, the copies untouched.
-	assert.equal((await box.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MEGIT_ID: "0" } })).stdout, out);
+	assert.equal((await box.exec(["sh", "-c", COLLECT_SCRIPT], { env: { MAGGOT_ID: "0" } })).stdout, out);
 	assert.equal(await box.readFile(collectedPath("0", "env")), "TOK=s3cr3t-value\n");
 });
 
@@ -299,7 +299,7 @@ test("a launch with a mask but no awk fails closed instead of logging secrets", 
 	// A PATH with sh and the basics, but no awk.
 	const bin = `${box.root}/bin`;
 	await box.exec(["sh", "-c", `mkdir -p ${bin} && for t in sh mkdir rm mv chmod cat printf id setsid head tail wc base64 tr find ls kill; do p=$(command -v $t) && ln -s "$p" ${bin}/$t; done`]);
-	const result = await box.exec(["sh", "-c", LAUNCH_SCRIPT], { env: { PATH: bin, MEGIT_ID: "9", MEGIT_ATTEMPT: "1", MEGIT_INTERPRETER: BASH, MEGIT_AS_USER: "1" }, root: true });
+	const result = await box.exec(["sh", "-c", LAUNCH_SCRIPT], { env: { PATH: bin, MAGGOT_ID: "9", MAGGOT_ATTEMPT: "1", MAGGOT_INTERPRETER: BASH, MAGGOT_AS_USER: "1" }, root: true });
 	assert.notEqual(result.exitCode, 0);
 	const p = await waitForExit(box, "9");
 	assert.equal(p.state, 126);
@@ -321,7 +321,7 @@ test("with a mask file, the log on the machine is masked, and exit codes and SIG
 	await box.writeFile(inboxMaskPath("8", 1), maskFile([secret]));
 	await launch(box, "8", `echo "before ${secret}"; sleep 30\n`);
 	await new Promise((r) => setTimeout(r, 300));
-	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MEGIT_ID: "8", MEGIT_SIGNAL: "TERM" } });
+	await box.exec(["sh", "-c", KILL_SCRIPT], { env: { MAGGOT_ID: "8", MAGGOT_SIGNAL: "TERM" } });
 	const killed = await waitForExit(box, "8");
 	assert.equal(killed.state, 143);
 	assert.equal(dec.decode(killed.bytes), "before ***\n");

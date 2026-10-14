@@ -111,11 +111,11 @@ test("the Cloudflare sandbox writes files through stdin, never arguments or the 
 	const container = new FakeContainer();
 	const box = new CloudflareSandbox(container);
 	box.start();
-	await box.writeFile("/tmp/megit-inbox/step-0.sh", "export TOKEN='s3cret'\n");
+	await box.writeFile("/tmp/maggot-inbox/step-0.sh", "export TOKEN='s3cret'\n");
 	const [write] = container.execs;
 	assert.equal(write.stdin, "export TOKEN='s3cret'\n");
 	assert.ok(!JSON.stringify(write.cmd).includes("s3cret") && !JSON.stringify(write.env ?? {}).includes("s3cret"));
-	assert.equal(write.cmd.at(-1), "/tmp/megit-inbox/step-0.sh");
+	assert.equal(write.cmd.at(-1), "/tmp/maggot-inbox/step-0.sh");
 	assert.match(write.cmd[2], /umask 077/);
 });
 

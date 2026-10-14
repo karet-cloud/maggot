@@ -169,8 +169,8 @@ function tarHeader(name: string, size: number, mode: number, type: string, linkn
 	put(157, 100, linkname);
 	put(257, 6, "ustar\0");
 	put(263, 2, "00");
-	put(265, 32, "megit");
-	put(297, 32, "megit");
+	put(265, 32, "maggot");
+	put(297, 32, "maggot");
 	const sum = h.reduce((n, b) => n + b, 0);
 	put(148, 8, `${sum.toString(8).padStart(6, "0")}\0 `);
 	return h;

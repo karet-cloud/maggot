@@ -1,10 +1,10 @@
 {
-  "name": "megit",
+  "name": "maggot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {
-    "megit": "./cli/megit.ts"
+    "maggot": "./cli/maggot.ts"
   },
   "scripts": {
     "dev": "node scripts/dev.ts",

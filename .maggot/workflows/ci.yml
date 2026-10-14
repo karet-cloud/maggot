@@ -1,4 +1,4 @@
-# megit Actions: runs when this repository is hosted on megit. See docs/actions.md for the syntax.
+# maggot Actions: runs when this repository is hosted on maggot. See docs/actions.md for the syntax.
 name: CI
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest # the repository's default runner (Settings → Actions)
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4 # built in: megit checks the commit out before the first step
+      - uses: actions/checkout@v4 # built in: maggot checks the commit out before the first step
       - name: Tool versions
         run: node --version && npm --version && git --version
       - name: Install dependencies

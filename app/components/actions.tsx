@@ -231,7 +231,7 @@ export function ActionsSettings({ project, archived }: { project: string; archiv
 	});
 	const s = settings.data;
 	return (
-		<Panel title="Actions" actions={<span className="text-[11px] text-faint">Workflows live in .megit/workflows</span>}>
+		<Panel title="Actions" actions={<span className="text-[11px] text-faint">Workflows live in .maggot/workflows</span>}>
 			{settings.isPending ? (
 				<Spinner className="m-4" />
 			) : !s ? (
@@ -321,7 +321,7 @@ function DepotSettings({ project, settings, onSaved, archived }: { project: stri
 				, billed to your Depot account. Create an organization token in Depot under <b className="text-fg">Organization Settings → API Tokens</b>, or a user
 				token under <b className="text-fg">Settings → Personal settings</b>. App and service tokens, and user tokens in more than one organization, also need
 				the organization ID: <code className="font-mono text-fg">depot org show</code> prints the current organization's ID (
-				<code className="font-mono text-fg">depot org switch</code> changes which one that is). megit checks the token with Depot before keeping it,
+				<code className="font-mono text-fg">depot org switch</code> changes which one that is). maggot checks the token with Depot before keeping it,
 				encrypted; it's never shown again.
 			</p>
 			<div className="grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
@@ -431,7 +431,7 @@ function Secrets({ project, settings, onSaved, archived }: { project: string; se
 export function NoWorkflows({ project, branch }: { project: string; branch: string }) {
 	return (
 		<Empty icon={<Workflow className="size-6" />} title="No workflows yet">
-			Add a YAML file under <code className="font-mono text-dim">.megit/workflows/</code> on {branch}, then push. See{" "}
+			Add a YAML file under <code className="font-mono text-dim">.maggot/workflows/</code> on {branch}, then push. See{" "}
 			<Link to="/$owner/$repo/actions" params={repoParams(project)} search={{ help: true }} className="text-accent hover:underline">
 				the supported syntax
 			</Link>

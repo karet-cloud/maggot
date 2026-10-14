@@ -48,7 +48,7 @@ export async function createOrg(database: D1Database, ownerId: string, name: str
 					`insert into "user" ("id", "name", "email", "emailVerified", "createdAt", "updatedAt", "username", "displayUsername", "kind") values (?, ?, ?, 1, ?, ?, ?, ?, 'org')`,
 				)
 				// A placeholder address on a reserved domain: nothing is ever sent to it, and nobody can sign in with it.
-				.bind(id, displayName.trim().slice(0, 100) || username, `${id}@orgs.megit.invalid`, now, now, username, username),
+				.bind(id, displayName.trim().slice(0, 100) || username, `${id}@orgs.maggot.invalid`, now, now, username, username),
 			database
 				.prepare(`insert into "org_member" ("orgId", "userId", "role", "state", "invitedBy", "createdAt") values (?, ?, 'owner', 'active', null, ?)`)
 				.bind(id, ownerId, now),

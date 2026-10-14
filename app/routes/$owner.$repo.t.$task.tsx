@@ -131,7 +131,7 @@ function TaskPage() {
 									</Link>
 								</span>
 							))}
-							. Run <code className="font-mono text-fg">megit sync</code> in the checkout, resolve, then resubmit.
+							. Run <code className="font-mono text-fg">maggot sync</code> in the checkout, resolve, then resubmit.
 						</p>
 					)}
 				</div>

@@ -2,7 +2,7 @@ node_modules/
 .cloudflare/
 dist/
 .dev.vars
-.megit-local/
+.maggot-local/
 *.log
 .wrangler/
 .secrets/

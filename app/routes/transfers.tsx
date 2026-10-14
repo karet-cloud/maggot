@@ -10,7 +10,7 @@ import { preload } from "../lib/queries.ts";
 import { signedIn, useNeedsVerification, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/transfers")({
-	head: () => ({ meta: [{ title: "Invitations and transfers · megit" }] }),
+	head: () => ({ meta: [{ title: "Invitations and transfers · maggot" }] }),
 	loader: ({ context }) => (signedIn(context.queryClient) ? preload(context.queryClient, transfersQuery, invitationsQuery) : undefined),
 	component: Transfers,
 });

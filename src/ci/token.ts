@@ -1,7 +1,7 @@
 /**
- * Credentials a CI job uses inside its sandbox, all derived from MEGIT_API_KEY:
+ * Credentials a CI job uses inside its sandbox, all derived from MAGGOT_API_KEY:
  * - a checkout token (`mgci_…`): read-only, for named repositories, expiring with the job;
- * - a job token (`mgjob_…`): for megit's Actions API (caches, artifacts, actions' files), for one job;
+ * - a job token (`mgjob_…`): for maggot's Actions API (caches, artifacts, actions' files), for one job;
  * - an AES-GCM key per repository, which keeps CI secrets and the Depot token encrypted at rest.
  */
 
@@ -24,7 +24,7 @@ function fromBase64url(text: string): Uint8Array<ArrayBuffer> | null {
 	}
 }
 
-async function hmacKey(apiKey: string, purpose = "megit-ci-checkout-v1"): Promise<CryptoKey> {
+async function hmacKey(apiKey: string, purpose = "maggot-ci-checkout-v1"): Promise<CryptoKey> {
 	const base = await crypto.subtle.importKey("raw", encoder.encode(apiKey), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
 	const derived = new Uint8Array(await crypto.subtle.sign("HMAC", base, encoder.encode(purpose)));
 	return crypto.subtle.importKey("raw", derived, { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
@@ -54,7 +54,7 @@ async function open(apiKey: string, purpose: string, prefix: string, token: stri
 
 export const JOB_TOKEN_PREFIX = "mgjob_";
 
-/** What a job's token lets it do with megit's Actions API. */
+/** What a job's token lets it do with maggot's Actions API. */
 export interface JobGrant {
 	/** The repository (coordinator) the job belongs to. */
 	repo: string;
@@ -68,12 +68,12 @@ export interface JobGrant {
 }
 
 export function mintJobToken(apiKey: string, grant: JobGrant): Promise<string> {
-	return sign(apiKey, "megit-ci-job-v1", JOB_TOKEN_PREFIX, grant);
+	return sign(apiKey, "maggot-ci-job-v1", JOB_TOKEN_PREFIX, grant);
 }
 
 /** The grant a job token carries, or null if it's forged, malformed or expired. */
 export async function verifyJobToken(apiKey: string, token: string): Promise<JobGrant | null> {
-	const g = (await open(apiKey, "megit-ci-job-v1", JOB_TOKEN_PREFIX, token)) as Partial<JobGrant> | null;
+	const g = (await open(apiKey, "maggot-ci-job-v1", JOB_TOKEN_PREFIX, token)) as Partial<JobGrant> | null;
 	if (!g || typeof g !== "object") return null;
 	const strings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
 	if (typeof g.repo !== "string" || typeof g.run !== "number" || typeof g.job !== "string" || !strings(g.read) || typeof g.write !== "string" || typeof g.expires !== "number") return null;
@@ -122,7 +122,7 @@ export function checkoutAllows(grant: CheckoutGrant | null, repo: string): boole
 async function secretKey(apiKey: string, repo: string): Promise<CryptoKey> {
 	const base = await crypto.subtle.importKey("raw", encoder.encode(apiKey), "HKDF", false, ["deriveKey"]);
 	return crypto.subtle.deriveKey(
-		{ name: "HKDF", hash: "SHA-256", salt: encoder.encode(repo), info: encoder.encode("megit-ci-secrets-v1") },
+		{ name: "HKDF", hash: "SHA-256", salt: encoder.encode(repo), info: encoder.encode("maggot-ci-secrets-v1") },
 		base,
 		{ name: "AES-GCM", length: 256 },
 		false,

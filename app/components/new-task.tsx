@@ -59,7 +59,7 @@ export function NewTask({ project, onClose }: { project: string; onClose: () => 
 					<Terminal className="size-3.5" />
 					Or let an agent open its own task
 				</p>
-				<CopyField value={`MEGIT_URL=${typeof location === "undefined" ? "" : location.origin} megit start ${project} "${title || "<title>"}"`} />
+				<CopyField value={`MAGGOT_URL=${typeof location === "undefined" ? "" : location.origin} maggot start ${project} "${title || "<title>"}"`} />
 			</div>
 		</div>
 	);

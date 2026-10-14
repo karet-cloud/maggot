@@ -416,10 +416,10 @@ async function send(hook: HookRow, delivery: DeliveryRow): Promise<{ ok: boolean
 			signal: AbortSignal.timeout(TIMEOUT_MS),
 			headers: {
 				"content-type": "application/json",
-				"user-agent": "megit-webhooks",
-				"x-megit-event": delivery.event,
-				"x-megit-delivery": delivery.id,
-				"x-megit-signature-256": `sha256=${signature}`,
+				"user-agent": "maggot-webhooks",
+				"x-maggot-event": delivery.event,
+				"x-maggot-delivery": delivery.id,
+				"x-maggot-signature-256": `sha256=${signature}`,
 			},
 			body,
 		});

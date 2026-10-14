@@ -7,7 +7,7 @@ import { api, keys } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/orgs/new")({
-	head: () => ({ meta: [{ title: "New organization · megit" }] }),
+	head: () => ({ meta: [{ title: "New organization · maggot" }] }),
 	component: NewOrg,
 });
 

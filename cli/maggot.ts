@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// megit agent CLI. Each agent runs `megit start` to get its own fork + checkout, commits with plain
-// git, and runs `megit submit` to land work through the project's merge queue.
+// maggot agent CLI. Each agent runs `maggot start` to get its own fork + checkout, commits with plain
+// git, and runs `maggot submit` to land work through the project's merge queue.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
@@ -9,9 +9,9 @@ import { parseArgs, promisify } from "node:util";
 import type { GitCredentials, ProjectEvent, Task, TaskAccess } from "../src/api.ts";
 
 const exec = promisify(execFile);
-const API = (process.env.MEGIT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
-// A personal access token (megit_pat_…) for user repositories, or the admin API key.
-const KEY = process.env.MEGIT_TOKEN ?? process.env.MEGIT_API_KEY ?? "dev";
+const API = (process.env.MAGGOT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+// A personal access token (maggot_pat_…) for user repositories, or the admin API key.
+const KEY = process.env.MAGGOT_TOKEN ?? process.env.MAGGOT_API_KEY ?? "dev";
 
 /** API base path for a repository: `owner/repo` for user repositories, or an internal project name. */
 function repoPath(project: string): string {
@@ -76,8 +76,8 @@ function authRemote(creds: GitCredentials): string {
 }
 
 async function loadCheckout(dir: string): Promise<Checkout> {
-	const path = join(await git(["rev-parse", "--absolute-git-dir"], dir), "megit.json");
-	if (!existsSync(path)) throw new Error(`${dir} is not a megit task checkout (run \`megit start\`)`);
+	const path = join(await git(["rev-parse", "--absolute-git-dir"], dir), "maggot.json");
+	if (!existsSync(path)) throw new Error(`${dir} is not a maggot task checkout (run \`maggot start\`)`);
 	return JSON.parse(await readFile(path, "utf8"));
 }
 
@@ -114,7 +114,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 	async init(args) {
 		const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { import: { type: "string" }, description: { type: "string" } } });
 		const [name] = positionals;
-		if (!name) throw new Error("usage: megit init <project> [--import <https-url>] [--description <text>]");
+		if (!name) throw new Error("usage: maggot init <project> [--import <https-url>] [--description <text>]");
 		const { project } = await api<{ project: { name: string; remote: string } }>("POST", "/projects", {
 			name,
 			description: values.description,
@@ -131,10 +131,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 		});
 		const [project, ...titleWords] = positionals;
 		const title = titleWords.join(" ");
-		if (!project || !title) throw new Error('usage: megit start <project> "<title>" [--agent name] [--paths a,b/] [--dir path]');
+		if (!project || !title) throw new Error('usage: maggot start <project> "<title>" [--agent name] [--paths a,b/] [--dir path]');
 		const created = await api<TaskAccess>("POST", `${repoPath(project)}/tasks`, {
 			title,
-			agent: values.agent ?? process.env.MEGIT_AGENT,
+			agent: values.agent ?? process.env.MAGGOT_AGENT,
 			paths: values.paths?.split(",").filter(Boolean),
 		});
 		if (created.task.status === "provisioning") console.error(`Task ${created.task.id} is waiting for its fork…`);
@@ -144,10 +144,10 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 		await git(["remote", "add", "base", authRemote(access.base)], dir);
 		if (values.agent) {
 			await git(["config", "user.name", values.agent], dir);
-			await git(["config", "user.email", `${values.agent}@agents.megit.dev`], dir);
+			await git(["config", "user.email", `${values.agent}@agents.maggot.dev`], dir);
 		}
 		const co: Checkout = { api: API, project, taskId: access.task.id };
-		await writeFile(join(dir, ".git", "megit.json"), JSON.stringify(co, null, 2));
+		await writeFile(join(dir, ".git", "maggot.json"), JSON.stringify(co, null, 2));
 		console.log(`Task ${access.task.id} ready in ${dir}`);
 		for (const o of access.overlaps) console.log(`  warning: overlaps ${o.id} (${o.agent ?? "-"}, ${o.status}) on ${o.paths.join(", ")}`);
 		console.log(dir);
@@ -169,7 +169,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 			console.log(`Synced with base/${access.base.branch}`);
 		} catch {
 			const conflicted = await git(["diff", "--name-only", "--diff-filter=U"], dir);
-			console.log(`Merge conflicts to resolve, then commit and \`megit submit\`:\n${conflicted}`);
+			console.log(`Merge conflicts to resolve, then commit and \`maggot submit\`:\n${conflicted}`);
 			process.exitCode = 2;
 		}
 	},
@@ -203,20 +203,20 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
 	async tasks(args) {
 		const { positionals, values } = parseArgs({ args, allowPositionals: true, options: { status: { type: "string" } } });
-		if (!positionals[0]) throw new Error("usage: megit tasks <project> [--status <status>]");
+		if (!positionals[0]) throw new Error("usage: maggot tasks <project> [--status <status>]");
 		const q = values.status ? `?status=${values.status}` : "";
 		const { tasks } = await api<{ tasks: Task[] }>("GET", `${repoPath(positionals[0])}/tasks${q}`);
 		tasks.forEach(printTask);
 	},
 
 	async queue(args) {
-		if (!args[0]) throw new Error("usage: megit queue <project>");
+		if (!args[0]) throw new Error("usage: maggot queue <project>");
 		const { queue } = await api<{ queue: { position: number; taskId: string; status: string; title: string }[] }>("GET", `${repoPath(args[0])}/queue`);
 		for (const q of queue) console.log(`${q.position}. ${q.taskId}  ${q.status}  ${q.title}`);
 	},
 
 	async watch(args) {
-		if (!args[0]) throw new Error("usage: megit watch <project>");
+		if (!args[0]) throw new Error("usage: maggot watch <project>");
 		const url = new URL(`${API}/api${repoPath(args[0])}/live`);
 		url.protocol = url.protocol.replace("http", "ws");
 		url.searchParams.set("key", KEY);
@@ -234,7 +234,7 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 const [command, ...rest] = process.argv.slice(2);
 const run = commands[command ?? ""];
 if (!run) {
-	console.log(`megit <command>
+	console.log(`maggot <command>
 
   projects                                   List projects
   init <project> [--import url]              Create a project (or import a public Git repo)
@@ -248,11 +248,11 @@ if (!run) {
   queue <project>                            Show the merge queue
   watch <project>                            Stream live project events
 
-  env: MEGIT_URL (default http://127.0.0.1:8787), MEGIT_TOKEN (a personal access token) or MEGIT_API_KEY (admin; default "dev"), MEGIT_AGENT
+  env: MAGGOT_URL (default http://127.0.0.1:8787), MAGGOT_TOKEN (a personal access token) or MAGGOT_API_KEY (admin; default "dev"), MAGGOT_AGENT
   <project> is owner/repo for a user repository`);
 	process.exit(command ? 1 : 0);
 }
 run(rest).catch((err) => {
-	console.error(`megit: ${redact(err instanceof Error ? err.message : String(err))}`);
+	console.error(`maggot: ${redact(err instanceof Error ? err.message : String(err))}`);
 	process.exit(1);
 });

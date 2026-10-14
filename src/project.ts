@@ -47,7 +47,7 @@ import type { JobGrant } from "./ci/token.ts";
 import type { CiJob } from "./ci/job.ts";
 import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks, WikiIndex, WikiPage } from "./api.ts";
 
-const MERGE_IDENTITY: Identity = { name: "megit", email: "merge-queue@megit.dev" };
+const MERGE_IDENTITY: Identity = { name: "maggot", email: "merge-queue@maggot.dev" };
 const AGENT_TOKEN_TTL = 6 * 3600;
 const INTERNAL_TOKEN_TTL = 900;
 /** Drop the cached workspace after this many merges to bound memory. */
@@ -384,7 +384,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * lost if this object restarts first.
 	 */
 	private async startCi(refs: { branch: string; from: string | null; to: string | null }[], actor: string | null) {
-		const moved = refs.filter((r) => r.to !== null && !r.branch.startsWith("megit-incoming/"));
+		const moved = refs.filter((r) => r.to !== null && !r.branch.startsWith("maggot-incoming/"));
 		if (moved.length === 0) return;
 		for (const r of moved) this.sql.exec("INSERT INTO ci_pushes (branch, sha, actor) VALUES (?, ?, ?)", r.branch, r.to, actor);
 		await this.scheduleAlarm(Date.now());
@@ -473,7 +473,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	/**
 	 * resolveRef, after looking the refs up again if `ref` isn't a branch or tag seen yet (a tag that
-	 * predates megit tracking them, typed into a URL). At most every few seconds.
+	 * predates maggot tracking them, typed into a URL). At most every few seconds.
 	 */
 	private async freshRef(ref: string): Promise<{ repoName: string; ref: string }> {
 		const meta = this.meta();
@@ -1419,7 +1419,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					return this.fail(id, "NO_CHANGES", "The task fork has no new commits. Push your work before submitting.");
 				}
 
-				const author = { name: row.agent ?? "agent", email: `${row.agent ?? "agent"}@agents.megit.dev` };
+				const author = { name: row.agent ?? "agent", email: `${row.agent ?? "agent"}@agents.maggot.dev` };
 				const outcome = await ws.merge(head, `Merge task ${id}: ${row.title}`, author);
 
 				if (outcome.kind === "conflict") {
@@ -1558,7 +1558,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async releases(limit = 20): Promise<{ releases: Release[]; more: boolean }> {
 		const meta = this.meta();
-		// Fresh, so a release shows its tag's current commit (and tags pushed before megit tracked them).
+		// Fresh, so a release shows its tag's current commit (and tags pushed before maggot tracked them).
 		const tags = tagCommits((await listRefs(await this.baseAccess(meta))).tags);
 		this.observeTags(tags);
 		const rows = this.sql.exec<ReleaseRow>("SELECT * FROM releases ORDER BY created_at DESC LIMIT ?", limit + 1).toArray();

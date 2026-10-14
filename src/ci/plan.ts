@@ -12,7 +12,7 @@ export interface ActionInput {
 	required: boolean;
 }
 
-/** What an action's action.yml says, as megit runs it. */
+/** What an action's action.yml says, as maggot runs it. */
 export interface ActionMeta {
 	name: string;
 	/** By name, lower-cased (input names aren't case-sensitive). */

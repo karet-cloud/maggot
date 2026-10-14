@@ -4,15 +4,15 @@ import { parseCron } from "./cron.ts";
 import { ExpressionError, parseCondition, parseTemplate, propertiesOf, render, STATUS_FUNCTIONS, usage, type Expression, type Value } from "./expr.ts";
 
 /**
- * megit Actions workflows: `.megit/workflows/*.yml`, GitHub Actions syntax. Jobs run steps in a fresh
+ * maggot Actions workflows: `.maggot/workflows/*.yml`, GitHub Actions syntax. Jobs run steps in a fresh
  * Linux sandbox (Cloudflare or Depot) after the commit is checked out; `needs` orders them, and a
  * matrix makes one job of each combination. Steps are shell scripts, the built-in checkout, cache and
  * artifact actions, or other actions (JavaScript or composite) fetched from GitHub or the repository.
- * Anything outside what megit does is an error naming the line's key, not something silently skipped:
- * a key is only accepted if megit does what it says.
+ * Anything outside what maggot does is an error naming the line's key, not something silently skipped:
+ * a key is only accepted if maggot does what it says.
  */
 
-export const WORKFLOW_DIR = ".megit/workflows";
+export const WORKFLOW_DIR = ".maggot/workflows";
 export const MAX_WORKFLOWS = 20;
 /** Jobs as written, and jobs once each matrix is expanded. */
 export const MAX_JOBS = 50;
@@ -34,7 +34,7 @@ export interface RunnerSpec {
 
 /**
  * What a step does. checkout, cache (and its restore and save halves) and the artifact actions are
- * megit's own; `action` is any other action, run from its own files.
+ * maggot's own; `action` is any other action, run from its own files.
  */
 export type StepKind = "run" | "checkout" | "cache" | "cache-restore" | "cache-save" | "upload-artifact" | "download-artifact" | "action";
 
@@ -156,13 +156,13 @@ function envMap(value: unknown, where: string, contexts: readonly string[]): Rec
 
 function onlyKeys(value: Record<string, unknown>, allowed: string[], where: string) {
 	for (const key of Object.keys(value)) {
-		if (!allowed.includes(key)) fail(`${where}: "${key}" isn't supported by megit Actions (supported: ${allowed.join(", ")})`);
+		if (!allowed.includes(key)) fail(`${where}: "${key}" isn't supported by maggot Actions (supported: ${allowed.join(", ")})`);
 	}
 }
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 
-/** The contexts each place may use, as on GitHub (vars and workflow inputs aren't in megit yet). */
+/** The contexts each place may use, as on GitHub (vars and workflow inputs aren't in maggot yet). */
 const AT = {
 	workflowEnv: ["github", "secrets", "inputs"],
 	jobIf: ["github", "needs", "inputs"],
@@ -178,7 +178,7 @@ function checkUsage(nodes: Expression[], where: string, contexts: readonly strin
 	for (const node of nodes) {
 		const used = usage(node);
 		for (const c of used.contexts) {
-			if (c === "vars") fail(`${where}: vars isn't in megit yet; use env or secrets`);
+			if (c === "vars") fail(`${where}: vars isn't in maggot yet; use env or secrets`);
 			if (!KNOWN_CONTEXTS.includes(c)) fail(`${where}: ${c} isn't a context (${KNOWN_CONTEXTS.filter((k) => k !== "vars").join(", ")} are)`);
 			if (!contexts.includes(c)) fail(`${where}: ${c} can't be used here (${contexts.join(", ")} can)`);
 		}
@@ -186,9 +186,9 @@ function checkUsage(nodes: Expression[], where: string, contexts: readonly strin
 			if (STATUS_FUNCTIONS.includes(f) && !opts.status) fail(`${where}: ${f}() can only be used in if:`);
 			if (f === "hashFiles" && !opts.hashFiles) fail(`${where}: hashFiles() can only be used in steps`);
 		}
-		// The secret GitHub hands every job; megit hands none.
+		// The secret GitHub hands every job; maggot hands none.
 		if (propertiesOf(node, "secrets").some((name) => name.toUpperCase() === "GITHUB_TOKEN")) {
-			fail(`${where}: megit doesn't hand jobs a GITHUB_TOKEN; add a secret of your own instead`);
+			fail(`${where}: maggot doesn't hand jobs a GITHUB_TOKEN; add a secret of your own instead`);
 		}
 	}
 }
@@ -234,7 +234,7 @@ function branchFilter(value: unknown, where: string, pull: boolean): BranchFilte
 	if (pull && value.types !== undefined) {
 		const types = strings(value.types, `${where}.types`);
 		for (const t of types) {
-			if (!(PULL_REQUEST_TYPES as readonly string[]).includes(t)) fail(`${where}.types: "${t}" isn't supported by megit Actions (supported: ${PULL_REQUEST_TYPES.join(", ")})`);
+			if (!(PULL_REQUEST_TYPES as readonly string[]).includes(t)) fail(`${where}.types: "${t}" isn't supported by maggot Actions (supported: ${PULL_REQUEST_TYPES.join(", ")})`);
 		}
 		filter.types = [...new Set(types)] as PullRequestType[];
 	}
@@ -277,10 +277,10 @@ function triggers(value: unknown): WorkflowSpec["on"] {
 		else if (event === "pull_request") on.pullRequest = branchFilter(config, "on.pull_request", true);
 		else if (event === "workflow_dispatch") {
 			// Inputs would need a form and ${{ inputs.* }}; neither exists yet.
-			if (isRecord(config) && Object.keys(config).length) fail("on.workflow_dispatch: inputs aren't supported by megit Actions yet");
+			if (isRecord(config) && Object.keys(config).length) fail("on.workflow_dispatch: inputs aren't supported by maggot Actions yet");
 			on.dispatch = true;
 		} else if (event === "schedule") on.schedule = schedules(config);
-		else fail(`on: "${event}" isn't supported by megit Actions (supported: push, pull_request, workflow_dispatch, schedule)`);
+		else fail(`on: "${event}" isn't supported by maggot Actions (supported: push, pull_request, workflow_dispatch, schedule)`);
 	}
 	if (!on.push && !on.pullRequest && !on.dispatch && on.schedule.length === 0) fail('"on" needs at least one event');
 	return on;
@@ -294,10 +294,10 @@ export function runnerFor(value: unknown, where: string): RunnerSpec {
 	const label = value.trim().toLowerCase();
 	if (label.startsWith("blacksmith")) {
 		// Blacksmith only runs GitHub Actions jobs through its GitHub App; it has no API for other CI systems.
-		fail(`${where}: Blacksmith runners only take jobs from GitHub Actions, so megit can't run on them (use cloudflare or depot)`);
+		fail(`${where}: Blacksmith runners only take jobs from GitHub Actions, so maggot can't run on them (use cloudflare or depot)`);
 	}
-	if (/(^|-)arm(64)?$/.test(label)) fail(`${where}: megit runs jobs on x64 Linux only`);
-	if (label === "cloudflare" || label === "megit") return { kind: "cloudflare" };
+	if (/(^|-)arm(64)?$/.test(label)) fail(`${where}: maggot runs jobs on x64 Linux only`);
+	if (label === "cloudflare" || label === "maggot") return { kind: "cloudflare" };
 	if (label === "depot") return { kind: "depot", vcpus: 2 };
 	const depot = /^depot-(\d+)$/.exec(label) ?? /^depot-ubuntu-[\w.]+-(\d+)$/.exec(label);
 	if (depot) {
@@ -306,7 +306,7 @@ export function runnerFor(value: unknown, where: string): RunnerSpec {
 		return { kind: "depot", vcpus };
 	}
 	if (/^ubuntu-(latest|\d+\.\d+)$/.test(label) || label === "linux" || label === "default") return { kind: "default" };
-	return fail(`${where}: "${value}" isn't a runner megit knows (use cloudflare, depot, depot-<vcpus> or ubuntu-latest)`);
+	return fail(`${where}: "${value}" isn't a runner maggot knows (use cloudflare, depot, depot-<vcpus> or ubuntu-latest)`);
 }
 
 /** `defaults.run`: the shell and working directory steps get unless they say otherwise. */
@@ -344,17 +344,17 @@ function minutes(value: unknown, where: string, max = MAX_TIMEOUT_MINUTES): numb
 	return value as number;
 }
 
-/** `permissions` only narrows what the job's token can do; megit's is read-only already, so only reads are accepted. */
+/** `permissions` only narrows what the job's token can do; maggot's is read-only already, so only reads are accepted. */
 function permissions(value: unknown, where: string) {
 	if (value === undefined || value === null) return;
 	if (value === "read-all" || value === "{}") return;
 	if (isRecord(value)) {
 		for (const [scope, level] of Object.entries(value)) {
-			if (level !== "read" && level !== "none") fail(`${where}.${scope}: megit Actions jobs get a read-only token, so only read or none can be asked for`);
+			if (level !== "read" && level !== "none") fail(`${where}.${scope}: maggot Actions jobs get a read-only token, so only read or none can be asked for`);
 		}
 		return;
 	}
-	fail(`${where}: megit Actions jobs get a read-only token, so permissions is read-all or a map of scopes to read or none`);
+	fail(`${where}: maggot Actions jobs get a read-only token, so permissions is read-all or a map of scopes to read or none`);
 }
 
 /** The `with:` each built-in action takes, and which of them it needs. */
@@ -378,7 +378,7 @@ const BUILT_IN: Record<Exclude<StepKind, "run" | "action">, { pattern: RegExp; i
 /** Parses `uses:`: a built-in action, an action in this repository (./path) or one on GitHub (owner/repo[/path]@ref). */
 export function parseUses(value: string, where: string): { kind: StepKind; ref: ActionRef | null } {
 	const uses = value.trim();
-	if (uses.startsWith("docker://")) return fail(`${where}: Docker container actions aren't supported by megit Actions`);
+	if (uses.startsWith("docker://")) return fail(`${where}: Docker container actions aren't supported by maggot Actions`);
 	if (uses.startsWith("./")) {
 		const path = uses.slice(2).replace(/\/+$/, "");
 		if (!path || path.split("/").some((p) => p === ".." || p === "") || uses.includes("${{")) fail(`${where}: "${uses}" isn't a folder in the repository`);
@@ -412,10 +412,10 @@ function checkoutInputs(w: Record<string, string>, where: string): number {
 		if (!/^\d+$/.test(depth.trim())) fail(`${where}.with.fetch-depth is a whole number (0 fetches all history)`);
 		fetchDepth = Number(depth);
 	}
-	// megit cleans every time (each job gets a fresh machine) and never leaves credentials behind.
+	// maggot cleans every time (each job gets a fresh machine) and never leaves credentials behind.
 	if (w.clean !== undefined && w.clean !== "true") fail(`${where}.with.clean: every job starts on a fresh machine, so clean is always true`);
 	if (w["persist-credentials"] !== undefined && w["persist-credentials"] !== "false") {
-		fail(`${where}.with.persist-credentials: megit doesn't leave the checkout's token in .git/config; set it to false or leave it out`);
+		fail(`${where}.with.persist-credentials: maggot doesn't leave the checkout's token in .git/config; set it to false or leave it out`);
 	}
 	return fetchDepth;
 }
@@ -491,7 +491,7 @@ const sameValue = (a: Value, b: Value) => JSON.stringify(a) === JSON.stringify(b
  * change a value of (or as a combination of its own where it fits none).
  */
 export function expandMatrix(value: unknown, where: string): Record<string, Value>[] {
-	if (typeof value === "string") return fail(`${where}: a matrix built by an expression isn't supported by megit Actions; list its values`);
+	if (typeof value === "string") return fail(`${where}: a matrix built by an expression isn't supported by maggot Actions; list its values`);
 	if (!isRecord(value)) return fail(`${where} is a map of names to lists of values`);
 	const lists: [string, Value[]][] = [];
 	for (const [key, v] of Object.entries(value)) {
@@ -573,7 +573,7 @@ function jobs(key: string, value: unknown, defaults: RunDefaults): JobSpec[] {
 	const where = `jobs.${key}`;
 	if (!/^[A-Za-z_][A-Za-z0-9_-]{0,99}$/.test(key)) fail(`${where}: job ids start with a letter or _ and contain only letters, digits, - and _`);
 	if (!isRecord(value)) return fail(`${where} is a map with runs-on and steps`);
-	if (value.uses !== undefined) fail(`${where}.uses: reusable workflows aren't supported by megit Actions`);
+	if (value.uses !== undefined) fail(`${where}.uses: reusable workflows aren't supported by maggot Actions`);
 	onlyKeys(value, ["name", "runs-on", "needs", "if", "timeout-minutes", "env", "outputs", "steps", "defaults", "permissions", "strategy"], where);
 	permissions(value.permissions, `${where}.permissions`);
 	const steps = value.steps;

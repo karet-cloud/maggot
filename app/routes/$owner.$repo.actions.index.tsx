@@ -62,7 +62,7 @@ function Actions() {
 		<div className="space-y-4">
 			<div className="flex flex-wrap items-center justify-between gap-2">
 				<p className="text-sm text-dim">
-					Workflows in <code className="font-mono text-fg">.megit/workflows</code> run shell steps on pushes, pull requests and by hand.
+					Workflows in <code className="font-mono text-fg">.maggot/workflows</code> run shell steps on pushes, pull requests and by hand.
 				</p>
 				<Link from={Route.fullPath} search={(s) => ({ ...s, help: help ? undefined : true })} className="flex items-center gap-1.5 text-xs text-accent hover:underline">
 					<BookOpen className="size-3.5" />
@@ -290,7 +290,7 @@ jobs:
         env:
           API_TOKEN: \${{ secrets.API_TOKEN }}`;
 
-/** Exactly what megit Actions understands. Anything else in a workflow is reported as an error, not skipped. */
+/** Exactly what maggot Actions understands. Anything else in a workflow is reported as an error, not skipped. */
 function SyntaxGuide() {
 	const row = (key: string, text: string) => (
 		<tr key={key} className="align-top">

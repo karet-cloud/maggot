@@ -16,7 +16,7 @@ export type Principal =
 /** Usernames become URL segments, so app routes can't be taken. */
 const RESERVED = new Set([
 	"api", "assets", "login", "signup", "logout", "new", "settings", "explore", "p", "admin", "about", "help",
-	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "megit", "forgot-password", "reset-password",
+	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "maggot", "forgot-password", "reset-password",
 	"verify-email", "search", "notifications", "stars", "dashboard", "parity", "transfers", "ssh", "orgs", "invitations", "organizations",
 ]);
 const USERNAME = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
@@ -58,7 +58,7 @@ function createAuth(env: Env, origin: string, secret: string) {
 				const name = (user as { username?: string | null }).username ?? user.name;
 				const sent = await sendMail(env, { to: user.email, ...resetPasswordEmail(name, url) });
 				// Without email delivery the link only reaches the server log (useful in local development).
-				if (!sent) console.log(`[megit] password reset link for ${name}: ${url}`);
+				if (!sent) console.log(`[maggot] password reset link for ${name}: ${url}`);
 			},
 		},
 		emailVerification: {
@@ -71,11 +71,11 @@ function createAuth(env: Env, origin: string, secret: string) {
 				if (capture) return capture(url);
 				const name = (user as { username?: string | null }).username ?? user.name;
 				const sent = await sendMail(env, { to: user.email, ...verifyEmail(name, url) });
-				if (!sent) console.log(`[megit] email verification link for ${name}: ${url}`);
+				if (!sent) console.log(`[maggot] email verification link for ${name}: ${url}`);
 			},
 		},
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
-		advanced: { cookiePrefix: "megit" },
+		advanced: { cookiePrefix: "maggot" },
 		// Repository URLs start with the username, so it can't change (renames would have to move them all).
 		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername, immutableUsername: true })],
 	});
@@ -100,13 +100,13 @@ async function authSecret(env: Env): Promise<string> {
 	const explicit = (env as { BETTER_AUTH_SECRET?: string }).BETTER_AUTH_SECRET;
 	if (explicit) return explicit;
 	const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(apiKey(env)), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-	const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("megit-better-auth-secret-v1"));
+	const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("maggot-better-auth-secret-v1"));
 	return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function apiKey(env: Env): string {
-	if (!env.MEGIT_API_KEY) throw new HttpError(500, "MISCONFIGURED", "MEGIT_API_KEY is not set");
-	return env.MEGIT_API_KEY;
+	if (!env.MAGGOT_API_KEY) throw new HttpError(500, "MISCONFIGURED", "MAGGOT_API_KEY is not set");
+	return env.MAGGOT_API_KEY;
 }
 
 /** Compares secrets without an early exit on the first differing byte. */
@@ -138,7 +138,7 @@ export async function resolvePrincipal(env: Env, request: Request): Promise<Prin
 		if (user) return { kind: "user", id: user.id, username: user.username, via: "token", verified: user.verified };
 		throw new HttpError(401, "UNAUTHORIZED", "Invalid token");
 	}
-	if (!request.headers.get("cookie")?.includes("megit.session_token")) return { kind: "anonymous" };
+	if (!request.headers.get("cookie")?.includes("maggot.session_token")) return { kind: "anonymous" };
 	const session = await (await auth(env, request)).api.getSession({ headers: request.headers });
 	const name = (session?.user as { username?: string | null } | undefined)?.username;
 	if (!session || !name) return { kind: "anonymous" };

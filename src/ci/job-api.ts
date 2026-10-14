@@ -5,7 +5,7 @@ import { GitHubActions } from "./actions.ts";
 import { verifyJobToken, type JobGrant } from "./token.ts";
 
 /**
- * megit's Actions API for jobs, at /api/ci: what the cache, artifact and action-fetching steps call
+ * maggot's Actions API for jobs, at /api/ci: what the cache, artifact and action-fetching steps call
  * from inside a sandbox, with the job's own token (`Authorization: Bearer mgjob_…`). Answers are plain
  * text, one record per line with tab-separated fields, so the steps' shell scripts can read them
  * without a JSON parser. Bytes go to and from R2 here, in the Worker; the records are kept by the
@@ -46,7 +46,7 @@ jobs.onError((err, c) => {
 jobs.use("*", async (c, next) => {
 	const header = c.req.header("authorization") ?? "";
 	const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-	const key = c.env.MEGIT_API_KEY;
+	const key = c.env.MAGGOT_API_KEY;
 	const grant = key && token ? await verifyJobToken(key, token) : null;
 	if (!grant) throw new HttpError(401, "UNAUTHORIZED", "A job token is needed (it may have expired)");
 	c.set("grant", grant);
@@ -120,7 +120,7 @@ for (const kind of ["caches", "artifacts"] as const) {
 
 // ── Actions' files ──────────────────────────────────────────────────────────
 
-/** An action commit's files as a .tar.gz, from megit's copy in R2 (fetched from GitHub the first time). */
+/** An action commit's files as a .tar.gz, from maggot's copy in R2 (fetched from GitHub the first time). */
 jobs.get("/actions/:owner/:repo/:sha", async (c) => {
 	const { owner, repo, sha } = c.req.param();
 	if (!/^[A-Za-z0-9-_.]+$/.test(owner) || !/^[A-Za-z0-9-_.]+$/.test(repo) || !/^[0-9a-f]{40}$/.test(sha)) throw new HttpError(400, "INVALID_INPUT", "Not an action commit");

@@ -76,7 +76,7 @@ function Home() {
 
 			<Link to="/parity" className="flex items-center justify-between rounded-lg border border-line bg-panel px-4 py-3 text-sm hover:border-line-strong">
 				<span>
-					<span className="font-medium text-fg">How close is megit to GitHub?</span>
+					<span className="font-medium text-fg">How close is maggot to GitHub?</span>
 					<span className="ml-2 text-dim">The feature checklist, kept up to date.</span>
 				</span>
 				<span className="text-accent">See the checklist →</span>
