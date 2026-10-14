@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs in production CI after deployment. Credentials come from GitHub environment secrets.
-const base = process.env.MAGGOT_URL ?? "https://maggot.sarthak7u.workers.dev";
+const base = process.env.MAGGOT_URL ?? "https://maggot.karet.cloud";
 const username = "maggot-mirror";
 const password = process.env.MAGGOT_MIRROR_PASSWORD;
 const adminKey = process.env.MAGGOT_API_KEY;
