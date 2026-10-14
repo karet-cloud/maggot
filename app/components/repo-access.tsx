@@ -55,18 +55,18 @@ export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }
 	return (
 		<div className="space-y-4 text-xs">
 			<Section title="Push an existing repository">
-				<CopyField value={`git remote add maggot ${remote}`} secret={secret} />
+				<CopyField value={`git remote add origin ${remote}`} secret={secret} />
 				<CopyField value={`git branch -M ${branch}`} />
-				<CopyField value={`git push -u maggot ${branch}`} />
+				<CopyField value={`git push -u origin ${branch}`} />
 				<p className="text-faint">
-					Other branches and tags: <code className="font-mono text-dim">git push maggot --all && git push maggot --tags</code>
+					Other branches and tags: <code className="font-mono text-dim">git push origin --all && git push origin --tags</code>
 				</p>
 			</Section>
 			{empty ? (
 				<Section title="Or start a new one">
 					<CopyField value={`git init -b ${branch} ${dir} && cd ${dir}`} />
 					<CopyField value={`echo ${sh(`# ${repo.name}`)} > README.md && git add . && git commit -m "Initial commit"`} />
-					<CopyField value={`git remote add maggot ${remote} && git push -u maggot ${branch}`} secret={secret} />
+					<CopyField value={`git remote add origin ${remote} && git push -u origin ${branch}`} secret={secret} />
 				</Section>
 			) : (
 				<Section title="Clone">

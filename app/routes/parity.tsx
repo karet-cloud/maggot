@@ -1,15 +1,17 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CheckCircle2, Circle, CircleDashed, CircleDot, type LucideIcon } from "lucide-react";
 import { PARITY, PARITY_UPDATED, type ParityStatus } from "../lib/parity.ts";
-import { cx } from "../components/ui.tsx";
+import { cx, Spinner } from "../components/ui.tsx";
+import { useViewer } from "./__root.tsx";
 
 type Filter = ParityStatus | "all";
 
-// A checklist of GitHub's features and where maggot is with each, from app/lib/parity.ts.
+// A checklist of GitHub's features and where maggot is with each, from app/lib/parity.ts. For signed-in
+// users only; to anyone else the page doesn't exist, and it asks not to be indexed.
 export const Route = createFileRoute("/parity")({
 	validateSearch: (s: Record<string, unknown>): { show?: ParityStatus } =>
 		s.show === "done" || s.show === "partial" || s.show === "missing" || s.show === "different" ? { show: s.show } : {},
-	head: () => ({ meta: [{ title: "GitHub feature parity · maggot" }] }),
+	head: () => ({ meta: [{ title: "GitHub feature parity · maggot" }, { name: "robots", content: "noindex, nofollow" }] }),
 	component: Parity,
 });
 
@@ -21,7 +23,25 @@ const STATUS: Record<ParityStatus, { label: string; icon: LucideIcon; tone: stri
 };
 
 function Parity() {
+	const viewer = useViewer();
 	const { show } = Route.useSearch();
+	if (viewer.isPending) {
+		return (
+			<main className="mx-auto max-w-[900px] px-5 py-8">
+				<Spinner />
+			</main>
+		);
+	}
+	if (!viewer.data) {
+		return (
+			<div className="mx-auto max-w-md py-24 text-center">
+				<p className="text-sm text-dim">Nothing here.</p>
+				<Link to="/" className="mt-3 inline-block text-sm text-accent hover:underline">
+					Back home
+				</Link>
+			</div>
+		);
+	}
 	const filter: Filter = show ?? "all";
 	const all = PARITY.flatMap((s) => s.items);
 	const count = (status: ParityStatus) => all.filter((i) => i.status === status).length;

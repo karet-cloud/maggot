@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { QueryClientProvider, queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
+import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { Bell, KeyRound, LogOut, MailWarning, Plus, Search } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Toaster } from "../components/toast.tsx";
@@ -54,11 +54,23 @@ function Root() {
 	return (
 		<QueryClientProvider client={queryClient}>
 			<NavProgress />
-			<TopBar />
-			<VerifyBanner />
+			<Chrome />
 			<Outlet />
 			<Toaster />
 		</QueryClientProvider>
+	);
+}
+
+/** The top bar and banners, except on the signed-out home page, which brings its own header. */
+function Chrome() {
+	const home = useLocation({ select: (l) => l.pathname === "/" });
+	const viewer = useViewer();
+	if (home && !viewer.data) return null;
+	return (
+		<>
+			<TopBar />
+			<VerifyBanner />
+		</>
 	);
 }
 
@@ -207,9 +219,11 @@ function TopBar() {
 					</nav>
 				)}
 				<div className="ml-auto flex shrink-0 items-center gap-1">
-					<Link to="/parity" className="hidden rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg lg:block">
-						GitHub parity
-					</Link>
+					{me && (
+						<Link to="/parity" className="hidden rounded-md px-2.5 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg lg:block">
+							GitHub parity
+						</Link>
+					)}
 					<SearchBox />
 					<Link to="/search" className="rounded-md px-2 py-1.5 text-dim hover:bg-raised hover:text-fg md:hidden" title="Search repositories">
 						<Search className="size-4" />
