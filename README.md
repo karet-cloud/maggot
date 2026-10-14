@@ -99,8 +99,8 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   to Artifacts; pushes stream the commands and pack as one receive-pack request. The same permission,
   verification, archive, quota and rate-limit checks apply as over HTTPS.
 - **Push an existing project**: an empty repository shows GitHub-style quick-setup commands
-  (`git remote add maggot <url>`, `git branch -M <branch>`, `git push -u maggot <branch>`, plus `--all` and
-  `--tags`). The default branch is chosen at creation (`master` unless you change it).
+  (`git remote add origin <url>`, `git branch -M <branch>`, `git push -u origin <branch>`, plus
+  `git push origin --all` and `--tags`). The default branch is chosen at creation (`master` unless you change it).
 - **Agents**: the board: tasks in four columns (working, merge queue, needs attention, merged), updated live over
   the project WebSocket. Cards glow as events touch them; tasks still waiting for a fork show "Forking".
 - **Activity**: the project's event stream, in plain sentences, next to every page.

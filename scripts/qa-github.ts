@@ -126,7 +126,7 @@ async function runCase(c: Case, work: string) {
 	const cloneUrl = create.json.repo.cloneUrl;
 
 	if (!c.importUrl) {
-		// What someone moving from GitHub runs: add maggot as a remote, push everything.
+		// What someone moving from GitHub runs: add origin as a remote, push everything.
 		await git(["push", "--quiet", "--all", authed(cloneUrl)], mirror);
 		await git(["push", "--quiet", "--tags", authed(cloneUrl)], mirror);
 		check(true, `git push --all/--tags (${githubRefs.length} refs)`);

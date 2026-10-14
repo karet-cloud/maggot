@@ -223,7 +223,7 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 	if (tags.data.length === 0) {
 		return (
 			<Empty icon={<TagIcon className="size-6" />} title="No tags yet">
-				Push one with <code className="font-mono">git push maggot v1.0</code>, or create one here.
+				Push one with <code className="font-mono">git push origin v1.0</code>, or create one here.
 			</Empty>
 		);
 	}

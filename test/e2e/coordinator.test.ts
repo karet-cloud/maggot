@@ -177,9 +177,9 @@ test("a project created without a README accepts an existing repository pushed w
 	const git = (...args: string[]) => promisify(execFile)("git", args, { cwd: dir });
 	await promisify(execFile)("git", ["init", "-q", "-b", "trunk", dir]);
 	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "first");
-	await git("remote", "add", "maggot", url.toString());
+	await git("remote", "add", "origin", url.toString());
 	await git("branch", "-M", creds.branch);
-	await git("push", "-q", "-u", "maggot", creds.branch);
+	await git("push", "-q", "-u", "origin", creds.branch);
 	await git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "second");
 	await git("push", "-q");
 
