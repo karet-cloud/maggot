@@ -498,7 +498,9 @@ npm run typecheck
   limit need ArtifactFS or a Sandbox-backed merge.
 
 The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it with a shallow Git clone and push from
-`torvalds/linux` on `master` (depth 100) and the full source tree. The Artifacts URL import service
+`torvalds/linux` on `master` (depth 1) and the full source tree. Blob batches use temporary tree tags
+to keep each upload small; the final master commit retains its upstream hash and metadata, and
+staging tags are removed. Interrupted seeds clean up their staging tags on reruns. The Artifacts URL import service
 currently fails for Linux. CI uses a five-minute storage Git token through the admin-only
 credentials endpoint, then calls `/api/repos/:owner/:repo/storage/recount` to restore quota
 accounting and refresh repository views. This avoids large uploads through the Worker proxy. Set a stable
