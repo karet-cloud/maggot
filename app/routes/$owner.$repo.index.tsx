@@ -10,6 +10,7 @@ import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/ref
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
+import { formatBytes } from "../lib/format.ts";
 import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { ref?: string; path?: string; file?: string };
@@ -195,6 +196,8 @@ function EntryLink({ entry: e, refName, active }: { entry: TreeEntry; refName?: 
 		<Link
 			from={Route.fullPath}
 			search={dir ? { ref: refName, path: e.path } : { ref: refName, path: parent, file: e.path }}
+			// Sizes come with listings from the default branch's index.
+			title={typeof e.size === "number" ? `${e.name} · ${formatBytes(e.size)}` : undefined}
 			className={cx(
 				"flex items-center gap-2 px-3 py-1 font-mono text-xs hover:bg-raised",
 				active ? "bg-raised text-fg" : dir ? "text-fg" : "text-dim",

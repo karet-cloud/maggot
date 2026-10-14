@@ -1,24 +1,27 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Check, CircleAlert, FileDiff, GitCommitHorizontal, GitMerge, MessageSquare, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { CommitList } from "../components/commits.tsx";
-import { DiffView, lineKey, type DiffNotes } from "../components/diff.tsx";
+import { DiffView, lineKey, type DiffNotes, type DiffSource } from "../components/diff.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { PullChecksBox, usePullChecks } from "../components/actions.tsx";
 import { listPatches, openCountPatch, pendingComment, stateChange } from "../components/issues.tsx";
 import { Decision, PullStateBadge } from "../components/pulls.tsx";
 import { Button, cx, Empty, ErrorNote, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type IssueComment, type IssueState, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
+import { api, ApiError, diffs, keys, repoParams, type ComparisonMeta, type IssueComment, type IssueState, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
-import { preload } from "../lib/queries.ts";
+import type { StreamedDiff } from "../lib/diff-stream.ts";
+import { diffQuery, preload } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { tab?: "commits" | "files" };
 
 const pullQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pull(project, number), queryFn: () => api.pull(project, number) });
-const pullFilesQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pullFiles(project, number), queryFn: () => api.pullFiles(project, number) });
+const pullDiff = (project: string, number: number): DiffSource => ({ key: keys.pullFiles(project, number), path: diffs.pullFiles(project, number) });
+// Streamed: the commits (in the header) and the file list come at once, then each file as it's diffed.
+const pullFilesQuery = (project: string, number: number) => diffQuery<ComparisonMeta>(keys.pullFiles(project, number), diffs.pullFiles(project, number));
 
 export const Route = createFileRoute("/$owner/$repo/pull/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "commits" || s.tab === "files" ? { tab: s.tab } : {}),
@@ -39,6 +42,7 @@ function PullPage() {
 	const { tab } = Route.useSearch();
 	const data = useQuery({ ...pullQuery(project, number), enabled: Number.isInteger(number) });
 	const files = useQuery({ ...pullFilesQuery(project, number), enabled: Number.isInteger(number) });
+	const comparison = files.data?.meta ?? null;
 
 	if (data.isPending) return <Spinner />;
 	if (data.error) {
@@ -67,7 +71,7 @@ function PullPage() {
 						<b className="font-medium text-fg">{pull.author ?? "A deleted account"}</b>{" "}
 						{pull.mergedAt
 							? "merged changes"
-							: `${pull.state === "open" ? "wants to merge" : "proposed merging"} ${files.data ? `${files.data.commits.length}${files.data.capped ? "+" : ""} ${files.data.commits.length === 1 ? "commit" : "commits"}` : "changes"}`}{" "}
+							: `${pull.state === "open" ? "wants to merge" : "proposed merging"} ${comparison ? `${comparison.commits.length}${comparison.capped ? "+" : ""} ${comparison.commits.length === 1 ? "commit" : "commits"}` : "changes"}`}{" "}
 						into{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">{pull.base}</code> from{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">
@@ -85,24 +89,24 @@ function PullPage() {
 				</Link>
 				<Link from={Route.fullPath} search={{ tab: "commits" }} className={sub(tab === "commits")}>
 					<GitCommitHorizontal className="size-3.5" />
-					Commits {files.data && <span className="rounded-full bg-raised px-1.5 text-[11px] text-dim">{files.data.commits.length}</span>}
+					Commits {comparison && <span className="rounded-full bg-raised px-1.5 text-[11px] text-dim">{comparison.commits.length}</span>}
 				</Link>
 				<Link from={Route.fullPath} search={{ tab: "files" }} className={sub(tab === "files")}>
 					<FileDiff className="size-3.5" />
-					Files changed {files.data && <span className="rounded-full bg-raised px-1.5 text-[11px] text-dim">{files.data.diff.files.length}</span>}
+					Files changed {comparison && <span className="rounded-full bg-raised px-1.5 text-[11px] text-dim">{files.data?.list.length}</span>}
 				</Link>
 			</nav>
 			{!tab && <Conversation project={project} data={data.data} />}
 			{tab === "commits" &&
 				(files.isPending ? (
 					<Spinner />
-				) : files.error ? (
+				) : !comparison ? (
 					<ErrorNote error={files.error} />
-				) : files.data.commits.length === 0 ? (
+				) : comparison.commits.length === 0 ? (
 					<Empty title="No commits" />
 				) : (
 					<Panel>
-						<CommitList commits={files.data.commits} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} />
+						<CommitList commits={comparison.commits} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} />
 					</Panel>
 				))}
 			{tab === "files" && <Files project={project} pull={pull} reviewComments={data.data.reviewComments} files={files} />}
@@ -196,7 +200,7 @@ function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDo
 	const [method, setMethod] = useState<MergeMethod>("merge");
 	// The head shown in Files changed is the one that merges; if the branch moved since, the merge stops.
 	const files = useQuery({ ...pullFilesQuery(project, pull.number), enabled: pull.pullState === "open" });
-	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.head), onSuccess: onDone });
+	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.meta?.head), onSuccess: onDone });
 	// The server's own judgement of the checks (what a merge would get), so the two can't disagree.
 	const checks = usePullChecks(project, pull.number, pull.pullState === "open");
 	if (pull.pullState === "merged") {
@@ -222,7 +226,7 @@ function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDo
 	const needsReview = pull.reviewRequired && pull.decision !== "approved";
 	// Until they're loaded, required checks count as not passed. If they can't be loaded, the merge itself is still refused with the server's reason.
 	const c = checks.data;
-	const stale = c && files.data && c.head !== files.data.head;
+	const stale = c && files.data?.meta && c.head !== files.data.meta.head;
 	const checksReason =
 		pull.checksRequired && !checks.isError
 			? !c
@@ -346,7 +350,7 @@ interface Draft {
 }
 
 /** The diff, with existing line comments, and a pending review built up line by line. */
-function Files({ project, pull, reviewComments, files }: { project: string; pull: Pull; reviewComments: ReviewComment[]; files: ReturnType<typeof useQuery<Awaited<ReturnType<typeof api.pullFiles>>>> }) {
+function Files({ project, pull, reviewComments, files }: { project: string; pull: Pull; reviewComments: ReviewComment[]; files: UseQueryResult<StreamedDiff<ComparisonMeta>> }) {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
 	const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -422,10 +426,12 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 	}, [reviewComments, drafts, editing, text, canReview, project]);
 
 	if (files.isPending) return <Spinner />;
-	if (files.error) return <ErrorNote error={files.error} />;
-	if (!files.data) return null;
+	const head = files.data?.meta?.head;
+	if (!files.data || !head) return <ErrorNote error={files.error} />;
 	return (
 		<div className="space-y-3">
+			{/* A stream that broke partway keeps the files it got. */}
+			<ErrorNote error={files.error} />
 			{canReview && (
 				<div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-panel px-4 py-2.5 text-sm">
 					<span className="text-dim">Hover a line and press + to comment on it. {drafts.length > 0 && <b className="text-amber-300">{drafts.length} pending</b>}</span>
@@ -434,12 +440,12 @@ function Files({ project, pull, reviewComments, files }: { project: string; pull
 					</Button>
 				</div>
 			)}
-			<DiffView diff={files.data.diff} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} viewRef={pull.mergedAt ? undefined : pull.head} notes={notes} />
+			<DiffView diff={files.data} source={pullDiff(project, pull.number)} project={!pull.mergedAt && pull.headRepo && !pull.headRepo.startsWith("(") ? pull.headRepo : project} viewRef={pull.mergedAt ? undefined : pull.head} notes={notes} />
 			<Modal open={finishing} onClose={() => setFinishing(false)} title="Finish your review">
 				<FinishReview
 					project={project}
 					pull={pull}
-					commit={files.data.head}
+					commit={head}
 					drafts={drafts}
 					onDone={() => {
 						setFinishing(false);

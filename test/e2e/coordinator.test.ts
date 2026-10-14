@@ -681,6 +681,27 @@ test("code search, webhooks and notifications", async () => {
 		assert.equal((await as(null)(`${repo}/search?q=${"a".repeat(101)}`)).status, 400, "long phrases are refused");
 		assert.equal((await as(null)(`${repo}/search?q=aaa%00bbb`)).status, 400);
 
+		// The tree index behind search lists the default branch too: sizes (only it knows them), and every path for "Go to file".
+		const listing = (await (await as(null)(`${repo}/tree?path=src`)).json()) as { tree: { commit: string; entries: { path: string; size?: number | null }[] } };
+		assert.equal(listing.tree.commit, after);
+		assert.deepEqual(listing.tree.entries.map((e) => [e.path, e.size]), [["src/needle.ts", 41]]);
+		const listed = (await (await as(null)(`${repo}/paths`)).json()) as { commit: string; paths: string[] };
+		assert.deepEqual([listed.commit, listed.paths], [after, ["README.md", "src/needle.ts"]]);
+
+		// The commit's diff streamed: a header, each file, the totals. Then one file asked for on its own.
+		const streamed = await as(null)(`${repo}/commits/${after}`, { headers: { accept: "application/x-ndjson" } });
+		assert.match(streamed.headers.get("content-type") ?? "", /^application\/x-ndjson/);
+		const events = (await streamed.text()).trim().split("\n").map((l) => JSON.parse(l));
+		assert.deepEqual(events.map((e) => e.type), ["header", "file", "end"]);
+		assert.equal(events[0].meta.commit.hash, after);
+		assert.deepEqual(events[0].files.map((f: { path: string }) => f.path), ["src/needle.ts"]);
+		const hunk = events[1].file.hunks[0];
+		assert.equal(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`, "@@ -0,0 +1,1 @@");
+		assert.deepEqual([events[2].additions, events[2].deletions], [1, 0]);
+		const one = await as(null)(`${repo}/commits/${after}?${new URLSearchParams({ path: "src/needle.ts", from: events[0].trees.from, to: events[0].trees.to })}`);
+		assert.deepEqual(((await one.json()) as { file: unknown }).file, events[1].file);
+		assert.equal((await as(null)(`${repo}/commits/${after}?path=src/needle.ts&to=nothex`)).status, 400);
+
 		// A paused hook sends nothing more.
 		assert.equal((await as(ada)(`${repo}/hooks/${hook.id}`, { method: "PATCH", body: JSON.stringify({ active: false }) })).status, 200);
 		const seen = received.length;

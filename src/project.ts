@@ -8,11 +8,13 @@ import {
 	type Commit,
 	type CommitDetail,
 	type Comparison,
+	type ComparisonMeta,
 	type ConflictInfo,
 	type Diff,
 	type EventType,
 	type Blame,
 	type FileHistory,
+	type FileList,
 	type GitCredentials,
 	type Graph,
 	type GraphCommit,
@@ -31,7 +33,7 @@ import {
 } from "./api.ts";
 import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
-import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
+import { diffTrees, entryAt, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
 import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef, type TagRef } from "./git/protocol.ts";
 import { protectionFor, validPattern } from "./branch-rules.ts";
@@ -40,6 +42,7 @@ import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim, wikiRepoName } 
 import { Wiki, type SavePageInput } from "./wiki.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
+import { TreeIndex } from "./tree-index.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
@@ -57,6 +60,10 @@ const MAX_PUSH_ATTEMPTS = 3;
 const MAINLINE_DEPTH = 1000;
 /** Direct push tokens for people are long-lived; they end up in a git remote URL. */
 const REPO_TOKEN_TTL = 30 * 24 * 3600;
+/** How long one alarm works on the tree index before letting the alarm come back for more. */
+const INDEX_SLICE_MS = 5_000;
+/** Paths "Go to file" gets from the tree index. */
+const MAX_LISTED_PATHS = 100_000;
 /**
  * Artifacts fails a large share of concurrent forks of the same repo (40% at 8 at once, 0% at 2 in
  * our measurements), while forks of different repos don't interfere. So forks are throttled per
@@ -146,6 +153,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly sql: SqlStorage;
 	private readonly store: RepoStore;
 	private readonly code: CodeIndex;
+	private readonly index: TreeIndex;
+	/** Index steps that failed in a row, and when to try again. */
+	private indexRetry = { failures: 0, at: 0 };
 	private readonly hooks: Webhooks;
 	private readonly ci: CiRuns;
 	private readonly wiki: Wiki;
@@ -231,6 +241,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		}
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
 		this.code = new CodeIndex(this.sql);
+		this.index = new TreeIndex(this.sql, this.code);
 		this.hooks = new Webhooks(this.sql);
 		this.ci = new CiRuns({
 			sql: this.sql,
@@ -489,27 +500,68 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify({ ...this.knownRefs(meta), [branch]: oid }));
 	}
 
-	// ── Code search ──────────────────────────────────────────────────────────
+	// ── Tree index and code search ───────────────────────────────────────────
 
-	/** Asks the alarm to bring the code index up to the default branch. */
+	/** Asks the alarm to bring the tree index (and code search with it) up to the default branch. */
 	private async requestIndex(): Promise<void> {
-		if (!this.code.available) return;
 		this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('indexWanted', '1')");
 		await this.scheduleAlarm(Date.now());
 	}
 
+	/**
+	 * The alarm's share of indexing: where the default branch is now, if asked, then steps of the
+	 * update for up to INDEX_SLICE_MS; the alarm comes back for the rest. A failing step is retried
+	 * later, waiting longer each time; one that keeps failing drops the index, which the next push or
+	 * visit starts over.
+	 */
 	private async indexIfWanted(): Promise<void> {
 		const wanted = this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0;
-		if (!wanted) return;
+		if (!wanted && (!this.index.busy() || Date.now() < this.indexRetry.at)) return;
 		this.sql.exec("DELETE FROM meta WHERE key = 'indexWanted'");
 		const meta = this.meta();
 		try {
 			using repo = await this.store.get(meta.name);
-			const [head] = await repo.log({ ref: meta.defaultBranch, limit: 1 });
-			if (head) await this.code.update(repo, head.hash, head.treeHash);
+			if (wanted) {
+				const [head] = await repo.log({ ref: meta.defaultBranch, limit: 1 });
+				if (head) this.index.target(head.hash, head.treeHash);
+			}
+			const until = Date.now() + INDEX_SLICE_MS;
+			while (Date.now() < until && (await this.index.step(repo))) {}
+			this.indexRetry = { failures: 0, at: 0 };
 		} catch (err) {
 			console.error("indexing failed", err);
+			const failures = this.indexRetry.failures + 1;
+			if (failures >= 5) {
+				this.index.reset();
+				this.indexRetry = { failures: 0, at: 0 };
+			} else this.indexRetry = { failures, at: Date.now() + 5_000 * 2 ** failures };
 		}
+	}
+
+	/**
+	 * The commit `ref` names if the tree index might describe it (the default branch's recorded head,
+	 * or a commit hash), and whether it's the default branch, which a stale index should catch up to.
+	 */
+	private indexable(ref: string | undefined): { commit: string | null; head: boolean } {
+		const meta = this.meta();
+		if (ref === undefined || ref === meta.defaultBranch) return { commit: this.knownRefs(meta)[meta.defaultBranch] ?? null, head: true };
+		return { commit: /^[0-9a-f]{40}$/.test(ref) ? ref : null, head: false };
+	}
+
+	/** Starts indexing the default branch's head unless that's already under way or done. */
+	private async catchUp(commit: string | null): Promise<void> {
+		const state = this.index.state();
+		if (commit !== null && (state.update?.commit === commit || state.next?.commit === commit)) return;
+		await this.requestIndex();
+	}
+
+	/** Every file path at `ref`, from the tree index; null if it can't answer (the caller reads storage). */
+	async indexedPaths(ref?: string): Promise<FileList | null> {
+		const at = this.indexable(ref);
+		const listed = at.commit ? this.index.paths(at.commit, MAX_LISTED_PATHS) : null;
+		if (listed && at.commit) return { commit: at.commit, ...listed };
+		if (at.head && at.commit) await this.catchUp(at.commit);
+		return null;
 	}
 
 	/** Searches the default branch. Starts indexing if the index is behind; results may then be older. */
@@ -670,11 +722,17 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Lists a directory at `ref` (same refs as readFile). `commit` is null for an empty repo. */
 	async tree(ref: string | undefined, path = ""): Promise<Tree> {
 		const meta = this.meta();
+		const parts = path.split("/").filter(Boolean);
+		const dir = parts.join("/");
+		// The default branch's head (or a commit) the tree index describes is listed with no reads from storage.
+		const at = this.indexable(ref);
+		const listing = at.commit ? this.index.listing(at.commit, dir) : null;
+		if (listing && "missing" in listing) throw new HttpError(404, "NOT_FOUND", `${listing.missing} is not a directory`);
+		if (listing && at.commit) return { commit: at.commit, path: dir, entries: listing.entries };
 		const { repoName, ref: resolved } = await this.freshRef(ref ?? meta.defaultBranch);
 		using repo = await this.store.get(repoName);
 		const [commit] = await repo.log({ ref: resolved, limit: 1 });
-		const parts = path.split("/").filter(Boolean);
-		const dir = parts.join("/");
+		if (at.head && commit) await this.catchUp(commit.hash);
 		if (!commit) return { commit: null, path: dir, entries: [] };
 		let hash = commit.treeHash;
 		for (const [i, part] of parts.entries()) {
@@ -742,23 +800,16 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * name this repository's refs; the API checks who may read the fork.
 	 */
 	async pullCompare(base: string, headRepo: string | null, headBranch: string): Promise<Comparison> {
+		return this.withDiff(await this.pullComparePlan(base, headRepo, headBranch));
+	}
+
+	/** pullCompare without the diff: what to diff, for the Worker to stream. */
+	async pullComparePlan(base: string, headRepo: string | null, headBranch: string): Promise<DiffPlan<ComparisonMeta>> {
 		const meta = this.meta();
+		const repoName = headRepo && headRepo !== meta.name ? headRepo : meta.name;
 		using project = await this.store.get(meta.name);
-		using fork = headRepo && headRepo !== meta.name ? await this.store.get(headRepo) : null;
-		const repo = fork ?? project;
-		const mainline = await project.log({ ref: base, limit: MAINLINE_DEPTH });
-		if (mainline.length === 0) throw new HttpError(404, "NOT_FOUND", `${base} does not exist or has no commits`);
-		const tip = await resolveCommit(repo, headBranch);
-		const walk = await walkToMainline(repo, tip.hash, mainline.map((c) => c.hash));
-		const from = mainline.find((c) => c.hash === walk.mergeBase) ?? mainline[0];
-		return {
-			base: mainline[0].hash,
-			head: tip.hash,
-			mergeBase: walk.mergeBase,
-			commits: walk.commits,
-			capped: walk.capped,
-			diff: await diffTrees(repo, from.treeHash, tip.treeHash),
-		};
+		using fork = repoName !== meta.name ? await this.store.get(repoName) : null;
+		return comparePlan(project, fork ?? project, repoName, base, headBranch);
 	}
 
 	/**
@@ -823,23 +874,33 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	/** A commit and its diff against its first parent. `ref` picks the repo, as in readFile. */
 	async commit(hash: string, ref?: string): Promise<{ commit: CommitDetail; diff: Diff }> {
+		const plan = await this.commitPlan(hash, ref);
+		using repo = await this.store.get(plan.repo);
+		return { commit: plan.meta.commit, diff: await diffTrees(repo, plan.from, plan.to) };
+	}
+
+	/** commit without the diff: what to diff, for the Worker to stream. */
+	async commitPlan(hash: string, ref?: string): Promise<DiffPlan<{ commit: CommitDetail }>> {
 		const { repoName } = this.resolveRef(ref ?? this.meta().defaultBranch);
 		using repo = await this.store.get(repoName);
 		const commit = await resolveCommit(repo, hash);
 		const parent = commit.parents[0] ? await resolveCommit(repo, commit.parents[0]) : null;
-		const diff = await diffTrees(repo, parent?.treeHash ?? null, commit.treeHash);
 		return {
-			commit: {
-				hash: commit.hash,
-				treeHash: commit.treeHash,
-				message: commit.message,
-				author: commit.author,
-				committer: commit.committer,
-				parents: commit.parents,
-				authoredAt: commit.authoredAt,
-				committedAt: commit.committedAt,
+			repo: repoName,
+			from: parent?.treeHash ?? null,
+			to: commit.treeHash,
+			meta: {
+				commit: {
+					hash: commit.hash,
+					treeHash: commit.treeHash,
+					message: commit.message,
+					author: commit.author,
+					committer: commit.committer,
+					parents: commit.parents,
+					authoredAt: commit.authoredAt,
+					committedAt: commit.committedAt,
+				},
 			},
-			diff,
 		};
 	}
 
@@ -848,36 +909,47 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * `head` anything readFile accepts, including `task:<id>`.
 	 */
 	async compare(base: string, head: string): Promise<Comparison> {
+		return this.withDiff(await this.comparePlan(base, head));
+	}
+
+	/** compare without the diff: what to diff, for the Worker to stream. */
+	async comparePlan(base: string, head: string): Promise<DiffPlan<ComparisonMeta>> {
 		const meta = this.meta();
 		const target = this.resolveRef(head);
 		using project = await this.store.get(meta.name);
 		using fork = target.repoName === meta.name ? null : await this.store.get(target.repoName);
-		const repo = fork ?? project;
-		const mainline = await project.log({ ref: base, limit: MAINLINE_DEPTH });
-		if (mainline.length === 0) throw new HttpError(404, "NOT_FOUND", `${base} does not exist or has no commits`);
-		const tip = await resolveCommit(repo, target.ref);
-		const walk = await walkToMainline(repo, tip.hash, mainline.map((c) => c.hash));
-		// Without a merge base in reach, fall back to comparing the two tips directly.
-		const from = mainline.find((c) => c.hash === walk.mergeBase) ?? mainline[0];
-		return {
-			base: mainline[0].hash,
-			head: tip.hash,
-			mergeBase: walk.mergeBase,
-			commits: walk.commits,
-			capped: walk.capped,
-			diff: await diffTrees(repo, from.treeHash, tip.treeHash),
-		};
+		return comparePlan(project, fork ?? project, target.repoName, base, target.ref);
 	}
 
 	/** What a task changed: its fork against the default branch, or what it merged. */
 	async taskChanges(id: string): Promise<Comparison> {
+		return this.withDiff(await this.taskChangesPlan(id));
+	}
+
+	/** taskChanges without the diff: what to diff, for the Worker to stream. */
+	async taskChangesPlan(id: string): Promise<DiffPlan<ComparisonMeta>> {
 		const row = this.row(id);
-		if (!row.merged_oid) return this.compare(this.meta().defaultBranch, `task:${id}`);
+		if (!row.merged_oid) return this.comparePlan(this.meta().defaultBranch, `task:${id}`);
 		using repo = await this.store.get(this.meta().name);
 		const merge = await resolveCommit(repo, row.merged_oid);
 		// A merge commit's first parent is the default branch it landed on; a fast-forward has none.
-		if (merge.parents.length > 1) return this.compare(merge.parents[0], merge.parents[1]);
-		return this.compare(row.base_oid ?? merge.parents[0] ?? merge.hash, merge.hash);
+		if (merge.parents.length > 1) return this.comparePlan(merge.parents[0], merge.parents[1]);
+		return this.comparePlan(row.base_oid ?? merge.parents[0] ?? merge.hash, merge.hash);
+	}
+
+	/**
+	 * The repository whose objects a diff reads, for loading one file of it: a fork `headRepo` (the
+	 * API has checked who may read it), else the repository `ref` resolves to, as in readFile.
+	 */
+	async diffRepo(ref?: string | null, headRepo?: string | null): Promise<string> {
+		const meta = this.meta();
+		if (headRepo && headRepo !== meta.name) return headRepo;
+		return ref ? this.resolveRef(ref).repoName : meta.name;
+	}
+
+	private async withDiff(plan: DiffPlan<ComparisonMeta>): Promise<Comparison> {
+		using repo = await this.store.get(plan.repo);
+		return { ...plan.meta, diff: await diffTrees(repo, plan.from, plan.to) };
 	}
 
 	/** Branches of the project repo, and each active task's fork, with ahead/behind counts unless `counts` is false. */
@@ -1263,6 +1335,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const due = this.hooks.nextDue();
 		if (due !== null) await this.scheduleAlarm(Math.max(due, Date.now() + 1_000));
 		if (this.sql.exec("SELECT 1 FROM meta WHERE key = 'indexWanted'").toArray().length > 0) await this.scheduleAlarm(Date.now() + 1_000);
+		// An index update left over: the next slice soon, with room for requests (and other jobs) between.
+		if (this.metaOrNull() && this.index.busy()) await this.scheduleAlarm(Math.max(Date.now() + 250, this.indexRetry.at));
 		if (this.sql.exec("SELECT 1 FROM ci_pushes LIMIT 1").toArray().length > 0) await this.scheduleAlarm(Date.now() + 5_000);
 		if (this.metaOrNull() && this.ci.busy()) await this.scheduleAlarm(Date.now() + 30_000);
 		const expiry = this.metaOrNull() ? this.ci.waitingExpiry() : null;
@@ -2277,18 +2351,28 @@ async function step<T>(name: string, fn: () => Promise<T>): Promise<T> {
 	}
 }
 
-/** The tree entry at `path` under the root tree `tree`, or null. */
-async function entryAt(repo: ObjectReader, tree: string, path: string) {
-	const parts = path.split("/");
-	let hash = tree;
-	for (const [i, part] of parts.entries()) {
-		const entry = (await repo.readTree(hash))?.find((e) => e.name === part);
-		if (!entry) return null;
-		if (i === parts.length - 1) return entry;
-		if (entry.type !== "tree") return null;
-		hash = entry.hash;
-	}
-	return null;
+/** A diff to work out: which repository's objects, its two root trees (`from` null: a root commit), and what the page shows with it. */
+export interface DiffPlan<M> {
+	repo: string;
+	from: string | null;
+	to: string;
+	meta: M;
+}
+
+/** What `head` (in `repo`, named `repoName`) adds to `base` (in `project`): the commits since their merge base, and the trees to diff. */
+async function comparePlan(project: RepoHandle, repo: RepoHandle, repoName: string, base: string, head: string): Promise<DiffPlan<ComparisonMeta>> {
+	const mainline = await project.log({ ref: base, limit: MAINLINE_DEPTH });
+	if (mainline.length === 0) throw new HttpError(404, "NOT_FOUND", `${base} does not exist or has no commits`);
+	const tip = await resolveCommit(repo, head);
+	const walk = await walkToMainline(repo, tip.hash, mainline.map((c) => c.hash));
+	// Without a merge base in reach, fall back to comparing the two tips directly.
+	const from = mainline.find((c) => c.hash === walk.mergeBase) ?? mainline[0];
+	return {
+		repo: repoName,
+		from: from.treeHash,
+		to: tip.treeHash,
+		meta: { base: mainline[0].hash, head: tip.hash, mergeBase: walk.mergeBase, commits: walk.commits, capped: walk.capped },
+	};
 }
 
 /** Reads a commit by full hash, or the tip of a branch or tag. */

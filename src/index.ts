@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
-import type { ApiError, PullChecks, Comparison, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
+import type { ApiError, PullChecks, Comparison, ComparisonMeta, Diff, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
 import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
@@ -75,7 +75,8 @@ import { MAX_QUERY_LENGTH } from "./search.ts";
 import jobApi from "./ci/job-api.ts";
 import actions from "./ci/routes.ts";
 import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
-import type { ProjectCoordinator, Registry } from "./project.ts";
+import type { DiffPlan, ProjectCoordinator, Registry } from "./project.ts";
+import { diffList, diffPath, diffStream, diffTrees } from "./git/diff.ts";
 import { repoStore } from "./store.ts";
 import { hostKey, parsePublicKey, SSH_PATH } from "./ssh/keys.ts";
 import {
@@ -1079,6 +1080,13 @@ repo.get("/blame", async (c) => {
 // Every file path at a ref, for the file finder ("Go to file"). Capped like archives, but truncated rather than refused.
 repo.get("/paths", async (c) => {
 	const ref = c.req.query("ref");
+	// The default branch's head, once indexed, is listed by its coordinator without reading any trees.
+	const indexed = await project(c).indexedPaths(ref);
+	if (indexed) {
+		return c.json(indexed satisfies FileList, 200, {
+			"cache-control": ref === indexed.commit ? "private, max-age=31536000, immutable" : "private, no-cache",
+		});
+	}
 	const at = await project(c)
 		.locate(ref)
 		.catch((err) => {
@@ -1147,13 +1155,65 @@ repo.get("/archive", async (c) => {
 	}
 });
 
-repo.get("/commits/:hash", async (c) => c.json(await project(c).commit(c.req.param("hash"), c.req.query("ref"))));
+const TREE_HASH = /^[0-9a-f]{40}$/;
+
+/**
+ * Answers a diff endpoint three ways. By default, JSON with the whole diff (`json` shapes it). With
+ * `accept: application/x-ndjson`, the diff streamed file by file (see DiffEvent). With `?path=&to=`
+ * (and `from`, the trees a streamed header named), that one file with all its hunks, for "Load diff";
+ * that skips `plan` (and its history walk), reading only from the repository `repoFor` names, which
+ * the endpoint's own checks decide. Diffs are worked out here, not in the repository's coordinator,
+ * so a big one doesn't hold up everything else in the repository.
+ */
+async function diffResponse<M>(c: Context<App>, plan: () => Promise<DiffPlan<M>>, json: (meta: M, diff: Diff) => unknown, repoFor: () => Promise<string>) {
+	const path = c.req.query("path")?.replace(/^\/+|\/+$/g, "");
+	if (path !== undefined) {
+		const from = c.req.query("from") || null;
+		const to = c.req.query("to") ?? "";
+		if (!path || !TREE_HASH.test(to) || (from !== null && !TREE_HASH.test(from))) throw new HttpError(400, "INVALID_INPUT", "path, to and from (tree hashes) are required");
+		using store = await repoStore(c.env).get(await repoFor());
+		const file = await diffPath(store, from, to, path);
+		if (!file) throw new HttpError(404, "NOT_FOUND", `${path} isn't in this diff`);
+		// Trees never change, so neither does a file's diff between two of them.
+		return c.json({ file }, 200, { "cache-control": "private, max-age=31536000, immutable" });
+	}
+	const p = await plan();
+	if (!c.req.header("accept")?.includes("application/x-ndjson")) {
+		using store = await repoStore(c.env).get(p.repo);
+		return c.json(json(p.meta, await diffTrees(store, p.from, p.to)));
+	}
+	// Errors before the first line (a missing tree) are still ordinary error responses.
+	const store = await repoStore(c.env).get(p.repo);
+	try {
+		const list = await diffList(store, p.from, p.to);
+		const stream = diffStream(store, list, { meta: p.meta, trees: { from: p.from, to: p.to } }, () => store[Symbol.dispose]());
+		return c.body(stream, 200, { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+	} catch (err) {
+		store[Symbol.dispose]();
+		throw err;
+	}
+}
+
+repo.get("/commits/:hash", async (c) => {
+	const ref = c.req.query("ref");
+	return diffResponse(
+		c,
+		() => project(c).commitPlan(c.req.param("hash"), ref),
+		(meta, diff) => ({ ...meta, diff }),
+		() => project(c).diffRepo(ref),
+	);
+});
 
 repo.get("/compare", async (c) => {
 	const base = c.req.query("base");
 	const head = c.req.query("head");
 	if (!base || !head) throw new HttpError(400, "INVALID_INPUT", "base and head are required");
-	return c.json({ comparison: await project(c).compare(base, head) });
+	return diffResponse(
+		c,
+		() => project(c).comparePlan(base, head),
+		(meta, diff) => ({ comparison: { ...meta, diff } satisfies Comparison }),
+		() => project(c).diffRepo(head),
+	);
 });
 
 // ?counts=0 skips the ahead/behind walks, for pickers that only need names.
@@ -1894,12 +1954,18 @@ repo.get("/pulls/:number", async (c) => {
 repo.get("/pulls/:number/files", async (c) => {
 	const pull = await loadPull(c);
 	// Once merged, the branches may be gone or moved on; what landed is the merge (or squashed) commit.
-	if (pull.mergedAt && pull.mergeCommit) {
-		const { commit, diff } = await project(c).commit(pull.mergeCommit);
-		const comparison: Comparison = { base: commit.parents[0] ?? commit.hash, head: commit.hash, mergeBase: commit.parents[0] ?? null, commits: [commit], capped: false, diff };
-		return c.json({ comparison });
-	}
-	return c.json({ comparison: await project(c).pullCompare(pull.baseBranch, await liveHead(c, pull), pull.headBranch) });
+	const merged = pull.mergedAt ? pull.mergeCommit : null;
+	return diffResponse(
+		c,
+		async (): Promise<DiffPlan<ComparisonMeta>> => {
+			if (!merged) return project(c).pullComparePlan(pull.baseBranch, await liveHead(c, pull), pull.headBranch);
+			const { meta, ...plan } = await project(c).commitPlan(merged);
+			const commit = meta.commit;
+			return { ...plan, meta: { base: commit.parents[0] ?? commit.hash, head: commit.hash, mergeBase: commit.parents[0] ?? null, commits: [commit], capped: false } };
+		},
+		(meta, diff) => ({ comparison: { ...meta, diff } satisfies Comparison }),
+		async () => (merged ? project(c).diffRepo() : project(c).diffRepo(null, await liveHead(c, pull))),
+	);
 });
 
 // The checks on an open pull request's head, judged as its merge would be.
@@ -2090,9 +2156,15 @@ repo.post("/tasks", async (c) => {
 
 repo.get("/tasks/:task", async (c) => c.json({ task: await project(c).getTask(c.req.param("task")) }));
 
-repo.get("/tasks/:task/changes", async (c) =>
-	c.json({ comparison: await project(c).taskChanges(c.req.param("task")) }),
-);
+repo.get("/tasks/:task/changes", async (c) => {
+	const task = c.req.param("task");
+	return diffResponse(
+		c,
+		() => project(c).taskChangesPlan(task),
+		(meta, diff) => ({ comparison: { ...meta, diff } satisfies Comparison }),
+		() => project(c).diffRepo(`task:${task}`),
+	);
+});
 
 repo.post("/tasks/:task/access", async (c) => {
 	await requireCanPush(c);

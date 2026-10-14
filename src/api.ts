@@ -146,6 +146,8 @@ export interface TreeEntry {
 	path: string;
 	type: "tree" | "blob" | "exec" | "symlink" | "gitlink";
 	hash: string;
+	/** Bytes, for files listed from the default branch's index once read; otherwise absent. */
+	size?: number | null;
 }
 
 /** A directory listing; directories first, then files, each alphabetical. */
@@ -182,8 +184,27 @@ export interface FileDiff {
 	binary: boolean;
 	/** Too big to diff inline; additions and deletions are 0. */
 	tooLarge: boolean;
+	/** In a streamed diff: counted, but sent without hunks (many changed lines, or a lock or generated file); load them on their own. */
+	deferred?: "large" | "generated";
 	hunks: DiffHunk[];
 }
+
+/** A file in a streamed diff's header, before its hunks arrive. */
+export type DiffEntry = Pick<FileDiff, "path" | "status" | "oldMode" | "newMode">;
+
+/** A comparison without its diff: what a streamed comparison's header carries. */
+export type ComparisonMeta = Omit<Comparison, "diff">;
+
+/**
+ * One line of a streamed diff (NDJSON, asked for with `accept: application/x-ndjson`): a header,
+ * then one `file` per header entry in the same order, then `end`, or `error` if it failed partway.
+ * `trees` are the root trees compared; asking the same URL with `?path=&from=&to=` gives one file.
+ */
+export type DiffEvent<M = unknown> =
+	| { type: "header"; meta: M; trees: { from: string | null; to: string }; files: DiffEntry[]; truncated: boolean }
+	| { type: "file"; file: FileDiff }
+	| { type: "end"; additions: number; deletions: number }
+	| { type: "error"; message: string };
 
 export interface Diff {
 	files: FileDiff[];
