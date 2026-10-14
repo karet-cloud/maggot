@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 // Production CI seeds this snapshot using Git; the Artifacts URL importer cannot import Linux reliably.
 import { execFile } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { seedSourceBatches, cleanupSourceBatches, type SeedAccess } from "./git-source-batches.ts";
 
 const base = process.env.MAGGOT_URL ?? "https://maggot.karet.cloud";
 const username = "maggot-mirror";
@@ -63,7 +64,7 @@ if (existing.ok) {
 	populated = Boolean((await rootTree()).commit);
 } else if (existing.status !== 404) await failure(existing, "Check demo repository");
 
-if (!populated) {
+{
 	const scratch = await mkdtemp(join(tmpdir(), "maggot-linux-seed-"));
 	try {
 		const mirror = join(scratch, "linux.git");
@@ -72,19 +73,29 @@ if (!populated) {
 		delete env.MAGGOT_API_KEY;
 		delete env.MAGGOT_MIRROR_PASSWORD;
 		delete env.CLOUDFLARE_API_TOKEN;
-		await exec("git", ["clone", "--quiet", "--bare", "--depth", "100", "--single-branch", "--branch", "master", "--no-tags", "https://github.com/torvalds/linux.git", mirror], { env, timeout: 300_000 });
+		if (!populated) {
+			await exec("git", ["clone", "--quiet", "--bare", "--depth", "1", "--single-branch", "--branch", "master", "--no-tags", "https://github.com/torvalds/linux.git", mirror], { env, timeout: 300_000 });
+			const source = (await exec("git", ["-C", mirror, "remote", "get-url", "origin"], { env })).stdout.trim();
+			if (source !== "https://github.com/torvalds/linux.git") throw new Error("Unexpected Linux source remote");
+		} else await exec("git", ["init", "--quiet", "--bare", "-b", "master", mirror], { env });
 		if (!exists) {
-			const created = await request("/api/repos", { name: "linux", visibility: "public", defaultBranch: "master", readme: false, description: "Linux kernel source mirror of https://github.com/torvalds/linux — master, recent shallow history. Upstream copyright and licensing apply." }, { cookie });
+			const created = await request("/api/repos", { name: "linux", visibility: "public", defaultBranch: "master", readme: false, description: "Linux kernel source mirror of https://github.com/torvalds/linux — master source snapshot. Upstream copyright and licensing apply." }, { cookie });
 			if (!created.ok) await failure(created, "Create public Linux mirror");
 		}
-		const issued = await request(`${repoPath}/credentials`, { scope: "write", ttlSeconds: 300 }, { authorization: `Bearer ${adminKey}` });
-		if (!issued.ok) await failure(issued, "Issue short-lived storage credentials");
-		const credentials = await issued.json() as { token: string; remote: string };
-		const remote = new URL(credentials.remote);
-		if (remote.protocol !== "https:" || !remote.hostname.endsWith(".artifacts.cloudflare.net") || remote.username || remote.password) throw new Error("Unexpected storage Git remote");
-		const askpass = join(scratch, "askpass.cjs");
-		await writeFile(askpass, '#!/usr/bin/env node\nprocess.stdout.write(process.argv[2].toLowerCase().includes("username") ? "maggot-mirror" : process.env.MAGGOT_PUSH_TOKEN);\n', { mode: 0o700 });
-		await exec("git", ["-C", mirror, "push", "--quiet", credentials.remote, "master:master"], { env: { ...env, GIT_ASKPASS: askpass, MAGGOT_PUSH_TOKEN: credentials.token.split("?expires=")[0] }, timeout: 300_000 });
+		let access: SeedAccess | undefined;
+		let refreshAt = 0;
+		const getAccess = async (): Promise<SeedAccess> => {
+			if (access && Date.now() < refreshAt) return access;
+			const issued = await request(`${repoPath}/credentials`, { scope: "write", ttlSeconds: 300 }, { authorization: `Bearer ${adminKey}` });
+			if (!issued.ok) await failure(issued, "Issue short-lived storage credentials");
+			const credentials = await issued.json() as SeedAccess;
+			const remote = new URL(credentials.remote);
+			if (remote.protocol !== "https:" || !remote.hostname.endsWith(".artifacts.cloudflare.net") || remote.username || remote.password) throw new Error("Unexpected storage Git remote");
+			access = credentials; refreshAt = Date.now() + 120_000;
+			return credentials;
+		};
+		if (populated) await cleanupSourceBatches(mirror, getAccess, env);
+		else await seedSourceBatches(mirror, getAccess, env);
 	} finally {
 		await rm(scratch, { recursive: true, force: true });
 	}
