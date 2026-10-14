@@ -40,7 +40,7 @@ export const lineKey = (path: string, side: "new" | "old", line: number) => `${s
  * A full diff: a summary with a file index, then each file's hunks. `viewRef` is where "View file"
  * links point (the new side of the diff).
  */
-export function DiffView({ diff, project, viewRef, title, notes }: { diff: Diff; project: string; viewRef?: string; title?: ReactNode; notes?: DiffNotes }) {
+export function DiffView({ diff, project, viewRef, title, notes, links = true }: { diff: Diff; project: string; viewRef?: string; title?: ReactNode; notes?: DiffNotes; links?: boolean }) {
 	const [layout, setLayout] = useLayout();
 	const [indexOpen, setIndexOpen] = useState(diff.files.length <= 12);
 	if (diff.files.length === 0) {
@@ -101,7 +101,7 @@ export function DiffView({ diff, project, viewRef, title, notes }: { diff: Diff;
 				)}
 			</Panel>
 			{diff.files.map((f) => (
-				<FileSection key={f.path} file={f} layout={layout} project={project} viewRef={viewRef} notes={notes} />
+				<FileSection key={f.path} file={f} layout={layout} project={project} viewRef={viewRef} notes={notes} links={links} />
 			))}
 		</div>
 	);
@@ -137,7 +137,7 @@ function Counts({ file }: { file: FileDiff }) {
 	);
 }
 
-function FileSection({ file, layout, project, viewRef, notes }: { file: FileDiff; layout: Layout; project: string; viewRef?: string; notes?: DiffNotes }) {
+function FileSection({ file, layout, project, viewRef, notes, links }: { file: FileDiff; layout: Layout; project: string; viewRef?: string; notes?: DiffNotes; links: boolean }) {
 	const [open, setOpen] = useState(file.additions + file.deletions <= COLLAPSE_ABOVE);
 	const modeChange = file.oldMode && file.newMode && file.oldMode !== file.newMode ? `${file.oldMode} → ${file.newMode}` : null;
 	const parent = file.path.split("/").slice(0, -1).join("/") || undefined;
@@ -151,7 +151,7 @@ function FileSection({ file, layout, project, viewRef, notes }: { file: FileDiff
 				<span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{file.path}</span>
 				{modeChange && <span className="font-mono text-[11px] text-faint">{modeChange}</span>}
 				<Counts file={file} />
-				{file.status !== "deleted" && (
+				{links && file.status !== "deleted" && (
 					<Link
 						to="/$owner/$repo"
 						params={repoParams(project)}
