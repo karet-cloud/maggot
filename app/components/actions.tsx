@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Archive, Ban, CircleCheck, CircleDashed, CircleMinus, CirclePause, CircleX, Database, Download, KeyRound, LoaderCircle, Play, Plus, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { useState } from "react";
-import { api, keys, repoParams, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
+import { api, ApiError, keys, repoParams, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
 import { duration, formatBytes } from "../lib/format.ts";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
@@ -94,8 +94,13 @@ export function usePullChecks(project: string, number: number, open: boolean) {
 		queryFn: () => api.pullChecks(project, number),
 		enabled: open,
 		// Runs waiting for approval change only when someone approves them, which the live connection reports.
-		// An error keeps the last data, so a failed refetch (409 once merged) mustn't keep polling on a stale "pending".
-		refetchInterval: (q) => (q.state.status !== "error" && q.state.data?.state === "pending" ? 5000 : false),
+		// An error keeps the last data: once merged or closed (409) a stale "pending" mustn't keep polling, but a
+		// passing failure (network, 5xx) shouldn't freeze it either, so those back off and keep trying.
+		refetchInterval: (q) => {
+			if (q.state.data?.state !== "pending") return false;
+			if (q.state.status !== "error") return 5000;
+			return q.state.error instanceof ApiError && q.state.error.status === 409 ? false : 20_000;
+		},
 		retry: false,
 	});
 }

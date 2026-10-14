@@ -15,9 +15,9 @@ export const Route = createFileRoute("/explore")({
 
 function Explore() {
 	const { sort } = Route.useSearch();
-	const filter = { sort: sort ?? ("created" as const) };
+	const filter = { sort: sort ?? ("created" as const), visibility: "public" as const };
 	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
-	const publicRepos = repos.data?.filter((r) => r.visibility === "public");
+	const publicRepos = repos.data;
 	return (
 		<main className="mx-auto max-w-[1100px] space-y-4 px-5 py-8">
 			<div className="flex items-center justify-between gap-3">

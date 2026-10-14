@@ -20,8 +20,9 @@ function SignUp() {
 				email: form.email.trim(),
 				password: form.password,
 			}),
-		onSuccess: async () => {
-			await queryClient.resetQueries();
+		onSuccess: () => {
+			// Everything cached was read signed out; drop it rather than wait for every query to refetch first.
+			queryClient.removeQueries();
 			void navigate({ to: "/new" });
 		},
 	});

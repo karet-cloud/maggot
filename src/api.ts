@@ -114,6 +114,8 @@ export type EventType =
 	| "tag.created"
 	| "tag.deleted"
 	| "release.published"
+	| "release.edited"
+	| "release.deleted"
 	| "issue.opened"
 	| "issue.closed"
 	| "issue.reopened"

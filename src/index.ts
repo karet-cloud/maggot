@@ -129,9 +129,11 @@ app.use("/api/auth/*", async (c, next) => {
 		return typeof value === "string" ? value.trim().toLowerCase() : "";
 	};
 	if (action === "sign-up/email") {
-		// Usernames are URL segments; Better Auth's validator only checks their shape (see src/auth.ts).
-		const name = field("username");
-		if (reservedName(name)) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
+		// Usernames are URL segments; Better Auth's validator only checks their shape (see src/auth.ts). It
+		// also fills a missing username from displayUsername, so a username is required and both are checked.
+		if (typeof fields?.username !== "string" || !fields.username.trim()) throw new HttpError(400, "INVALID_INPUT", "Choose a username");
+		const name = [field("username"), field("displayUsername")].find(reservedName);
+		if (name) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
 		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
 	} else if (action === "sign-in/username" || action === "sign-in/email") {
 		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
@@ -598,6 +600,7 @@ app.get("/api/repos", async (c) => {
 		starredBy: starrer?.id,
 		query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 		sort: c.req.query("sort") === "stars" ? "stars" : "created",
+		publicOnly: c.req.query("visibility") === "public",
 		limit: intParam(c.req.query("limit"), 100, 500),
 	});
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
@@ -957,8 +960,8 @@ repo.put("/collaborators/:username", async (c) => {
 	const row = userRepo(c);
 	const user = requireUser(c);
 	const input = await body<{ permission?: string }>(c);
-	// Like the invite form, least access unless asked for more.
-	const permission = assertPermission(input.permission ?? "read");
+	// A new invite gets least access unless asked for more; an existing grant changes only when one is given.
+	const permission = input.permission === undefined || input.permission === null ? undefined : assertPermission(input.permission);
 	const result = await setCollaborator(db(c.env), row, c.req.param("username"), permission, user.id);
 	// A changed grant (a downgrade, say) applies to views already open too.
 	if (!result.invited) reauthorize(c, [row.id]);

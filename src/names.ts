@@ -20,7 +20,7 @@ export const RESERVED_NAMES: ReadonlySet<string> = new Set([
 	"signin", "signout", "site", "ssh", "stars", "status", "support", "system", "terms", "topics", "trending", "user", "users", "www",
 ]);
 
-/** Whether `name` (any case) is a page's first URL segment. Every one of these was always reserved, so no account has one. */
+/** Whether `name` (any case) is a page's first URL segment. Some were reserved only when their page was added; production had no account with any of them on 2026-10-15. */
 export function routeName(name: string): boolean {
 	return ROUTE_NAMES.has(name.toLowerCase());
 }

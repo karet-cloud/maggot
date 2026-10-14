@@ -218,11 +218,13 @@ export async function listCollaborators(database: D1Database, repoId: string): P
 }
 
 /** Invites someone to a repository with a permission, or changes an existing collaborator's. Returns their id. */
-export async function setCollaborator(database: D1Database, repo: { id: string; ownerId: string }, username: string, permission: Permission, invitedBy: string): Promise<{ id: string; invited: boolean }> {
+/** Invites `username` (with `permission`, read by default) or changes an existing grant (only when `permission` is given). */
+export async function setCollaborator(database: D1Database, repo: { id: string; ownerId: string }, username: string, permission: Permission | undefined, invitedBy: string): Promise<{ id: string; invited: boolean }> {
 	const id = await userId(database, username);
 	if (id === repo.ownerId) throw new HttpError(400, "INVALID_INPUT", "That's the repository's owner");
 	const existing = await database.prepare(`select "state" from "repo_collaborator" where "repoId" = ? and "userId" = ?`).bind(repo.id, id).first<{ state: string }>();
 	if (existing) {
+		if (permission === undefined) return { id, invited: false };
 		await database.prepare(`update "repo_collaborator" set "permission" = ? where "repoId" = ? and "userId" = ?`).bind(permission, repo.id, id).run();
 		return { id, invited: false };
 	}
@@ -230,7 +232,7 @@ export async function setCollaborator(database: D1Database, repo: { id: string; 
 	if ((count?.n ?? 0) >= MAX_COLLABORATORS) throw new HttpError(403, "QUOTA_EXCEEDED", `A repository can have at most ${MAX_COLLABORATORS} collaborators`);
 	await database
 		.prepare(`insert into "repo_collaborator" ("repoId", "userId", "permission", "state", "invitedBy", "createdAt") values (?, ?, ?, 'invited', ?, ?)`)
-		.bind(repo.id, id, permission, invitedBy, new Date().toISOString())
+		.bind(repo.id, id, permission ?? "read", invitedBy, new Date().toISOString())
 		.run();
 	return { id, invited: true };
 }
