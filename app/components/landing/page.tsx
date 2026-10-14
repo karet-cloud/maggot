@@ -131,7 +131,7 @@ export function Landing() {
 					</a>
 				</div>
 				<div className="mx-auto mt-16 max-w-[1000px]">
-					<p className="faint mb-3 text-[13px]">The app, live: browse the files, open an issue, review pull request #48. Nothing here is a picture.</p>
+					<p className="faint mb-3 text-[13px]">Browse a cached Linux kernel preview. Open files in the public mirror, or try the demo issue and review.</p>
 					<div className="frame rounded-xl">
 						<AppDemo />
 					</div>
