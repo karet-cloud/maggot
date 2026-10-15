@@ -15,7 +15,7 @@ function ForgotPassword() {
 	if (request.isSuccess) {
 		return (
 			<main className="mx-auto max-w-sm px-5 py-24 text-center">
-				<h1 className="text-lg font-semibold">Check your email</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">Check your email</h1>
 				<p className="mt-2 text-sm text-dim">
 					If an account uses <span className="text-fg">{email.trim()}</span>, a link to reset its password is on its way. It works for an
 					hour.

@@ -28,3 +28,27 @@ export function sqlStorage(db: DatabaseSync): SqlStorage {
 		},
 	} as unknown as SqlStorage;
 }
+
+/** D1Database, as far as db.ts uses it: prepare, bind, first, all, run and batch. */
+export function d1Database(db: DatabaseSync): D1Database {
+	const statement = (query: string, args: unknown[] = []) => {
+		const params = args as (string | number | null)[];
+		// Like D1, a statement that returns rows gives them in `results`, whether it was run or listed.
+		const run = () => {
+			const stmt = db.prepare(query);
+			if (stmt.columns().length > 0) return { results: stmt.all(...params), meta: { changes: 0 } };
+			return { results: [], meta: { changes: Number(stmt.run(...params).changes) } };
+		};
+		return {
+			bind: (...next: unknown[]) => statement(query, next),
+			first: async <T>() => (db.prepare(query).get(...params) as T | undefined) ?? null,
+			all: async () => run(),
+			run: async () => run(),
+			runSync: run,
+		};
+	};
+	return {
+		prepare: (query: string) => statement(query),
+		batch: async (stmts: { runSync: () => unknown }[]) => stmts.map((s) => s.runSync()),
+	} as unknown as D1Database;
+}

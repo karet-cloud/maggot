@@ -1,6 +1,6 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Archive, ArchiveRestore, ArrowRightLeft, BookOpen, PencilLine, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowRightLeft, BookOpen, GitBranch, PencilLine, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { hooksQuery, Webhooks } from "../components/webhooks.tsx";
@@ -93,6 +93,7 @@ function RepoSettings() {
 			<Panel title="General">
 				<div className="divide-y divide-line">
 					<Rename project={project} repo={current} disabled={archived} />
+					<DefaultBranch project={project} repo={current} disabled={archived} />
 					<form
 						onSubmit={(e) => {
 							e.preventDefault();
@@ -225,6 +226,59 @@ function Rename({ project, repo, disabled }: { project: string; repo: RepoInfo; 
 				</div>
 			</Field>
 			<ErrorNote error={rename.error} />
+		</form>
+	);
+}
+
+function DefaultBranch({ project, repo, disabled }: { project: string; repo: RepoInfo; disabled: boolean }) {
+	const queryClient = useQueryClient();
+	const [branch, setBranch] = useState(repo.defaultBranch);
+	useEffect(() => setBranch(repo.defaultBranch), [repo.defaultBranch]);
+	const branches = useQuery({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false) });
+	const change = useMutation({
+		mutationFn: () => api.updateRepo(project, { defaultBranch: branch }),
+		onSuccess: (updated) => {
+			queryClient.setQueryData(keys.project(project), (old: Awaited<ReturnType<typeof api.project>> | undefined) => (old ? { ...old, repo: updated } : old));
+			// Everything read at the default branch (code, commits, pull request bases) now reads another one.
+			void queryClient.invalidateQueries({ queryKey: ["project", project] });
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+		},
+	});
+	const listed = branches.data?.branches.map((b) => b.name).filter((name) => !name.startsWith("maggot-incoming/")) ?? [];
+	// An older import or fork can name a default branch that doesn't exist; it stays listed so another can be picked.
+	const missing = branches.data !== undefined && !listed.includes(repo.defaultBranch);
+	const names = listed.includes(repo.defaultBranch) ? listed : [repo.defaultBranch, ...listed];
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				if (confirm(`Make ${branch} the default branch of ${project}? New pull requests, the code page and clones will use it.`)) change.mutate();
+			}}
+			className="space-y-3 p-4"
+		>
+			<Field label="Default branch" hint="The branch the code page shows, new pull requests target, agent tasks merge into and a clone checks out.">
+				<div className="flex gap-2">
+					<select
+						value={branch}
+						onChange={(e) => setBranch(e.target.value)}
+						disabled={disabled || branches.isPending}
+						aria-label="Default branch"
+						className="min-w-0 flex-1 rounded-md border border-line-strong bg-bg px-2.5 font-mono text-sm text-fg"
+					>
+						{names.map((name) => (
+							<option key={name} value={name}>
+								{name}
+								{missing && name === repo.defaultBranch ? " (doesn't exist)" : ""}
+							</option>
+						))}
+					</select>
+					<Button type="submit" busy={change.isPending} disabled={disabled || branch === repo.defaultBranch} className="shrink-0">
+						<GitBranch className="size-4" />
+						Switch
+					</Button>
+				</div>
+			</Field>
+			<ErrorNote error={change.error ?? branches.error} />
 		</form>
 	);
 }

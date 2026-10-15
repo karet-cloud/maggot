@@ -31,11 +31,11 @@ import {
 	type WebhookDelivery,
 	type WebhookEvent,
 } from "./api.ts";
-import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db.ts";
+import { approvedAt, closeIssuesByCommits, db as databaseOf, getPull, notify, notifyUser, unreadableRepos, type PullViewer } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, entryAt, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
-import { deleteBranch, listBranches, listRefs, RefUpdateRejected, setRef, type TagRef } from "./git/protocol.ts";
+import { deleteBranch, listBranches, listRefs, RefUpdateRejected, remoteHead, setRef, type TagRef } from "./git/protocol.ts";
 import { protectionFor, validPattern } from "./branch-rules.ts";
 import { Workspace, type Identity, type RemoteAccess } from "./git/workspace.ts";
 import { claimsOverlap, forkRepoName, newTaskId, normalizeClaim, wikiRepoName } from "./names.ts";
@@ -46,7 +46,7 @@ import { TreeIndex } from "./tree-index.ts";
 import { JobSchedule } from "./alarm-jobs.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
-import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
+import { CiRuns, privateRun, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
 import type { JobGrant } from "./ci/token.ts";
 import type { CiJob } from "./ci/job.ts";
 import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks, WikiIndex, WikiPage } from "./api.ts";
@@ -145,7 +145,15 @@ type TaskRow = {
 	merged_at: string | null;
 };
 
-type Meta = { name: string; description: string | null; defaultBranch: string; remote: string; createdAt: string };
+type Meta = {
+	name: string;
+	description: string | null;
+	defaultBranch: string;
+	remote: string;
+	createdAt: string;
+	/** The storage's own HEAD, when the default branch was set to another (storage can't move HEAD). */
+	storeBranch?: string;
+};
 
 /**
  * One instance per project. It is the only writer to the project's default branch: agents push
@@ -169,7 +177,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Once the default branch has a commit it always will; skips re-checking on every task. */
 	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
-	/** Merges (the queue's and pull requests') change branches through the workspace one at a time. */
+	/** Merges and branch-rule changes run one at a time, keeping protection stable through each push. */
 	private readonly mergeSlot = new Semaphore(1);
 	/** In-flight provisioning per task, so a request and the recovery alarm never fork twice. */
 	private readonly provisioning = new Map<string, Promise<ArtifactsCreateRepoResult | null>>();
@@ -253,7 +261,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			repository: () => this.repository(),
 			// Its own Worker's class, so a loopback namespace rather than a binding (a container can't be attached to a Durable Object bound by Worker name).
 			job: (id) => (ctx.exports.CiJob as unknown as DurableObjectNamespace<CiJob>).getByName(id),
-			emit: (data) => this.emit("ci.completed", null, data),
+			emit: (data, headRepo) => this.ctx.waitUntil(this.emitForkEvent("ci.completed", data, headRepo)),
 			changed: () => {
 				for (const ws of this.ctx.getWebSockets()) {
 					try {
@@ -282,7 +290,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async create(input: CreateProjectInput): Promise<Project> {
 		if (input.importDepth !== undefined && (!Number.isInteger(input.importDepth) || input.importDepth < 1 || input.importDepth > 10_000)) throw new HttpError(400, "INVALID_INPUT", "importDepth must be an integer from 1 to 10000");
 		if (this.metaOrNull()) throw new HttpError(409, "ALREADY_EXISTS", `Project ${input.name} already exists`);
+		// Artifacts imports `main` and reports it as the default unless told the branch, so an import takes
+		// the source's own default (master, trunk, …) from its HEAD.
+		const importBranch = input.importUrl ? (input.importBranch ?? (await remoteHead(input.importUrl))) : undefined;
 		let created: Pick<ArtifactsCreateRepoResult, "name" | "description" | "defaultBranch" | "remote" | "token">;
+		// Made just now by this call (not imported, forked or adopted), so it's known to be empty.
+		let fresh = false;
 		try {
 			created = await retrying(async () => {
 				if (input.forked) {
@@ -291,12 +304,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					const [info, token] = await Promise.all([repo.info(), repo.createToken("write", INTERNAL_TOKEN_TTL)]);
 					return { ...info, token: token.plaintext };
 				}
-				return input.importUrl
-					? this.store.import({
-							source: { url: input.importUrl, branch: input.importBranch, depth: input.importDepth },
-							target: { name: input.name, opts: { description: input.description } },
-						})
-					: this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
+				if (input.importUrl) {
+					return this.store.import({
+						source: { url: input.importUrl, branch: importBranch, depth: input.importDepth },
+						target: { name: input.name, opts: { description: input.description } },
+					});
+				}
+				const made = await this.store.create(input.name, { description: input.description, setDefaultBranch: input.defaultBranch ?? "master" });
+				fresh = true;
+				return made;
 			});
 		} catch (err) {
 			// The repo exists but this coordinator never recorded it: a previous create died partway
@@ -309,17 +325,23 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		}
 
 		await this.waitReady(created.name);
-		const empty = await (async () => {
-			using repo = await this.store.get(created.name);
-			return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
-		})();
-		if (empty && !input.importUrl && !input.forked && input.readme !== false) {
-			const seed = new Workspace(created.defaultBranch, MERGE_IDENTITY);
-			await seed.seed(
-				{ url: created.remote, token: created.token },
-				{ "README.md": `# ${input.title ?? input.name}\n\n${input.description ?? ""}\n` },
-				"Initial commit",
-			);
+		// The storage's HEAD can't be moved, so a fork keeps its source's chosen default on top of it.
+		const storeBranch = created.defaultBranch;
+		if (importBranch) created = { ...created, defaultBranch: importBranch };
+		else if (input.forked && input.defaultBranch) created = { ...created, defaultBranch: input.defaultBranch };
+		const remote = { url: created.remote, token: created.token };
+		const seed = !input.importUrl && !input.forked && input.readme !== false;
+		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
+		// A fresh repository's are known without asking: none, or the README's commit.
+		let refs: Record<string, string> | null = null;
+		if (fresh) {
+			refs = seed ? { [created.defaultBranch]: await seedReadme(remote, created.defaultBranch, input) } : {};
+		} else {
+			const empty = await (async () => {
+				using repo = await this.store.get(created.name);
+				return (await repo.log({ ref: created.defaultBranch, limit: 1 })).length === 0;
+			})();
+			if (empty && seed) await seedReadme(remote, created.defaultBranch, input);
 		}
 
 		const meta: Meta = {
@@ -328,16 +350,18 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			defaultBranch: created.defaultBranch,
 			remote: created.remote,
 			createdAt: new Date().toISOString(),
+			...(storeBranch !== created.defaultBranch ? { storeBranch } : {}),
 		};
 		this.sql.exec("INSERT INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(meta));
-		// What's there now (a README, a fork's or an import's branches), so the first push reports only its own changes.
 		try {
-			const refs = await listBranches({ url: created.remote, token: created.token });
-			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(Object.fromEntries(refs)));
+			refs ??= Object.fromEntries(await listBranches(remote));
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('refs', ?)", JSON.stringify(refs));
 		} catch (err) {
 			console.error("recording initial branches failed", err);
 		}
 		this.emit("project.created", null, { name: meta.name, imported: Boolean(input.importUrl), forked: Boolean(input.forked) });
+		// A fresh repository's head is known too, so describing it needs no lookup.
+		if (fresh && refs) return this.describe(meta, refs[meta.defaultBranch] ?? null);
 		return this.getProject();
 	}
 
@@ -363,6 +387,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			this.readToken = { token: creds.token, expires: Date.parse(creds.expiresAt) };
 		}
 		return { url: meta.remote, token: this.readToken.token };
+	}
+
+	/** What a fetch needs: read access, and the branch to advertise as HEAD when it isn't storage's own. */
+	async fetchContext(): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: { branch: string; oid?: string } }> {
+		const meta = this.meta();
+		const moved = meta.storeBranch && meta.storeBranch !== meta.defaultBranch;
+		return { remote: await this.gitRemote("read"), rules: [], head: moved ? { branch: meta.defaultBranch, oid: this.knownRefs(meta)[meta.defaultBranch] } : undefined };
 	}
 
 	/** What a push needs: write access to the repository and its branch rules, in one round trip. */
@@ -663,16 +694,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
 	async getProject(): Promise<Project> {
 		const meta = this.meta();
-		const stats = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
-		for (const row of this.sql.exec<{ status: TaskStatus; n: number }>("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")) {
-			stats[row.status] = row.n;
-		}
 		let head: string | null = null;
 		try {
 			using repo = await this.store.get(meta.name);
 			head = (await repo.log({ ref: meta.defaultBranch, limit: 1 }))[0]?.hash ?? null;
 		} catch {
 			// Repo still importing or temporarily unavailable; head is informational.
+		}
+		return this.describe(meta, head);
+	}
+
+	/** The project as the API shows it, with its default branch at `head`. */
+	private describe(meta: Meta, head: string | null): Project {
+		const stats = Object.fromEntries(TASK_STATUSES.map((s) => [s, 0])) as Record<TaskStatus, number>;
+		for (const row of this.sql.exec<{ status: TaskStatus; n: number }>("SELECT status, COUNT(*) AS n FROM tasks GROUP BY status")) {
+			stats[row.status] = row.n;
 		}
 		const queueLength = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM queue").one().n;
 		return { ...meta, head, stats, queueLength };
@@ -829,15 +865,19 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		author: Identity;
 		/** The head commit the merger saw (and reviewers approved); the merge stops if the branch has moved on. */
 		expectedHead?: string;
-	}): Promise<{ commit: string; changedFiles: string[] }> {
-		const meta = this.meta();
+		/** The pull request's number, for checking the branch's rules (reviews, Actions) right before pushing. */
+		pull?: number;
+	}): Promise<{ commit: string; changedFiles: string[]; onDefaultBranch: boolean }> {
+		this.meta();
 		this.assertWritable();
 		return this.mergeSlot.run(async () => {
+			// Read inside the slot: the default branch may have changed while this merge waited.
+			const meta = this.meta();
 			const base = await this.baseAccess(meta);
 			const head = input.headRepo && input.headRepo !== meta.name ? await this.credentials(input.headRepo, input.headBranch, "read", INTERNAL_TOKEN_TTL) : null;
 			const headAccess = head ? { url: head.remote, token: head.token } : base;
 			// The default branch's workspace is kept between merges (and reset now and then, as the queue's is); other bases get a fresh one.
-			if (input.base === meta.defaultBranch && (!this.workspace || this.workspaceMerges >= WORKSPACE_MAX_MERGES)) {
+			if (input.base === meta.defaultBranch && (!this.workspace || this.workspace.branch !== meta.defaultBranch || this.workspaceMerges >= WORKSPACE_MAX_MERGES)) {
 				this.workspace = new Workspace(meta.defaultBranch, MERGE_IDENTITY);
 				this.workspaceMerges = 0;
 			}
@@ -846,7 +886,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			try {
 				for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
 					await ws.syncBase(base);
-					const theirs = await ws.fetchTask(headAccess, input.headBranch);
+					const theirs = await ws.fetchTask(headAccess, input.headBranch).catch(async (err) => {
+						if (errorCode(err) !== "NotFoundError") throw err;
+						// Only a branch that's really gone is the pull request's problem; anything else is the
+						// workspace's, which is discarded below.
+						const branches = await listBranches(headAccess).catch(() => null);
+						if (branches && !branches.has(input.headBranch)) throw new HttpError(409, "HEAD_GONE", `${input.headBranch} no longer exists, so there's nothing to merge`);
+						throw err;
+					});
 					if (input.expectedHead && theirs !== input.expectedHead) {
 						throw new HttpError(409, "HEAD_MOVED", `${input.headBranch} has new commits since you looked; review them and merge again`);
 					}
@@ -855,10 +902,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 						throw new HttpError(409, "MERGE_CONFLICT", `These files conflict with ${input.base}: ${outcome.files.join(", ") || "unknown"}. Merge ${input.base} into the branch and push again.`);
 					}
 					if (outcome.kind === "up-to-date") throw new HttpError(409, "NOTHING_TO_MERGE", `${input.base} already has everything in this pull request`);
+					// The rules as they are now, for the commit being merged: an admin may have turned on
+					// required reviews or Actions since the API checked them.
+					if (input.pull !== undefined) await this.assertMergeable(input.pull, input.base, input.headRepo && input.headRepo !== meta.name ? input.headRepo : null, theirs);
 					if (await ws.push(base)) {
+						// Capture this before post-push work awaits anything else.
+						const onDefaultBranch = input.base === this.meta().defaultBranch;
 						// Like a push: events, webhooks, the code index, Actions and "fixes #n" all follow.
 						await this.pushed(input.author.name);
-						return { commit: outcome.oid, changedFiles: outcome.changedFiles };
+						return { commit: outcome.oid, changedFiles: outcome.changedFiles, onDefaultBranch };
 					}
 				}
 				throw new HttpError(409, "PUSH_REJECTED", `${input.base} kept moving; try again`);
@@ -869,10 +921,29 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		});
 	}
 
+	/**
+	 * Refuses a pull request merge of `head` that `base`'s branch rules don't allow right now. Runs in
+	 * the merge slot, which rule changes also take, so the rules read here still hold at the push.
+	 */
+	private async assertMergeable(number: number, base: string, headRepo: string | null, head: string): Promise<void> {
+		const rule = protectionFor(this.branchRules(), base);
+		if (rule.requireReview) {
+			const database = databaseOf(this.env);
+			const pull = await getPull(database, this.meta().name, number);
+			if (!pull || pull.decision !== "approved" || !(await approvedAt(database, pull, head))) {
+				throw new HttpError(403, "REVIEW_REQUIRED", `${base} needs an approving review of the latest commit before pull requests merge into it`);
+			}
+		}
+		if (rule.requireChecks) {
+			const checks = await this.ci.pullChecks({ number, base, headRepo, sha: head });
+			if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${base} requires Actions to pass. ${checks.reason}`);
+		}
+	}
+
 	/** Records a pull request event for the feed and webhooks. */
-	async recordPullEvent(type: "pull.opened" | "pull.reviewed" | "pull.merged", data: Record<string, unknown>): Promise<void> {
+	async recordPullEvent(type: "pull.opened" | "pull.reviewed" | "pull.merged", data: Record<string, unknown>, headRepo: string | null | undefined): Promise<void> {
 		this.meta();
-		this.emit(type, null, data);
+		await this.emitForkEvent(type, data, headRepo);
 	}
 
 	/** A commit and its diff against its first parent. `ref` picks the repo, as in readFile. */
@@ -1011,16 +1082,59 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { defaultBranch: meta.defaultBranch, branches, agents };
 	}
 
-	async deleteBranch(name: string): Promise<void> {
-		const meta = this.meta();
+	/** Makes `name`, an existing branch, the default: what the code page shows, pull requests target and agents merge into. */
+	async setDefaultBranch(name: string): Promise<string> {
+		if (name === this.meta().defaultBranch) return name;
 		this.assertWritable();
-		if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
-		const rule = protectionFor(this.branchRules(), name);
-		if (rule.blockDeletions || rule.requireMergeQueue || rule.requireReview || rule.requireChecks) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
-		const access = await this.baseAccess(meta);
-		const head = (await listBranches(access)).get(name);
-		if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
-		await deleteBranch(access, name, head);
+		if (name.startsWith("maggot-incoming/")) throw new HttpError(400, "INVALID_INPUT", `${name} is an internal branch`);
+		// Waits for merges in progress, so none lands on the old default after the switch.
+		return this.mergeSlot.run(async () => {
+			// Another switch may have got here first.
+			if (name === this.meta().defaultBranch) return name;
+			const exists = (await listBranches(await this.baseAccess(this.meta()))).has(name);
+			if (!exists) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
+			// From here to the write, nothing awaits: a task can't start in between (createTask records its
+			// row in the same uninterrupted step that reads the default), and branches are deleted in this slot.
+			const meta = this.meta();
+			this.assertWritable();
+			if (name === meta.defaultBranch) return name;
+			const active = this.sql
+				.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM tasks WHERE status IN (${ACTIVE_STATUSES.map(() => "?").join(", ")})`, ...ACTIVE_STATUSES)
+				.one().n;
+			// Their forks and merges are based on the old default.
+			if (active > 0) throw new HttpError(409, "TASKS_ACTIVE", `Finish or abandon the ${active} active agent task${active === 1 ? "" : "s"} before changing the default branch`);
+			const storeBranch = meta.storeBranch ?? meta.defaultBranch;
+			const next: Meta = { ...meta, defaultBranch: name, storeBranch: storeBranch === name ? undefined : storeBranch };
+			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('project', ?)", JSON.stringify(next));
+			this.workspace = undefined;
+			const repository = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'repository'").toArray()[0];
+			if (repository) this.sql.exec("UPDATE meta SET value = ? WHERE key = 'repository'", JSON.stringify({ ...JSON.parse(repository.value), defaultBranch: name }));
+			// Everything that shows the default branch (code, history, search, branches) refreshes for every viewer.
+			this.emit("repo.default_branch", null, { from: meta.defaultBranch, to: name });
+			// Code search covers the default branch, so it's reindexed from the new one.
+			await this.requestIndex();
+			return name;
+		});
+	}
+
+	/** The default branch, as the coordinator knows it: D1's copy follows this one. */
+	async defaultBranch(): Promise<string> {
+		return this.meta().defaultBranch;
+	}
+
+	async deleteBranch(name: string): Promise<void> {
+		// In the slot setDefaultBranch switches in, so the branch can't become the default while it's deleted.
+		await this.mergeSlot.run(async () => {
+			const meta = this.meta();
+			this.assertWritable();
+			if (name === meta.defaultBranch) throw new HttpError(400, "DEFAULT_BRANCH", "The default branch can't be deleted");
+			const rule = protectionFor(this.branchRules(), name);
+			if (rule.blockDeletions || rule.requireMergeQueue || rule.requireReview || rule.requireChecks) throw new HttpError(403, "PROTECTED_BRANCH", `${name} is a protected branch, so it can't be deleted`);
+			const access = await this.baseAccess(meta);
+			const head = (await listBranches(access)).get(name);
+			if (!head) throw new HttpError(404, "NOT_FOUND", `Branch ${name} not found`);
+			await deleteBranch(access, name, head);
+		});
 		// Like a push: the event feed and webhooks hear that the branch is gone.
 		await this.pushed();
 	}
@@ -1125,18 +1239,27 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	 * still `provisioning` and a `task.ready` event follows.
 	 */
 	async createTask(input: CreateTaskInput, waitMs = FORK_WAIT_MS): Promise<TaskAccess> {
-		const meta = this.meta();
+		let meta = this.meta();
 		this.assertWritable();
 		const title = input.title?.trim();
 		if (!title) throw new HttpError(400, "INVALID_INPUT", "title is required");
 		const paths = [...new Set((input.paths ?? []).map(normalizeClaim))];
-		// Forks of an empty repo have nothing to merge against; the first commit has to land directly.
-		this.hasCommits ||= await (async () => {
-			using repo = await this.store.get(meta.name);
-			return (await repo.log({ ref: meta.defaultBranch, limit: 1 })).length > 0;
-		})();
-		if (!this.hasCommits) {
-			throw new HttpError(409, "EMPTY_REPO", `Push a first commit to ${meta.defaultBranch} before creating tasks`);
+		for (;;) {
+			const branch = meta.defaultBranch;
+			// Forks of an empty repo have nothing to merge against; the first commit has to land directly.
+			this.hasCommits ||= await (async () => {
+				using repo = await this.store.get(meta.name);
+				return (await repo.log({ ref: branch, limit: 1 })).length > 0;
+			})();
+			if (!this.hasCommits) {
+				throw new HttpError(409, "EMPTY_REPO", `Push a first commit to ${branch} before creating tasks`);
+			}
+			// The default branch may have changed while that was read. From this read to the insert below
+			// nothing awaits, so setDefaultBranch either sees the new task as active (and refuses) or has
+			// already switched: the task is based on the branch that's the default when its row appears.
+			meta = this.meta();
+			this.assertWritable();
+			if (meta.defaultBranch === branch) break;
 		}
 		const id = newTaskId();
 		const now = new Date().toISOString();
@@ -1253,9 +1376,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	}
 
 	/** The newest `limit` events, oldest first. */
-	async recentEvents(limit = 100): Promise<ProjectEvent[]> {
+	async recentEvents(limit = 100, viewer: PullViewer = { viewerId: null }): Promise<ProjectEvent[]> {
 		this.meta();
-		return this.sql
+		const events = this.sql
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events ORDER BY seq DESC LIMIT ?",
 				Math.max(1, Math.min(limit, 1000)),
@@ -1263,11 +1386,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			.toArray()
 			.reverse()
 			.map(toEvent);
+		return this.readableEvents(events, viewer);
 	}
 
-	async events(after = 0, limit = 100): Promise<ProjectEvent[]> {
+	async events(after = 0, limit = 100, viewer: PullViewer = { viewerId: null }): Promise<ProjectEvent[]> {
 		this.meta();
-		return this.sql
+		const events = this.sql
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
 				after,
@@ -1275,6 +1399,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			)
 			.toArray()
 			.map(toEvent);
+		return this.readableEvents(events, viewer);
 	}
 
 	// ── Live events ──────────────────────────────────────────────────────────
@@ -1415,7 +1540,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			try {
 				const forked = await step("fork", async () => {
 					using base = await this.store.get(meta.name);
-					return base.fork(repoName, { description: `${meta.name}: ${row.title}`, defaultBranchOnly: true });
+					// Only the storage's HEAD branch comes along with defaultBranchOnly, so after a default change take them all.
+					return base.fork(repoName, { description: `${meta.name}: ${row.title}`, defaultBranchOnly: !meta.storeBranch || meta.storeBranch === meta.defaultBranch });
 				});
 				await step("wait for fork", () => this.waitReady(repoName));
 				const baseOid = await step("read fork head", async () => {
@@ -1462,6 +1588,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (current === null || current > at) await this.ctx.storage.setAlarm(at);
 	}
 
+	/** Why the queue may not merge into `branch` under its rules now, or null. */
+	private queueBlocked(branch: string): { code: string; message: string } | null {
+		const rule = protectionFor(this.branchRules(), branch);
+		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
+		if (rule.requireReview) {
+			return { code: "REVIEW_REQUIRED", message: `${branch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.` };
+		}
+		// The queue merges a fork's work without Actions having run on it, so a branch that wants them passed takes pull requests only.
+		if (rule.requireChecks) {
+			return { code: "CHECKS_REQUIRED", message: `${branch} requires Actions to pass, so changes reach it only through pull requests. Push the task's work to a branch and open one.` };
+		}
+		return null;
+	}
+
 	private mergeTask(id: string): Promise<void> {
 		return this.mergeSlot.run(() => this.mergeTaskNow(id));
 	}
@@ -1471,22 +1611,15 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const row = this.row(id);
 		// "merging" here means a previous alarm died mid-merge; the merge is idempotent, so redo it.
 		if (row.status !== "queued" && row.status !== "merging") return;
-		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
-		const rule = protectionFor(this.branchRules(), meta.defaultBranch);
-		if (rule.requireReview) {
-			return this.fail(id, "REVIEW_REQUIRED", `${meta.defaultBranch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
-		}
-		// The queue merges a fork's work without Actions having run on it, so a branch that wants them passed takes pull requests only.
-		if (rule.requireChecks) {
-			return this.fail(id, "CHECKS_REQUIRED", `${meta.defaultBranch} requires Actions to pass, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
-		}
+		const blocked = this.queueBlocked(meta.defaultBranch);
+		if (blocked) return this.fail(id, blocked.code, blocked.message);
 		this.setStatus(id, "merging");
 		this.emit("task.merging", id, {});
 
 		try {
 			const base = await this.baseAccess(meta);
 			const fork = await this.credentials(row.repo, meta.defaultBranch, "read", INTERNAL_TOKEN_TTL);
-			if (!this.workspace || this.workspaceMerges >= WORKSPACE_MAX_MERGES) {
+			if (!this.workspace || this.workspace.branch !== meta.defaultBranch || this.workspaceMerges >= WORKSPACE_MAX_MERGES) {
 				this.workspace = new Workspace(meta.defaultBranch, MERGE_IDENTITY);
 				this.workspaceMerges = 0;
 			}
@@ -1526,6 +1659,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					return;
 				}
 
+				// The rules as they are now, after the fetches and the merge (changes to them wait for this slot).
+				const blocked = this.queueBlocked(meta.defaultBranch);
+				if (blocked) return this.fail(id, blocked.code, blocked.message);
 				if (await ws.push(base)) {
 					this.markMerged(id, outcome.oid, outcome.changedFiles);
 					// The next push's "from" is this merge, not whatever was pushed before it.
@@ -1693,6 +1829,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		};
 		const now = new Date().toISOString();
 		this.sql.exec("UPDATE releases SET name = ?, notes = ?, prerelease = ?, updated_at = ? WHERE id = ?", next.name, next.notes, next.prerelease, now, id);
+		this.emit("release.edited", null, { id, tag: row.tag, name: next.name, prerelease: next.prerelease });
 		return toRelease({ ...row, ...next, updated_at: now }, this.knownTags()[row.tag] ?? null);
 	}
 
@@ -1709,6 +1846,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			});
 		}
 		this.sql.exec("DELETE FROM releases WHERE id = ?", id);
+		this.emit("release.deleted", null, { id, tag: row.tag, name: row.name });
 	}
 
 	// ── Commit graph ─────────────────────────────────────────────────────────
@@ -1785,12 +1923,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.branchRules();
 	}
 
+	/**
+	 * Adds or replaces a rule. Rule changes take the merge slot, so a merge between checking the rules
+	 * and pushing never sees them change: one that started under the old rules finishes first.
+	 */
 	async setBranchRule(rule: Omit<BranchRule, "createdAt">): Promise<BranchRule[]> {
 		this.meta();
 		if (!validPattern(rule.pattern)) throw new HttpError(400, "INVALID_INPUT", "A pattern is a branch name, optionally with * (within a segment) or ** (across them)");
 		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue && !rule.requireReview && !rule.requireChecks) {
 			throw new HttpError(400, "INVALID_INPUT", "Choose at least one protection");
 		}
+		return this.mergeSlot.run(async () => this.writeBranchRule(rule));
+	}
+
+	private writeBranchRule(rule: Omit<BranchRule, "createdAt">): BranchRule[] {
 		const existing = this.sql.exec<{ created_at: string }>("SELECT created_at FROM branch_rules WHERE pattern = ?", rule.pattern).toArray()[0];
 		if (!existing && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM branch_rules").one().n >= 50) {
 			throw new HttpError(403, "QUOTA_EXCEEDED", "A repository can have at most 50 branch rules");
@@ -1808,10 +1954,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.branchRules();
 	}
 
+	/** Removes a rule; through the merge slot, as setBranchRule. */
 	async deleteBranchRule(pattern: string): Promise<BranchRule[]> {
 		this.meta();
-		this.sql.exec("DELETE FROM branch_rules WHERE pattern = ?", pattern);
-		return this.branchRules();
+		return this.mergeSlot.run(async () => {
+			this.sql.exec("DELETE FROM branch_rules WHERE pattern = ?", pattern);
+			return this.branchRules();
+		});
 	}
 
 	/**
@@ -1918,6 +2067,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	async ciRun(number: number): Promise<CiRun> {
 		this.meta();
 		return this.ci.getRun(number);
+	}
+
+	/** The other repository (by id) each of these runs took its code from: a fork's, for its pull requests. */
+	async ciRunHeads(numbers: number[]): Promise<Record<number, string>> {
+		this.meta();
+		return this.ci.runHeads(numbers);
 	}
 
 	async ciLogs(number: number, job: string, after?: number): Promise<{ logs: CiLogChunk[]; next: number | null }> {
@@ -2196,10 +2351,14 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return { url: meta.remote, token: this.baseToken.token };
 	}
 
-	/** Fork and import are asynchronous in Artifacts; wait until the repo accepts Git traffic. */
+	/**
+	 * Fork and import are asynchronous in Artifacts; wait until the repo accepts Git traffic. Polls at
+	 * most every half second: a check is one cheap lookup, and a longer gap only adds to the wait
+	 * after the repository is ready (up to 2s each time, with the old cap).
+	 */
 	private async waitReady(repoName: string, timeoutMs = 30_000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
-		for (let delay = 100; ; delay = Math.min(delay * 2, 2000)) {
+		for (let delay = 50; ; delay = Math.min(delay * 2, 500)) {
 			try {
 				using _repo = await this.store.get(repoName);
 				return;
@@ -2244,7 +2403,53 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		).one().n;
 	}
 
-	private emit(type: EventType, taskId: string | null, data: Record<string, unknown>) {
+	/** Current head access also applies to history recorded while a fork was public. */
+	private async readableEvents(events: ProjectEvent[], viewer: PullViewer): Promise<ProjectEvent[]> {
+		const pulls = [...new Set(events.filter((e) => e.type.startsWith("pull.")).map((e) => (e.data.pull as { number: number }).number))];
+		const pullHeads = new Map<number, string | null>();
+		for (let offset = 0; offset < pulls.length; offset += 90) {
+			const batch = pulls.slice(offset, offset + 90);
+			const { results } = await databaseOf(this.env).prepare(
+				`select i."number", p."headRepoId" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and i."number" in (${batch.map(() => "?").join(",")})`,
+			).bind(this.meta().name, ...batch).all<{ number: number; headRepoId: string | null }>();
+			for (const p of results) pullHeads.set(p.number, p.headRepoId);
+		}
+		const runHeads = this.ci.runHeads(events.filter((e) => e.type === "ci.completed").map((e) => (e.data.run as CiRunSummary).number));
+		const heads = events.map((e): string | null | undefined => {
+			if (e.type.startsWith("pull.")) {
+				const number = (e.data.pull as { number: number }).number;
+				// null in D1 means a deleted fork, not a same-repository head.
+				if (pullHeads.has(number)) return pullHeads.get(number) ?? undefined;
+				return e.data._headRepo as string | null | undefined;
+			}
+			if (e.type === "ci.completed") {
+				return "_headRepo" in e.data ? e.data._headRepo as string | null : runHeads[(e.data.run as CiRunSummary).number];
+			}
+			return null;
+		});
+		const hidden = await unreadableRepos(databaseOf(this.env), heads.filter((h): h is string => typeof h === "string" && h !== this.meta().name), viewer);
+		return events.map((e, i) => {
+			const { _headRepo, ...data } = e.data;
+			// Missing historical provenance is hidden conservatively; a deleted fork has no readers.
+			const head = heads[i];
+			const unknownFork = head === undefined && (e.type.startsWith("pull.") || e.type === "ci.completed" && (data.run as CiRunSummary).fromFork);
+			const secret = unknownFork || typeof head === "string" && hidden.has(head);
+			return { ...e, data: secret ? this.privateEventData(e.type, data) : data };
+		});
+	}
+
+	private privateEventData(type: EventType, data: Record<string, unknown>): Record<string, unknown> {
+		if (type === "ci.completed") return { ...data, run: privateRun(data.run as CiRunSummary) };
+		return { ...data, pull: { ...data.pull as Record<string, unknown>, head: "", headRepo: "(private fork)" } };
+	}
+
+	/** Store provenance internally; shared live messages and webhooks have no head-repository viewer. */
+	private async emitForkEvent(type: EventType, data: Record<string, unknown>, headRepo: string | null | undefined): Promise<void> {
+		const hidden = headRepo === undefined || (headRepo !== null && await unreadableRepos(databaseOf(this.env), [headRepo], { viewerId: null }).then((s) => s.size > 0, () => true));
+		this.emit(type, null, { ...data, _headRepo: headRepo }, hidden ? this.privateEventData(type, data) : data);
+	}
+
+	private emit(type: EventType, taskId: string | null, data: Record<string, unknown>, sharedData = data) {
 		const ts = new Date().toISOString();
 		const { seq } = this.sql
 			.exec<{ seq: number }>(
@@ -2255,7 +2460,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				JSON.stringify(data),
 			)
 			.one();
-		const message = JSON.stringify({ seq, ts, type, taskId, data } satisfies ProjectEvent);
+		const message = JSON.stringify({ seq, ts, type, taskId, data: sharedData } satisfies ProjectEvent);
 		for (const ws of this.ctx.getWebSockets()) {
 			try {
 				ws.send(message);
@@ -2263,7 +2468,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				// Socket already closed; the runtime cleans it up.
 			}
 		}
-		if (this.hooks.enqueue(type, taskId, data, this.repository()) > 0) {
+		if (this.hooks.enqueue(type, taskId, sharedData, this.repository()) > 0) {
 			this.scheduleAlarm(Date.now()).catch((err) => console.error("scheduling webhook deliveries failed", err));
 		}
 		if (taskId && (type === "task.merged" || type === "task.failed" || type === "task.conflict")) {
@@ -2348,6 +2553,25 @@ async function retrying<T>(fn: () => Promise<T>, delays = [250, 750, 2500]): Pro
 			await new Promise((r) => setTimeout(r, delays[attempt]));
 		}
 	}
+}
+
+/**
+ * Gives a new, empty repository its first commit, a README, pushed as one pack in one request (no
+ * clone, no ref discovery). Returns the commit.
+ */
+async function seedReadme(remote: RemoteAccess, branch: string, input: CreateProjectInput): Promise<string> {
+	const empty: ObjectReader = { readTree: async () => null, readBlob: async () => null, readCommit: async () => null };
+	const { commit } = await commitChanges(empty, remote, {
+		branch,
+		parent: null,
+		create: true,
+		changes: [{ path: "README.md", content: new TextEncoder().encode(`# ${input.title ?? input.name}\n\n${input.description ?? ""}\n`) }],
+		message: "Initial commit",
+		author: MERGE_IDENTITY,
+		time: Math.floor(Date.now() / 1000),
+		maxPackBytes: Number.POSITIVE_INFINITY,
+	});
+	return commit;
 }
 
 /** Runs one Artifacts call, naming the step in the error so failures are attributable. */

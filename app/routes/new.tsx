@@ -62,7 +62,7 @@ function NewRepo() {
 	const full = usage.repos >= usage.maxRepos;
 	return (
 		<main className="mx-auto max-w-2xl px-5 py-8">
-			<h1 className="text-lg font-semibold">Create a repository</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Create a repository</h1>
 			<p className="mt-1 text-sm text-dim">Push an existing project to it with git, start from a README, or import a public repository.</p>
 			<p className="mt-2 text-xs text-faint">
 				You have {usage.repos} of {usage.maxRepos} repositories, using {formatBytes(usage.bytes)} of {formatBytes(usage.maxBytes)}.
@@ -131,8 +131,11 @@ function NewRepo() {
 						body="Only you can see, clone and push it."
 					/>
 				</fieldset>
-				<Field label="Import from (optional)" hint="A public Git URL, such as https://github.com/owner/repo.git. Its history and default branch come along.">
-					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo.git" type="url" />
+				<Field
+					label="Import from (optional)"
+					hint="Any public Git URL: GitHub, GitLab, Codeberg, a self-hosted server. Its history and default branch come along; a link to a branch (…/tree/dev) imports that branch."
+				>
+					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo" inputMode="url" autoComplete="off" spellCheck={false} />
 				</Field>
 				{!importing && (
 					<>

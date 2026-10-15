@@ -2,7 +2,8 @@
 // concurrent-fork failures simulated. Slower than the unit tests: npm run test:e2e
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { createHmac } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
@@ -1188,6 +1189,55 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.deepEqual(mergeDetail.diff.files.map((f) => f.path), ["CONTRIBUTING.md"]);
 	const list = (await (await as(null)(`${repo}/pulls?state=all`)).json()) as { pulls: { number: number; pullState: string }[]; open: number };
 	assert.deepEqual(list.pulls.map((p) => p.pullState).sort(), ["merged", "merged", "open"]);
+
+	// From a fork of the fork, named as on GitHub (owner:branch). The network lists what each caller can read.
+	const cy = await newUser("prc");
+	const cyFork = await as(cy)(`/repos/${bob.username}/prs/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(cyFork.status, 201, await cyFork.clone().text());
+	const cyDir = join(root, "prs-fork-of-fork");
+	await exec("git", ["clone", "-q", url(cy, `${cy.username}/prs`), cyDir]);
+	await writeFile(join(cyDir, "CONDUCT.md"), "Be patient.\n");
+	await git(cyDir, "add", "-A");
+	await git(cyDir, "commit", "-q", "-m", "Add a code of conduct");
+	await git(cyDir, "push", "-q", "origin", "HEAD:conduct");
+	const network = async (who: { token: string } | null) => ((await (await as(who)(`${repo}/network`)).json()) as { repos: { fullName: string }[] }).repos.map((r) => r.fullName);
+	// This repository first, then the newest.
+	const everyone = [`${ada.username}/prs`, `${cy.username}/prs`, `${bob.username}/prs`];
+	assert.deepEqual(await network(null), everyone);
+	const preview = await as(null)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`);
+	assert.equal(preview.status, 200, await preview.clone().text());
+	assert.deepEqual(((await preview.json()) as { comparison: { diff: { files: { path: string }[] } } }).comparison.diff.files.map((f) => f.path), ["CONDUCT.md"]);
+	const fromCy = await as(cy)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Conduct", base: "master", head: `${cy.username}:conduct` }) });
+	assert.equal(fromCy.status, 201, await fromCy.clone().text());
+	const cyPull = ((await fromCy.json()) as { pull: { number: number; headRepo: string; head: string } }).pull;
+	assert.deepEqual([cyPull.headRepo, cyPull.head], [`${cy.username}/prs`, "conduct"]);
+	// A repository outside the network can't be the head.
+	assert.equal((await as(bob)("/repos", { method: "POST", body: JSON.stringify({ name: "elsewhere", visibility: "public", readme: true }) })).status, 201);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=master&headRepo=${bob.username}/elsewhere`)).status, 400);
+	// Gone private, cy's fork drops out of everyone else's network, and owner:branch finds nothing for them.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
+	assert.deepEqual(await network(null), [everyone[0], everyone[2]]);
+	assert.deepEqual(await network(cy), everyone);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`)).status, 404);
+	assert.equal((await as(bob)(`${repo}/pulls/${cyPull.number}/files`)).status, 403);
+	const listed = (await (await as(bob)(`${repo}/pulls`)).json()) as { pulls: { number: number; headRepo: string; head: string }[] };
+	const hiddenPull = listed.pulls.find((p) => p.number === cyPull.number);
+	assert.deepEqual([hiddenPull?.headRepo, hiddenPull?.head], ["(private fork)", ""], "nor is it named to them");
+	assert.equal(((await (await as(cy)(`${repo}/pulls/${cyPull.number}`)).json()) as { pull: { headRepo: string } }).pull.headRepo, `${cy.username}/prs`);
+	// task:<id> is an agent fork, never an owner; and an owner with two repositories in the network is ambiguous.
+	const taskHead = await as(ada)(`${repo}/pulls/compare?base=master&head=task:t123`);
+	assert.equal(((await taskHead.json()) as { error: { code: string } }).error.code, "INVALID_INPUT");
+	assert.equal((await as(ada)(`${repo}/forks`, { method: "POST", body: JSON.stringify({ name: "prs-copy" }) })).status, 201);
+	const ambiguous = await as(ada)(`${repo}/pulls/compare?base=master&head=${ada.username}:master`);
+	assert.equal(ambiguous.status, 400);
+	assert.equal(((await ambiguous.json()) as { error: { code: string } }).error.code, "AMBIGUOUS_HEAD");
+	assert.equal((await as(ada)(`${repo}/pulls/compare?base=master&head=master&headRepo=${ada.username}/prs-copy`)).status, 200);
+	// Public again: ada merges into her master with write on it alone, none on cy's fork.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
+	const viaForkOfFork = await as(ada)(`${repo}/pulls/${cyPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(viaForkOfFork.status, 200, await viaForkOfFork.clone().text());
+	const { tree } = (await (await as(null)(`${repo}/tree`)).json()) as { tree: { entries: { name: string }[] } };
+	assert.ok(tree.entries.some((e) => e.name === "CONDUCT.md"), "merged into the base repository's branch");
 });
 
 test("organizations, teams and collaborators: invitations, read for members, write and admin by grant, reviews that count", async () => {
@@ -1528,6 +1578,133 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204);
 });
 
+test("Actions private fork access: approval, reruns, dispatch, logs, artifacts and event redaction", async () => {
+	const ada = await newUser("privatecia");
+	const bob = await newUser("privatecib");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers } });
+	const json = async <T>(res: Promise<Response>, status = 200): Promise<T> => {
+		const r = await res;
+		assert.equal(r.status, status, await r.clone().text());
+		return await r.json() as T;
+	};
+	type Run = { number: number; status: string; branch: string; workflow: string; path: string; error: string | null; jobs: { id: string }[] };
+	type Event = { seq: number; type: string; data: { pull?: { number: number; head: string; headRepo: string }; run?: Run } };
+	const created = await json<{ project: { name: string } }>(as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "privateci", visibility: "public", readme: true }) }), 201);
+	const repo = `/repos/${ada.username}/privateci`;
+	const fork = `/repos/${bob.username}/privateci`;
+	const actions = `${repo}/actions`;
+	await json(as(bob)(`${repo}/forks`, { method: "POST", body: "{}" }), 201);
+	const path = ".maggot/workflows/secret.yml";
+	await json(as(bob)(`${fork}/contents`, { method: "POST", body: JSON.stringify({
+		branch: "master", newBranch: "secret-branch", message: "Private workflow",
+		files: [{ path, content: "name: Secret workflow\non:\n  pull_request:\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo private-code\n" }],
+	}) }), 201);
+	const pull = (await json<{ pull: { number: number } }>(as(bob)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "A change", base: "master", head: "secret-branch", headRepo: `${bob.username}/privateci` }) }), 201)).pull;
+	let waiting = await until(async () => (await json<{ runs: Run[] }>(as(bob)(`${actions}/runs?pull=${pull.number}`))).runs[0]);
+	assert.equal(waiting.status, "waiting");
+	await until(async () => (await json<{ events: Event[] }>(as(ada)(`${repo}/events`))).events.find((e) => e.type === "pull.opened"));
+	// History and runs made while public must become private too.
+	await json(as(bob)(fork, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) }));
+	assert.equal((await as(ada)(fork)).status, 404, "the base owner has no head access");
+	for (const suffix of ["approve", "rerun", "cancel"]) {
+		const denied = await as(ada)(`${actions}/runs/${waiting.number}/${suffix}`, { method: "POST" });
+		assert.equal(denied.status, 403);
+		assert.equal((await denied.json() as { error: { code: string } }).error.code, "HEAD_PRIVATE");
+	}
+	assert.equal((await as(ada)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" })).status, 403, "dispatching PR checks needs head access");
+	assert.equal((await as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path, ref: `${bob.username}:secret-branch` }) })).status, 404, "workflow_dispatch only resolves base branches");
+	const hiddenRun = (await json<{ runs: Run[] }>(as(ada)(`${actions}/runs?pull=${pull.number}`))).runs[0];
+	assert.deepEqual([hiddenRun.branch, hiddenRun.workflow, hiddenRun.path, hiddenRun.error], ["", "(private fork)", "", null]);
+	for (const query of ["", "?after=0"]) {
+		const hiddenEvent = (await json<{ events: Event[] }>(as(ada)(`${repo}/events${query}`))).events.find((e) => e.type === "pull.opened")!;
+		assert.deepEqual([hiddenEvent.data.pull?.headRepo, hiddenEvent.data.pull?.head], ["(private fork)", ""]);
+		assert.ok(!JSON.stringify(hiddenEvent).includes("_headRepo"), "internal provenance isn't exposed");
+		const ownerEvent = (await json<{ events: Event[] }>(as(bob)(`${repo}/events${query}`))).events.find((e) => e.type === "pull.opened")!;
+		assert.deepEqual([ownerEvent.data.pull?.headRepo, ownerEvent.data.pull?.head], [`${bob.username}/privateci`, "secret-branch"]);
+	}
+
+	// Give the head owner write on the base; both permissions are necessary to approve and dispatch.
+	await json(as(ada)(`${repo}/collaborators/${bob.username}`, { method: "PUT", body: JSON.stringify({ permission: "write" }) }));
+	const invite = (await json<{ invitations: { kind: string; id: string }[] }>(as(bob)("/invitations"))).invitations[0];
+	await json(as(bob)(`/invitations/${invite.kind}/${invite.id}/accept`, { method: "POST" }));
+	assert.equal((await as(bob)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" })).status, 200);
+	// Reopening as a base editor must not implicitly approve code they can't view.
+	await json(as(ada)(`${repo}/issues/${pull.number}`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) }));
+	await until(async () => (await json<Run>(as(bob)(`${actions}/runs/${waiting.number}`))).status === "completed" ? true : undefined);
+	await json(as(ada)(`${repo}/issues/${pull.number}`, { method: "PATCH", body: JSON.stringify({ state: "open" }) }));
+	const previous = waiting.number;
+	waiting = await until(async () => (await json<{ runs: Run[] }>(as(bob)(`${actions}/runs?pull=${pull.number}`))).runs.find((r) => r.number !== previous));
+	assert.equal(waiting.status, "waiting", "base write access alone doesn't auto-approve a private head");
+
+	const received: { event: string; pull?: { head: string; headRepo: string }; run?: Run }[] = [];
+	const receiver = createHttpServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => body += chunk);
+		req.on("end", () => { received.push(JSON.parse(body)); res.writeHead(200).end("ok"); });
+	});
+	await new Promise<void>((ok) => receiver.listen(0, "127.0.0.1", ok));
+	const live = new WebSocket(`${api.replace("http:", "ws:")}/api${repo}/live`);
+	const messages: Event[] = [];
+	live.addEventListener("message", (event) => {
+		if (event.data !== "ci") messages.push(JSON.parse(String(event.data)));
+	});
+	try {
+		await new Promise<void>((ok, fail) => { live.addEventListener("open", () => ok(), { once: true }); live.addEventListener("error", fail, { once: true }); });
+		await json(as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: `http://127.0.0.1:${(receiver.address() as { port: number }).port}/hook`, secret: "private-test", events: ["pull_request", "workflow_run"] }) }), 201);
+		await json(as(bob)(`${repo}/pulls/${pull.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "commented", body: "Ready" }) }), 201);
+		await json<Run>(as(bob)(`${actions}/runs/${waiting.number}/approve`, { method: "POST" }));
+		const completed = await until(async () => {
+			const run = await json<Run>(as(bob)(`${actions}/runs/${waiting.number}`));
+			return run.status === "completed" ? run : undefined;
+		});
+		const job = completed.jobs[0].id;
+		const { mintJobToken } = await import("../../src/ci/token.ts");
+		const jobToken = await mintJobToken("dev", { repo: created.project.name, run: waiting.number, job, read: [], write: `refs/pull/${pull.number}`, expires: Date.now() + 60_000 });
+		const ci = (url: string, init: RequestInit) => fetch(`${api}/api/ci${url}`, { ...init, headers: { authorization: `Bearer ${jobToken}` } });
+		const artifact = await ci("/artifacts", { method: "POST", body: new URLSearchParams({ name: "private-code", size: "12" }) });
+		assert.equal(artifact.status, 201, await artifact.clone().text());
+		const artifactId = (await artifact.text()).trim();
+		assert.equal((await ci(`/artifacts/${artifactId}/parts/1`, { method: "PUT", body: "private-code" })).status, 200);
+		assert.equal((await ci(`/artifacts/${artifactId}/commit`, { method: "POST" })).status, 200);
+		for (const suffix of ["", `/jobs/${job}/logs`, "/artifacts", `/artifacts/${artifactId}/download`]) {
+			for (const who of [ada, null]) assert.equal((await as(who)(`${actions}/runs/${waiting.number}${suffix}`)).status, 403, `private run ${suffix}`);
+			assert.equal((await as(bob)(`${actions}/runs/${waiting.number}${suffix}`)).status, 200, `head owner can read ${suffix}`);
+		}
+		assert.equal(await (await as(bob)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).text(), "private-code");
+		const rerun = await json<Run>(as(bob)(`${actions}/runs/${waiting.number}/rerun`, { method: "POST" }), 201);
+		assert.equal((await as(ada)(`${actions}/runs/${rerun.number}`)).status, 403, "reruns retain head provenance");
+		const pullHook = await until(async () => received.find((e) => e.event === "pull_request"));
+		assert.deepEqual([pullHook.pull?.headRepo, pullHook.pull?.head], ["(private fork)", ""]);
+		const runHook = await until(async () => received.find((e) => e.event === "workflow_run"));
+		assert.deepEqual([runHook.run?.workflow, runHook.run?.path, runHook.run?.branch], ["(private fork)", "", ""]);
+		const livePull = await until(async () => messages.find((e) => e.type === "pull.reviewed"));
+		assert.deepEqual([livePull.data.pull?.headRepo, livePull.data.pull?.head], ["(private fork)", ""]);
+		const liveRun = await until(async () => messages.find((e) => e.type === "ci.completed"));
+		assert.equal(liveRun.data.run?.branch, "");
+		const feed = (await json<{ events: Event[] }>(as(ada)(`${repo}/events`))).events.find((e) => e.data.run?.number === waiting.number)!;
+		assert.deepEqual([feed.data.run?.workflow, feed.data.run?.path, feed.data.run?.branch], ["(private fork)", "", ""]);
+		const ownerFeed = (await json<{ events: Event[] }>(as(bob)(`${repo}/events`))).events.find((e) => e.data.run?.number === waiting.number)!;
+		assert.equal(ownerFeed.data.run?.branch, "secret-branch");
+		assert.ok(!JSON.stringify(received).includes("_headRepo"));
+
+		// View access on the head is enough, and is rechecked rather than frozen at run creation.
+		await json(as(bob)(`${fork}/collaborators/${ada.username}`, { method: "PUT", body: JSON.stringify({ permission: "read" }) }));
+		const readInvite = (await json<{ invitations: { kind: string; id: string }[] }>(as(ada)("/invitations"))).invitations[0];
+		await json(as(ada)(`/invitations/${readInvite.kind}/${readInvite.id}/accept`, { method: "POST" }));
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/jobs/${job}/logs`)).status, 200);
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 200);
+		await json<Run>(as(ada)(`${actions}/runs/${waiting.number}/rerun`, { method: "POST" }), 201);
+		await json(as(bob)(`${fork}/collaborators/${ada.username}`, { method: "DELETE" }));
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 403);
+		await json(as(bob)(fork, { method: "DELETE" }));
+		assert.equal((await as(bob)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 403, "deleted heads fail closed");
+	} finally {
+		live.close();
+		await new Promise<void>((ok, fail) => receiver.close((err) => err ? fail(err) : ok()));
+	}
+});
+
 test("wikis: pages from the web and over git, conflicting edits refused, readers read, archived and turned-off wikis", async () => {
 	const ada = await newUser("wikia");
 	const bob = await newUser("wikib");
@@ -1677,6 +1854,135 @@ test("wikis: pages from the web and over git, conflicting edits refused, readers
 	assert.deepEqual(await wikiStores(), []);
 });
 
+test("the default branch can be switched, and clones (protocol v0 and v2) and forks follow it", async () => {
+	const ada = await newUser("switcher");
+	const bob = await newUser("forker");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "switch", visibility: "public" }) })).status, 201);
+	const exec = promisify(execFile);
+	const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+	const git = (args: string[], cwd?: string) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd, env });
+	const url = (owner: string, repo: string) => {
+		const u = new URL(`${api}/${owner}/${repo}.git`);
+		u.username = ada.username;
+		u.password = ada.token;
+		return u.toString();
+	};
+	const dir = join(root, "switch");
+	await git(["init", "-q", "-b", "master", dir]);
+	await writeFile(join(dir, "README.md"), "# master\n");
+	await git(["add", "-A"], dir);
+	await git(["commit", "-q", "-m", "first"], dir);
+	await git(["checkout", "-q", "-b", "dev"], dir);
+	await writeFile(join(dir, "DEV.md"), "dev\n");
+	await git(["add", "-A"], dir);
+	await git(["commit", "-q", "-m", "dev"], dir);
+	await git(["push", "-q", url(ada.username, "switch"), "master", "dev"], dir);
+
+	const patch = (body: unknown) => as(ada)(`/repos/${ada.username}/switch`, { method: "PATCH", body: JSON.stringify(body) });
+	assert.equal((await patch({ defaultBranch: "nope" })).status, 404);
+	assert.equal((await patch({ defaultBranch: "maggot-incoming/test" })).status, 400);
+	const switched = await patch({ defaultBranch: "dev" });
+	assert.equal(switched.status, 200, await switched.clone().text());
+	assert.equal(((await switched.json()) as { repo: { defaultBranch: string } }).repo.defaultBranch, "dev");
+	// Other settings still save alongside it.
+	assert.equal(((await (await patch({ visibility: "private" })).json()) as { repo: { visibility: string } }).repo.visibility, "private");
+	assert.equal(((await (await patch({ visibility: "public" })).json()) as { repo: { visibility: string } }).repo.visibility, "public");
+
+	for (const version of ["0", "2"]) {
+		const clone = join(root, `switch-clone-v${version}`);
+		await git(["-c", `protocol.version=${version}`, "clone", "-q", url(ada.username, "switch"), clone]);
+		assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], clone)).stdout.trim(), "dev", `protocol v${version}`);
+	}
+	const symref = (await git(["-c", "protocol.version=2", "ls-remote", "--symref", url(ada.username, "switch"), "HEAD"])).stdout;
+	assert.match(symref, /^ref: refs\/heads\/dev\tHEAD$/m);
+
+	const forked = await as(bob)(`/repos/${ada.username}/switch/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(forked.status, 201, await forked.clone().text());
+	const fork = ((await forked.json()) as { repo: { owner: string; name: string; defaultBranch: string } }).repo;
+	assert.equal(fork.defaultBranch, "dev");
+	const forkClone = join(root, "switch-fork");
+	await git(["clone", "-q", `${api}/${fork.owner}/${fork.name}.git`, forkClone]);
+	assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], forkClone)).stdout.trim(), "dev");
+
+	// Back to the branch storage itself points at: nothing to rewrite any more.
+	assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+	const back = join(root, "switch-back");
+	await git(["clone", "-q", url(ada.username, "switch"), back]);
+	assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], back)).stdout.trim(), "master");
+
+	// Every viewer hears about a switch, so their pages refresh.
+	const events = ((await (await as(ada)(`/repos/${ada.username}/switch/events`)).json()) as { events: { type: string; data: { from?: string; to?: string } }[] }).events;
+	assert.deepEqual(
+		events.filter((e) => e.type === "repo.default_branch").map((e) => [e.data.from, e.data.to]),
+		[["master", "dev"], ["dev", "master"]],
+	);
+
+	// A task created while the default switches works from whichever branch is the default once it exists:
+	// either the switch is refused because the task is active, or the task starts from the new default.
+	const repoPath = `/repos/${ada.username}/switch`;
+	const currentDefault = async () => ((await (await as(ada)(repoPath)).json()) as { repo: { defaultBranch: string } }).repo.defaultBranch;
+	for (let round = 0; round < 4; round++) {
+		const target = (await currentDefault()) === "master" ? "dev" : "master";
+		const [created, switching] = await Promise.all([
+			as(ada)(`${repoPath}/tasks?wait=25`, { method: "POST", body: JSON.stringify({ title: `race ${round}` }) }),
+			patch({ defaultBranch: target }),
+		]);
+		assert.ok(created.status === 201 || created.status === 202, await created.clone().text());
+		assert.ok(switching.status === 200 || switching.status === 409, await switching.clone().text());
+		const initial = (await created.json()) as TaskAccess;
+		const { task } = initial;
+		const ready = await until(async () => {
+			const { task: now } = (await (await as(ada)(`${repoPath}/tasks/${task.id}`)).json()) as { task: Task };
+			return now.status === "open" ? now : undefined;
+		});
+		const access = (await (await as(ada)(`${repoPath}/tasks/${task.id}/access`, { method: "POST" })).json()) as TaskAccess;
+		const base = await currentDefault();
+		assert.equal(base, switching.status === 200 ? target : target === "dev" ? "master" : "dev");
+		assert.equal(access.fork?.branch, base, `round ${round}: the task's fork follows the default it was created on`);
+		assert.equal(access.base?.branch, base);
+		if (initial.fork) {
+			assert.equal(initial.fork.branch, base, "the creation response has matching fork credentials");
+			assert.equal(initial.base?.branch, base);
+		}
+		assert.equal(ready.baseOid, (await git(["rev-parse", base], dir)).stdout.trim(), "the fork was provisioned from the captured default");
+		assert.equal((await as(ada)(`${repoPath}/tasks/${task.id}/abandon`, { method: "POST" })).status, 200);
+	}
+	if ((await currentDefault()) !== "master") assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+
+	// Deleting a branch while it becomes the default: one of them wins, never both.
+	for (let round = 0; round < 3; round++) {
+		const branch = `doomed-${round}`;
+		await git(["push", "-q", url(ada.username, "switch"), `master:${branch}`], dir);
+		const [deleted, switching] = await Promise.all([as(ada)(`${repoPath}/branches/${branch}`, { method: "DELETE" }), patch({ defaultBranch: branch })]);
+		const outcome = [deleted.status, switching.status];
+		assert.ok(
+			(deleted.ok && switching.status === 404) || (deleted.status === 400 && switching.ok),
+			`round ${round}: delete ${outcome[0]}, switch ${outcome[1]}`,
+		);
+		if (switching.ok) {
+			assert.equal(await currentDefault(), branch);
+			assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+		}
+	}
+});
+
+test("branch names git accepts can be default branches", async () => {
+	const ada = await newUser("refnames");
+	const create = (name: string, defaultBranch: string) =>
+		fetch(`${api}/api/repos`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${ada.token}` },
+			body: JSON.stringify({ name, defaultBranch, visibility: "public" }),
+		});
+	const created = await create("plus", "release+2026");
+	assert.equal(created.status, 201, await created.clone().text());
+	assert.equal(((await created.json()) as { repo: { defaultBranch: string } }).repo.defaultBranch, "release+2026");
+	for (const bad of ["a..b", "a b", "a:b", "-x", "x.lock", "a//b", "@", "x@{1}"]) {
+		assert.equal((await create("bad", bad)).status, 400, bad);
+	}
+});
 
 test("shallow imports keep the requested history depth and reject invalid depths", async () => {
 	const exec = promisify(execFile);
@@ -1698,4 +2004,132 @@ test("shallow imports keep the requested history depth and reject invalid depths
 	const full = `fullhistory${run}`;
 	assert.equal((await call("POST", "/projects", { name: full, importUrl: `file://${source}` })).status, 201);
 	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${full}/log`)).json.commits.length, 3);
+});
+
+test("reserved names can't be taken through displayUsername, and re-adding a collaborator keeps their access", async () => {
+	const signUp = (fields: Record<string, unknown>) =>
+		fetch(`${api}/api/auth/sign-up/email`, {
+			method: "POST",
+			headers: { "content-type": "application/json", origin: api },
+			body: JSON.stringify({ email: `${String(fields.displayUsername ?? fields.username)}${run}@test.invalid`, password: "correct-horse-battery", name: "x", ...fields }),
+		});
+	assert.equal((await signUp({ displayUsername: "settings" })).status, 400);
+	assert.equal((await signUp({ username: `ok${run}`.toLowerCase(), displayUsername: "explore" })).status, 400);
+	assert.equal((await signUp({ username: "Settings" })).status, 400);
+
+	const owner = await newUser("keeper");
+	const helper = await newUser("helper");
+	const as = (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${owner.token}`, ...init.headers } });
+	assert.equal((await as("/repos", { method: "POST", body: JSON.stringify({ name: "kept", visibility: "private" }) })).status, 201);
+	const put = (body: unknown) => as(`/repos/${owner.username}/kept/collaborators/${helper.username}`, { method: "PUT", body: JSON.stringify(body) });
+	assert.ok((await put({})).ok);
+	const permission = async () =>
+		((await (await as(`/repos/${owner.username}/kept/collaborators`)).json()) as { collaborators: { username: string; permission: string }[] }).collaborators.find((k) => k.username === helper.username)?.permission;
+	assert.equal(await permission(), "read");
+	assert.ok((await put({ permission: "admin" })).ok);
+	assert.ok((await put({})).ok);
+	assert.equal(await permission(), "admin");
+});
+
+test("a branch rule changed while a merge is under way waits for it, then holds for the next merge", async () => {
+	const ada = await newUser("rla");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "rules", visibility: "public", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/rules`;
+	const exec = promisify(execFile);
+	const remote = new URL(`${api}/${ada.username}/rules.git`);
+	remote.username = ada.username;
+	remote.password = ada.token;
+	const dir = join(root, "rules");
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", remote.toString(), dir]);
+	const pulls: number[] = [];
+	for (const branch of ["one", "two"]) {
+		await git("checkout", "-q", "-B", branch, "origin/master");
+		await writeFile(join(dir, `${branch}.txt`), `${branch}\n`);
+		await git("add", "-A");
+		await git("commit", "-q", "-m", `Add ${branch}`);
+		await git("push", "-q", "origin", branch);
+		const opened = await as(ada)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: branch, base: "master", head: branch }) });
+		assert.equal(opened.status, 201, await opened.clone().text());
+		pulls.push(((await opened.json()) as { pull: { number: number } }).pull.number);
+	}
+
+	// Slow fetches hold the first merge in the coordinator's merge slot while an admin requires reviews.
+	await control("POST", "/simulate", { uploadPackDelayMs: 2_000 });
+	try {
+		const merging = as(ada)(`${repo}/pulls/${pulls[0]}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+		await until(async () => (await control<{ uploadPacks: number }>("GET", "/stats")).uploadPacks > 0 ? true : undefined);
+		const ruling = as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireReview: true }) });
+		const [merged, ruled] = await Promise.all([merging, ruling]);
+		// The merge checked the rules it started under and pushed under them; the change waited its turn.
+		assert.equal(merged.status, 200, await merged.clone().text());
+		assert.equal(ruled.status, 200, await ruled.clone().text());
+	} finally {
+		await control("POST", "/simulate", {});
+	}
+	const refused = await as(ada)(`${repo}/pulls/${pulls[1]}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(refused.status, 403);
+	assert.equal(((await refused.json()) as { error: { code: string } }).error.code, "REVIEW_REQUIRED");
+});
+
+test("pull descriptions close issues using the coordinator's default branch when D1 is stale", async () => {
+	const ada = await newUser("dfa");
+	const as = (path: string, init: RequestInit = {}) => fetch(`${api}/api${path}`, {
+		...init, headers: { "content-type": "application/json", authorization: `Bearer ${ada.token}`, ...init.headers },
+	});
+	const created = await as("/repos", { method: "POST", body: JSON.stringify({ name: "defaults", visibility: "public", readme: true }) });
+	assert.equal(created.status, 201, await created.clone().text());
+	await created.arrayBuffer();
+	const repo = `/repos/${ada.username}/defaults`;
+	const exec = promisify(execFile);
+	const remote = new URL(`${api}/${ada.username}/defaults.git`);
+	remote.username = ada.username;
+	remote.password = ada.token;
+	const dir = join(root, "defaults");
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", remote.toString(), dir]);
+	await git("push", "-q", "origin", "master:release");
+	const cases: { base: string; issue: number; pull: number }[] = [];
+	for (const base of ["release", "master"]) {
+		const issueResponse = await as(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: `Fix ${base}` }) });
+		assert.equal(issueResponse.status, 201);
+		const { issue } = await issueResponse.json() as { issue: { number: number } };
+		const branch = `fix-${base}`;
+		await git("checkout", "-q", "-B", branch, "origin/master");
+		await writeFile(join(dir, `${branch}.txt`), `${base}\n`);
+		await git("add", "-A");
+		await git("commit", "-q", "-m", `Add ${branch}`);
+		await git("push", "-q", "origin", branch);
+		const opened = await as(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `Update ${base}`, body: `Fixes #${issue.number}`, base, head: branch }) });
+		assert.equal(opened.status, 201, await opened.clone().text());
+		const { pull } = await opened.json() as { pull: { number: number } };
+		cases.push({ base, issue: issue.number, pull: pull.number });
+	}
+
+	// Only this test worker's temporary D1 is changed. This branch has no default-change API yet:
+	// stand in for an old D1 copy while the coordinator's authoritative default is master.
+	const files = await readdir(join(root, "state"), { recursive: true, withFileTypes: true });
+	let changed = 0;
+	for (const file of files.filter((f) => f.isFile() && f.name.endsWith(".sqlite"))) {
+		const db = new DatabaseSync(join(file.parentPath, file.name));
+		try {
+			if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repo'").get()) {
+				changed += Number(db.prepare('UPDATE "repo" SET "defaultBranch" = ? WHERE "owner" = ? AND "name" = ?').run("release", ada.username, "defaults").changes);
+			}
+		} finally {
+			db.close();
+		}
+	}
+	assert.equal(changed, 1, "D1 now disagrees with the coordinator's default branch");
+	for (const item of cases) {
+		const merged = await as(`${repo}/pulls/${item.pull}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+		assert.equal(merged.status, 200, await merged.clone().text());
+	}
+	const actualDefault = cases.find((item) => item.base === "master")!;
+	await until(async () => ((await (await as(`${repo}/issues/${actualDefault.issue}`)).json()) as { issue: { state: string } }).issue.state === "closed" ? true : undefined);
+	const oldDefault = cases.find((item) => item.base === "release")!;
+	assert.equal(((await (await as(`${repo}/issues/${oldDefault.issue}`)).json()) as { issue: { state: string } }).issue.state, "open");
 });

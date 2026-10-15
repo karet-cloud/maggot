@@ -26,7 +26,8 @@ export const PARITY: ParitySection[] = [
 			{ feature: "git clone, fetch and push over HTTPS", status: "done", comment: "At /<owner>/<repo>.git with a personal access token as the password. The Worker proxies smart HTTP to Cloudflare Artifacts." },
 			{ feature: "Git over SSH", status: "done", comment: "git@host:owner/repo.git with an SSH key. Workers can't listen on port 22, so ssh connects through a one-line ProxyCommand over a WebSocket; it's real SSH end to end, with post-quantum key exchange." },
 			{ feature: "Git LFS", status: "missing", comment: "Planned: large files in R2 behind the LFS batch API." },
-			{ feature: "Import from another host", status: "done", comment: "Public URLs only; the import is measured against your storage quota." },
+			{ feature: "Import from another host", status: "done", comment: "Any public Git URL (GitHub, GitLab, Codeberg, self-hosted), with or without .git; it keeps the source's default branch, and a …/tree/<branch> link imports that branch. Measured against your storage quota." },
+			{ feature: "Change the default branch", status: "done", comment: "In Settings, to any existing branch: the code page, new pull requests, agent tasks and clones (HTTPS and SSH) follow it. Forks keep their source's default." },
 			{ feature: "Rename or transfer a repository", status: "done", comment: "Old names keep redirecting, for the web, the API and git. Transfers wait for the new owner to accept, within a week, and count against their quota." },
 			{ feature: "Archive a repository (read-only)", status: "done", comment: "Pushes, web edits, branch deletes and agent tasks are refused; cloning, forking and starring still work." },
 			{ feature: "Template repositories", status: "missing", comment: "" },
@@ -67,7 +68,7 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "Collaboration",
 		items: [
-			{ feature: "Pull requests", status: "done", comment: "From a branch or a fork, with conversation, commits and files tabs; merge commit or squash; conflicts named; \"fixes #n\" closes issues. Agents also land work through the merge queue." },
+			{ feature: "Pull requests", status: "done", comment: "From a branch, or across repositories from any fork in the network you can read (pick the repository and branch, or owner:branch in the compare URL; Contribute on a fork opens one into its source), with conversation, commits and files tabs; merge commit or squash; conflicts named; \"fixes #n\" closes issues. Agents also land work through the merge queue." },
 			{ feature: "Code review", status: "done", comment: "Line comments gathered into a review, then comment, approve or request changes. A branch rule can require an approval from someone who can merge. No suggested changes or threaded replies yet." },
 			{ feature: "Issues", status: "done", comment: "Markdown, comments, labels, close and reopen, search, notifications, webhooks, and \"fixes #n\" closing on the default branch. No assignees or milestones yet." },
 			{
@@ -122,6 +123,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Email verification", status: "done", comment: "Required to create repositories or push whenever the server can send email." },
 			{ feature: "Password reset and change", status: "done", comment: "Emails need a sending domain; without one, an admin can issue the link." },
 			{ feature: "Personal access tokens", status: "partial", comment: "Full access to your account. No scopes or expiry yet." },
+			{ feature: "Light and dark themes", status: "done", comment: "Follows the system until you pick one in the top bar; the choice applies to every page." },
 			{ feature: "Two-factor authentication", status: "missing", comment: "Better Auth has a plugin for it." },
 			{ feature: "Sign in with GitHub or Google", status: "missing", comment: "" },
 			{ feature: "SSH keys", status: "done", comment: "Ed25519, ECDSA and RSA (SHA-2 signatures) keys, with fingerprints and last-used times." },
@@ -137,7 +139,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "In-app notifications", status: "done", comment: "Stars, forks, agent task results and failing webhooks." },
 			{ feature: "Email notifications", status: "missing", comment: "" },
 			{ feature: "Repository search", status: "done", comment: "By owner, name or description; newest or most starred first." },
-			{ feature: "Explore page", status: "partial", comment: "The home page lists the newest public repositories. No trending." },
+			{ feature: "Explore page", status: "partial", comment: "/explore lists every public repository, most starred or newest first, with a filter. No trending or topics." },
 			{ feature: "Follow people", status: "missing", comment: "" },
 			{ feature: "Activity feed", status: "partial", comment: "Live per repository. No personal dashboard feed." },
 			{ feature: "Works on phones", status: "partial", comment: "Usable; some wide tables still need horizontal scrolling." },

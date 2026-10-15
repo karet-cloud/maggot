@@ -36,7 +36,7 @@ function Transfers() {
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
 			<div>
-				<h1 className="text-lg font-semibold">Invitations</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">Invitations</h1>
 				<p className="mt-1 text-sm text-dim">Organizations and repositories you've been invited to join.</p>
 			</div>
 			<ErrorNote error={invitations.error} />

@@ -4,6 +4,7 @@
 import type { Principal } from "../auth.ts";
 import { formatBytes, limit, policy, RateLimited, rules } from "../policy.ts";
 import { authorizeGit, EMPTY_WIKI, gitUpstream, settleStaged, upstreamFetch, watchPush } from "../git-http.ts";
+import { isLsRefs, pointHeadV2 } from "../git/head.ts";
 import { checkPush, parseCommands, quarantine, refusalReport, type Staged } from "../protection.ts";
 import type { Session, SshUser } from "./server.ts";
 import { concat } from "./wire.ts";
@@ -75,7 +76,9 @@ export async function runGitCommand(env: Env, ctx: ExecutionContext, origin: str
 				signal: session.signal,
 			});
 			if (!res.ok || !res.body) return fail(`ERROR: The storage backend answered ${res.status}.`);
-			await pipe(res.body, session);
+			// After a default branch change, clones are told HEAD is the new default (see git/head.ts).
+			if (target.head && isLsRefs(request)) await session.write(pointHeadV2(new Uint8Array(await res.arrayBuffer()), target.head.branch, request, target.head.oid));
+			else await pipe(res.body, session);
 		}
 	}
 

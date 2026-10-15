@@ -19,7 +19,8 @@ const tokensQuery = queryOptions({ queryKey: keys.tokens, queryFn: api.tokens })
 function Tokens() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
-	const tokens = useQuery({ ...tokensQuery, enabled: Boolean(viewer.data) });
+	// Asked alongside the viewer rather than after it (only skipped once we know nobody's signed in).
+	const tokens = useQuery({ ...tokensQuery, enabled: viewer.data !== null });
 	const [name, setName] = useState("");
 	const create = useMutation({
 		mutationFn: () => api.createToken(name.trim()),
@@ -47,7 +48,7 @@ function Tokens() {
 	}
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
-			<h1 className="text-lg font-semibold">Settings</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 			<SettingsNav />
 			<div>
 				<p className="text-sm text-dim">

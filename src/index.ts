@@ -13,6 +13,8 @@ import {
 	findRepo,
 	getListing,
 	insertRepo,
+	listNetwork,
+	ownerInNetwork,
 	listRepos,
 	listTokens,
 	addRepoBytes,
@@ -45,6 +47,7 @@ import {
 	addReview,
 	approvedAt,
 	getPull,
+	hiddenHeads,
 	listPulls,
 	listReviews,
 	markPullMerged,
@@ -59,17 +62,20 @@ import {
 	notifyUser,
 	revokeToken,
 	setRepoBytes,
+	sameNetwork,
 	setStar,
 	toRepoInfo,
+	unreadableRepos,
 	updateRepo,
 	type RepoListing,
 	type RepoRow,
 } from "./db.ts";
 import { HttpError, toHttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
-import { assertProjectName, wikiRepoName } from "./names.ts";
+import { assertProjectName, reservedName, wikiRepoName } from "./names.ts";
 import { WIKI_BRANCH } from "./wiki-pages.ts";
-import { measureRepository } from "./git/protocol.ts";
+import { measureRepository, probeRemote } from "./git/protocol.ts";
+import { isGitBranchName, MAX_BRANCH_BYTES } from "./git/refname.ts";
 import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
 import jobApi from "./ci/job-api.ts";
@@ -130,6 +136,11 @@ app.use("/api/auth/*", async (c, next) => {
 		return typeof value === "string" ? value.trim().toLowerCase() : "";
 	};
 	if (action === "sign-up/email") {
+		// Usernames are URL segments; Better Auth's validator only checks their shape (see src/auth.ts). It
+		// also fills a missing username from displayUsername, so a username is required and both are checked.
+		if (typeof fields?.username !== "string" || !fields.username.trim()) throw new HttpError(400, "INVALID_INPUT", "Choose a username");
+		const name = [field("username"), field("displayUsername")].find(reservedName);
+		if (name) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
 		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
 	} else if (action === "sign-in/username" || action === "sign-in/email") {
 		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
@@ -596,6 +607,7 @@ app.get("/api/repos", async (c) => {
 		starredBy: starrer?.id,
 		query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 		sort: c.req.query("sort") === "stars" ? "stars" : "created",
+		publicOnly: c.req.query("visibility") === "public",
 		limit: intParam(c.req.query("limit"), 100, 500),
 	});
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
@@ -612,6 +624,43 @@ interface NewRepo {
 	readme?: boolean;
 	/** An organization to create it in (the caller has to be a member); the caller's own account by default. */
 	owner?: string;
+}
+
+function assertBranchName(name: string): string {
+	if (!isGitBranchName(name)) throw new HttpError(400, "INVALID_INPUT", `Invalid branch name: ${JSON.stringify(name.slice(0, MAX_BRANCH_BYTES))}`);
+	return name;
+}
+
+/**
+ * A public Git URL to import from, as people paste it: the scheme may be missing, and a browser link
+ * to a branch (`…/tree/<branch>`) names the branch to import. Checked to answer Git before anything is created.
+ */
+async function importSource(raw: string, branch?: string): Promise<{ url: string; branch?: string }> {
+	let url: URL;
+	try {
+		url = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`);
+	} catch {
+		throw new HttpError(400, "INVALID_INPUT", "The import URL isn't a valid URL");
+	}
+	if (url.protocol !== "https:" && url.protocol !== "http:") throw new HttpError(400, "INVALID_INPUT", "Import from an http(s) Git URL, such as https://github.com/owner/repo.git");
+	if (url.username || url.password) throw new HttpError(400, "INVALID_INPUT", "Only public repositories can be imported, so leave credentials out of the URL");
+	// GitLab nests groups (`/group/sub/repo/-/tree/x`); a branch name with slashes can't be told from a folder in it.
+	const tree = /^(\/.+?)(?:\.git)?\/(?:-\/)?tree\/(.+?)\/?$/.exec(url.pathname);
+	if (tree) {
+		url.pathname = tree[1];
+		try {
+			branch ??= decodeURIComponent(tree[2]);
+		} catch {
+			throw new HttpError(400, "INVALID_INPUT", "The import URL's branch isn't valid");
+		}
+	}
+	url.search = "";
+	url.hash = "";
+	const clean = url.toString().replace(/\/+$/, "");
+	const probe = (await probeRemote(clean)) ?? (clean.endsWith(".git") ? null : await probeRemote(`${clean}.git`).then((p) => (p ? { ...p, dotGit: true } : null)));
+	if (!probe) throw new HttpError(400, "IMPORT_FAILED", `${clean} isn't a public Git repository (it didn't answer a Git clone)`);
+	const chosen = branch ?? probe.head;
+	return { url: "dotGit" in probe ? `${clean}.git` : clean, branch: chosen === undefined ? undefined : assertBranchName(chosen) };
 }
 
 /** Whose account a new repository (or fork) goes in: the caller's, or an organization they're a member of. */
@@ -636,8 +685,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 	// A fork of a private repository stays private.
 	const visibility = source?.visibility === "private" ? "private" : (input.visibility ?? source?.visibility ?? "public");
 	if (visibility !== "public" && visibility !== "private") throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
-	const defaultBranch = source?.defaultBranch ?? (input.defaultBranch?.trim() || "master");
-	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(defaultBranch) || defaultBranch.includes("..")) throw new HttpError(400, "INVALID_INPUT", "Invalid branch name");
+	const defaultBranch = assertBranchName(source?.defaultBranch ?? (input.defaultBranch?.trim() || "master"));
 	await ensureSchema(db(c.env));
 	const owner = await newOwner(c, user, input.owner);
 	const row: RepoRow = {
@@ -662,6 +710,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		if (source.bytes > room) throw new HttpError(403, "QUOTA_EXCEEDED", `${source.owner}/${source.name} is bigger than the ${formatBytes(Math.max(room, 0))} you have room for.`);
 	}
 	await limit(c.env, `user:${user.id}`, rules.repoCreate(policy(c.env)), "Too many repositories created");
+	const imported = !source && input.importUrl?.trim() ? await importSource(input.importUrl.trim(), input.importBranch?.trim() || undefined) : undefined;
 	// Claim owner/name first, so two creates of the same name can't both make a repository.
 	await insertRepo(db(c.env), row, policy(c.env).reposPerUser, policy(c.env).userBytes);
 	// A member who creates a repository in an organization administers it, as on GitHub; members alone only read.
@@ -678,9 +727,9 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 			name: row.id,
 			title: row.name,
 			description: row.description ?? undefined,
-			defaultBranch: input.importUrl || source ? undefined : defaultBranch,
-			importUrl: source ? undefined : input.importUrl?.trim() || undefined,
-			importBranch: source ? undefined : input.importBranch?.trim() || undefined,
+			defaultBranch: imported ? undefined : defaultBranch,
+			importUrl: imported?.url,
+			importBranch: imported?.branch,
 			importDepth: source ? undefined : input.importDepth,
 			forked: Boolean(source),
 			readme: source ? false : (input.readme ?? false),
@@ -690,7 +739,7 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		throw err;
 	}
 	// An import's size isn't known until it's there: measure it, and undo the import if it doesn't fit.
-	if (input.importUrl) {
+	if (imported) {
 		const p = policy(c.env);
 		const used = await usage(db(c.env), owner.id);
 		const room = Math.min(p.repoBytes, p.userBytes - used.bytes);
@@ -714,9 +763,8 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		await db(c.env).prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(created.defaultBranch, row.id).run();
 		row.defaultBranch = created.defaultBranch;
 	}
-	await projects(c.env)
-		.getByName(row.id)
-		.setRepository(repositoryRef(c, row));
+	// Independent of each other, so one round trip instead of two.
+	const [, listing] = await Promise.all([projects(c.env).getByName(row.id).setRepository(repositoryRef(c, row)), getListing(db(c.env), row.id, user.id)]);
 	if (source && source.ownerId !== owner.id) {
 		c.executionCtx.waitUntil(
 			notifyUser(db(c.env), {
@@ -730,8 +778,8 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 			}),
 		);
 	}
-	const listing = await getListing(db(c.env), row.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true, owner.id === user.id || (await roleIn(db(c.env), owner.id, user.id)) === "owner"), project: created }, 201);
+	// newOwner already looked up the caller's role in an organization owner.
+	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true, owner.id === user.id || owner.role === "owner"), project: created }, 201);
 }
 
 /** How webhook payloads name a repository. */
@@ -871,6 +919,11 @@ repo.get("/", async (c) => {
 	const listing = row ? await getListing(db(c.env), row.id, viewerId(p)) : null;
 	const info: RepoInfo | null = row ? toRepoInfo(listing ?? row, origin(c), canWrite(p, row), viewerId(p), canAdmin(p, row), await ownsRepo(c, row)) : null;
 	const state = await project(c).getProject();
+	// The coordinator's default branch is the one that counts; D1's copy catches up if a write to it failed.
+	if (row && info && state.defaultBranch !== row.defaultBranch) {
+		c.executionCtx.waitUntil(updateRepo(db(c.env), row.id, { defaultBranch: state.defaultBranch }));
+		info.defaultBranch = state.defaultBranch;
+	}
 	// People reach user repositories through maggot's own git URL; the storage remote stays internal.
 	return c.json({ project: info ? { ...state, name: info.fullName, remote: info.cloneUrl } : state, repo: info });
 });
@@ -878,7 +931,8 @@ repo.get("/", async (c) => {
 repo.patch("/", async (c) => {
 	const row = c.var.repo;
 	if (!row) throw new HttpError(400, "INVALID_INPUT", "Only user repositories have settings");
-	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean }>(c);
+	const input = await body<{ visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean; defaultBranch?: string }>(c);
+	if (input.defaultBranch !== undefined && typeof input.defaultBranch !== "string") throw new HttpError(400, "INVALID_INPUT", "defaultBranch is a branch name");
 	if (input.hasWiki !== undefined && typeof input.hasWiki !== "boolean") throw new HttpError(400, "INVALID_INPUT", "hasWiki is true or false");
 	if (input.visibility !== undefined && input.visibility !== "public" && input.visibility !== "private") {
 		throw new HttpError(400, "INVALID_INPUT", "visibility is public or private");
@@ -886,7 +940,7 @@ repo.patch("/", async (c) => {
 	if (input.archived !== undefined && typeof input.archived !== "boolean") throw new HttpError(400, "INVALID_INPUT", "archived is true or false");
 	if (input.name !== undefined && typeof input.name !== "string") throw new HttpError(400, "INVALID_INPUT", "name is a string");
 	// While archived, only unarchiving (and deleting or transferring, elsewhere) is allowed.
-	if (row.archivedAt && input.archived !== false && (input.visibility !== undefined || input.description !== undefined || input.name !== undefined || input.hasWiki !== undefined)) {
+	if (row.archivedAt && input.archived !== false && (input.visibility !== undefined || input.description !== undefined || input.name !== undefined || input.hasWiki !== undefined || input.defaultBranch !== undefined)) {
 		throw new HttpError(403, "ARCHIVED", "Unarchive the repository before changing its settings");
 	}
 	if (input.name !== undefined) {
@@ -896,19 +950,31 @@ repo.patch("/", async (c) => {
 			row.name = name;
 		}
 	}
+	// Before archiving or after unarchiving, since an archived repository refuses it. Always through the coordinator, whose copy is the one that
+	// counts: it checks the branch exists and no agent task works from the old default, and asking again
+	// repairs D1 if writing it failed last time.
+	let defaultBranch: string | undefined;
+	const switchDefault = async () => {
+		if (input.defaultBranch === undefined) return;
+		defaultBranch = await project(c).setDefaultBranch(assertBranchName(input.defaultBranch.trim()));
+		row.defaultBranch = defaultBranch;
+	};
+	if (input.archived !== false) await switchDefault();
 	if (input.archived !== undefined && input.archived !== Boolean(row.archivedAt)) {
 		// The coordinator refuses first if agent tasks are still active, and from then on refuses writes.
 		await project(c).setArchived(input.archived);
 		await setArchived(db(c.env), row.id, input.archived);
 	}
+	if (input.archived === false) await switchDefault();
 	await updateRepo(db(c.env), row.id, {
 		visibility: input.visibility,
+		defaultBranch,
 		description: input.description === undefined ? undefined : input.description?.trim() || null,
 		hasWiki: input.hasWiki,
 	});
 	// Live sockets were authorized when they connected; after a visibility change they reconnect and are checked again.
 	if (input.visibility !== undefined && input.visibility !== row.visibility) await project(c).disconnectAll("Visibility changed");
-	if (input.name !== undefined) await project(c).setRepository(repositoryRef(c, row));
+	if (input.name !== undefined || defaultBranch !== undefined) await project(c).setRepository(repositoryRef(c, row));
 	const updated = (await getListing(db(c.env), row.id, viewerId(c.var.principal))) as RepoListing;
 	return c.json({ repo: toRepoInfo(updated, origin(c), true, viewerId(c.var.principal), true, await ownsRepo(c, row)) });
 });
@@ -940,6 +1006,19 @@ repo.get("/forks", async (c) => {
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
+// The fork network the caller can see (this repository, what it was forked from, and forks of any of them):
+// where a pull request into this repository can come from. This repository first, then the newest;
+// `?q=` searches owner/name, and `?owner=` lists what `owner:branch` can mean.
+repo.get("/network", async (c) => {
+	const p = c.var.principal;
+	const owner = c.req.query("owner");
+	const everything = p.kind === "admin";
+	const rows = owner
+		? await ownerInNetwork(db(c.env), userRepo(c).id, owner, viewerId(p), everything)
+		: await listNetwork(db(c.env), userRepo(c).id, viewerId(p), { limit: intParam(c.req.query("limit"), 100, 500), query: c.req.query("q")?.trim().slice(0, 200) || undefined, everything });
+	return c.json({ repos: rows.filter((r) => canRead(p, r)).map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
+});
+
 // Forks into the caller's account; the name defaults to the source's.
 repo.post("/forks", async (c) => {
 	const source = userRepo(c);
@@ -955,7 +1034,8 @@ repo.put("/collaborators/:username", async (c) => {
 	const row = userRepo(c);
 	const user = requireUser(c);
 	const input = await body<{ permission?: string }>(c);
-	const permission = assertPermission(input.permission);
+	// A new invite gets least access unless asked for more; an existing grant changes only when one is given.
+	const permission = input.permission === undefined || input.permission === null ? undefined : assertPermission(input.permission);
 	const result = await setCollaborator(db(c.env), row, c.req.param("username"), permission, user.id);
 	// A changed grant (a downgrade, say) applies to views already open too.
 	if (!result.invited) reauthorize(c, [row.id]);
@@ -1064,7 +1144,7 @@ repo.get("/events", async (c) => {
 	const limit = intParam(c.req.query("limit"), 100, 1000);
 	const after = c.req.query("after");
 	// Without `after`, returns the newest `limit` events (for a feed); with it, pages forward from `after`.
-	const events = after === undefined ? await project(c).recentEvents(limit) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit);
+	const events = after === undefined ? await project(c).recentEvents(limit, pullViewer(c.var.principal)) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit, pullViewer(c.var.principal));
 	return c.json({ events });
 });
 
@@ -1774,18 +1854,36 @@ repo.delete("/issues/:number/comments/:id", async (c) => {
 // ── Pull requests and code review ────────────────────────────────────────────
 
 /**
- * Where a pull request's changes come from: a branch of this repository, or of `headRepo`
- * ("owner/name"), which has to be a fork of it that the caller can read.
+ * Where a pull request's changes come from: a branch of this repository, or of `headRepo` ("owner/name"),
+ * which has to be in its fork network (forked from it, or from what it was forked from, at any depth) and
+ * readable by the caller. `head` may also say `owner:branch`, as on GitHub: that owner's one repository in the
+ * network (the caller has to pass `headRepo` if they have more). `task:<id>` is never an owner: agent forks aren't heads.
  */
-async function pullHead(c: Context<App>, headRepo: unknown): Promise<RepoRow | null> {
+async function pullHead(c: Context<App>, headRepo: unknown, head: unknown): Promise<{ fork: RepoRow | null; branch: string }> {
 	const row = userRepo(c);
-	if (headRepo === undefined || headRepo === null || headRepo === "" || headRepo === `${row.owner}/${row.name}`) return null;
-	if (typeof headRepo !== "string" || !headRepo.includes("/")) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
-	const [owner, name] = headRepo.split("/");
-	const fork = await findRepo(db(c.env), owner, name, viewerId(c.var.principal));
-	if (!fork || !canRead(c.var.principal, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
-	if (fork.forkOf !== row.id) throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't a fork of ${row.owner}/${row.name}`);
-	return fork;
+	const p = c.var.principal;
+	const colon = typeof head === "string" && !head.startsWith("task:") ? head.indexOf(":") : -1;
+	const owner = colon >= 0 ? (head as string).slice(0, colon).toLowerCase() : null;
+	const branch = pullBranch(colon >= 0 ? (head as string).slice(colon + 1) : head, "head");
+	if (headRepo === undefined || headRepo === null || headRepo === "") {
+		if (owner === null) return { fork: null, branch };
+		const theirs = (await ownerInNetwork(db(c.env), row.id, owner, viewerId(p), p.kind === "admin")).filter((r) => canRead(p, r));
+		if (theirs.length === 0) throw new HttpError(404, "NOT_FOUND", `${owner} has no fork of ${row.owner}/${row.name} that you can see`);
+		if (theirs.length > 1) {
+			throw new HttpError(400, "AMBIGUOUS_HEAD", `${owner} has ${theirs.length} repositories in this fork network, so ${owner}:${branch} is ambiguous: pass headRepo (owner/name)`);
+		}
+		return { fork: theirs[0].id === row.id ? null : theirs[0], branch };
+	}
+	if (typeof headRepo !== "string" || !/^[^/]+\/[^/]+$/.test(headRepo)) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
+	const [forkOwner, name] = headRepo.split("/");
+	if (owner !== null && owner !== forkOwner.toLowerCase()) throw new HttpError(400, "INVALID_INPUT", `head names ${owner} but headRepo is ${headRepo}`);
+	const fork = await findRepo(db(c.env), forkOwner, name, viewerId(p));
+	if (!fork || !canRead(p, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
+	if (fork.id === row.id) return { fork: null, branch };
+	if (!(await sameNetwork(db(c.env), row, fork))) {
+		throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't in the fork network of ${row.owner}/${row.name}`);
+	}
+	return { fork, branch };
 }
 
 function pullBranch(name: unknown, what: string): string {
@@ -1814,10 +1912,6 @@ async function liveHead(c: Context<App>, pull: PullRow): Promise<string | null> 
 	return pull.headRepoId;
 }
 
-async function reviewRequired(c: Context<App>, base: string): Promise<boolean> {
-	return protectionFor(await project(c).getBranchRules(), base).requireReview;
-}
-
 /** What branch rules on `base` want before a pull request merges into it. */
 async function mergeRequirements(c: Context<App>, base: string): Promise<{ review: boolean; checks: boolean }> {
 	const rule = protectionFor(await project(c).getBranchRules(), base);
@@ -1843,11 +1937,20 @@ function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.
 					}),
 				),
 			);
+			// Keep the original for authorized feed readers; the coordinator redacts broadcasts and webhooks.
+			const fork = pull.headRepoId !== pull.repoId;
 			await project(c).recordPullEvent(type, {
-				pull: { number: pull.number, title: pull.title, base: pull.baseBranch, head: pull.headBranch, url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}` },
+				pull: {
+					number: pull.number,
+					title: pull.title,
+					base: pull.baseBranch,
+					head: pull.headBranch,
+					headRepo: !fork ? null : `${pull.headOwner}/${pull.headName}`,
+					url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}`,
+				},
 				sender: actor.username,
 				...extra,
-			});
+			}, fork ? pull.headRepoId ?? undefined : null);
 		})().catch((err) => console.error("announcing pull request activity failed", err)),
 	);
 }
@@ -1874,16 +1977,19 @@ function pullTrigger(c: Context<App>, row: RepoRow, pull: PullRow, head: string)
 
 /**
  * Starts a pull request's pull_request workflows for its head commit, in the background. They wait for
- * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here.
+ * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here,
+ * and can read the fork: approving runs a private fork's code where its logs and artifacts are kept.
  * If this doesn't get through, the pull request's checks show them missing, for a writer to start.
  */
 function startPullChecks(c: Context<App>, row: RepoRow, pull: PullRow, head: string, action: "opened" | "reopened") {
 	const trigger = pullTrigger(c, row, pull, head);
 	if (!trigger) return;
+	const p = c.var.principal;
 	c.executionCtx.waitUntil(
-		project(c)
-			.ciPull({ ...trigger, action, approved: canWrite(c.var.principal, row) })
-			.catch((err) => console.error("starting pull request Actions failed", err)),
+		(async () => {
+			const readsHead = pull.headRepoId === row.id || (await unreadableRepos(db(c.env), [pull.headRepoId as string], pullViewer(p))).size === 0;
+			await project(c).ciPull({ ...trigger, action, approved: canWrite(p, row) && readsHead });
+		})().catch((err) => console.error("starting pull request Actions failed", err)),
 	);
 }
 
@@ -1909,10 +2015,13 @@ function reopenedPull(c: Context<App>, row: RepoRow, number: number) {
 	);
 }
 
+/** Whose eyes pull requests are shown to: private forks they can't read stay unnamed. */
+const pullViewer = (p: Principal) => ({ viewerId: viewerId(p), everything: p.kind === "admin" });
+
 repo.get("/pulls", async (c) => {
 	const state = c.req.query("state");
 	return c.json(
-		await listPulls(db(c.env), userRepo(c).id, {
+		await listPulls(db(c.env), userRepo(c).id, pullViewer(c.var.principal), {
 			state: state === "closed" || state === "all" ? state : "open",
 			query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 			limit: intParam(c.req.query("limit"), 50, 200),
@@ -1920,12 +2029,11 @@ repo.get("/pulls", async (c) => {
 	);
 });
 
-// What a pull request from `head` (of `headRepo`) into `base` would bring, before opening it.
+// What a pull request from `head` (of `headRepo`, or `owner:branch`) into `base` would bring, before opening it.
 repo.get("/pulls/compare", async (c) => {
 	userRepo(c);
 	const base = pullBranch(c.req.query("base"), "base");
-	const head = pullBranch(c.req.query("head"), "head");
-	const fork = await pullHead(c, c.req.query("headRepo"));
+	const { fork, branch: head } = await pullHead(c, c.req.query("headRepo"), c.req.query("head"));
 	return c.json({ comparison: await project(c).pullCompare(base, fork?.id ?? null, head) });
 });
 
@@ -1935,8 +2043,7 @@ repo.post("/pulls", async (c) => {
 	const input = await body<{ title?: string; body?: string; base?: string; head?: string; headRepo?: string }>(c);
 	const text = issueText(input, true);
 	const base = pullBranch(input.base, "base");
-	const head = pullBranch(input.head, "head");
-	const fork = await pullHead(c, input.headRepo);
+	const { fork, branch: head } = await pullHead(c, input.headRepo, input.head);
 	if (!fork && base === head) throw new HttpError(400, "INVALID_INPUT", "The head and base branches are the same");
 	const comparison = await project(c).pullCompare(base, fork?.id ?? null, head);
 	if (comparison.commits.length === 0) throw new HttpError(422, "NOTHING_TO_COMPARE", `${head} has nothing that ${base} doesn't`);
@@ -1944,7 +2051,7 @@ repo.post("/pulls", async (c) => {
 		.prepare(`select i."number" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and p."headRepoId" is ? and p."headBranch" = ? and p."baseBranch" = ? and i."state" = 'open'`)
 		.bind(row.id, fork?.id ?? row.id, head, base)
 		.first<{ number: number }>();
-	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${head}`);
+	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${fork ? `${fork.owner}:${head}` : head}`);
 	const user = await canPost(c);
 	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", [], { headRepoId: fork?.id ?? row.id, headBranch: head, baseBranch: base });
 	const pull = (await getPull(db(c.env), row.id, issue.number)) as PullRow;
@@ -1959,13 +2066,14 @@ repo.get("/pulls/:number", async (c) => {
 	const p = c.var.principal;
 	const owner = canWrite(p, row);
 	const me = viewerId(p);
-	const [{ comments, earlier }, review, required] = await Promise.all([
+	const [{ comments, earlier }, review, required, hidden] = await Promise.all([
 		listComments(db(c.env), pull.id, { id: me, owner }),
 		listReviews(db(c.env), pull.id),
 		mergeRequirements(c, pull.baseBranch),
+		hiddenHeads(db(c.env), [pull], pullViewer(p)),
 	]);
 	return c.json({
-		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required),
+		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required, hidden),
 		comments,
 		earlier,
 		reviews: review.reviews,
@@ -2068,7 +2176,8 @@ repo.post("/pulls/:number/merge", async (c) => {
 	// Whoever merges has to be able to see what they're merging.
 	const headRepo = await liveHead(c, pull);
 	let expectedHead = input.expectedHead;
-	if (await reviewRequired(c, pull.baseBranch)) {
+	const required = await mergeRequirements(c, pull.baseBranch);
+	if (required.review) {
 		// The approval has to be of the commit that merges, not of an earlier one.
 		const head = expectedHead ?? (await project(c).pullCompare(pull.baseBranch, headRepo, pull.headBranch)).head;
 		if (pull.decision !== "approved" || !(await approvedAt(db(c.env), pull, head))) {
@@ -2076,11 +2185,14 @@ repo.post("/pulls/:number/merge", async (c) => {
 		}
 		expectedHead = head;
 	}
-	// Actions have to have passed on the very commit that merges.
-	const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo, branch: pull.headBranch, sha: expectedHead });
-	if (checks.required) {
-		if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${pull.baseBranch} requires Actions to pass. ${checks.reason}`);
-		expectedHead = checks.head;
+	// Actions have to have passed on the very commit that merges. Only asked when the branch wants them:
+	// judging the checks reads the base's workflow files from storage.
+	if (required.checks) {
+		const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo, branch: pull.headBranch, sha: expectedHead });
+		if (checks.required) {
+			if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${pull.baseBranch} requires Actions to pass. ${checks.reason}`);
+			expectedHead = checks.head;
+		}
 	}
 	const from = pull.headOwner && headRepo ? `${pull.headOwner}:${pull.headBranch}` : pull.headBranch;
 	const message = method === "squash" ? `${pull.title} (#${pull.number})\n\n${pull.body}`.trim() : `Merge pull request #${pull.number} from ${from}\n\n${pull.title}`;
@@ -2092,12 +2204,15 @@ repo.post("/pulls/:number/merge", async (c) => {
 		message,
 		author: { name: user.username, email: `${user.username}@users.noreply.${new URL(c.req.url).hostname}` },
 		expectedHead,
+		// The coordinator checks the branch's rules again right before pushing: they may change while this waits its turn.
+		pull: pull.number,
 	});
 	await markPullMerged(db(c.env), pull, user.id, result.commit);
 	closedPull(c, row, pull.number, true);
 	// "Fixes #n" in the description closes those issues too, as GitHub does.
 	const fixes = [...new Set([...`${pull.title}\n${pull.body}`.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)].map((m) => Number(m[1])))];
-	if (fixes.length > 0 && pull.baseBranch === (await project(c).getProject()).defaultBranch) {
+	// Whether the merge landed on the default branch, as the coordinator saw it when it pushed (not D1's copy, which can be changed meanwhile).
+	if (fixes.length > 0 && result.onDefaultBranch) {
 		c.executionCtx.waitUntil(closeIssuesByCommits(c.env, row.id, fixes.filter((n) => n !== pull.number).slice(0, 50).map((n) => [n, result.commit])).catch(() => []));
 	}
 	announcePull(c, row, pull, "pull.merged", user, { method, commit: result.commit });

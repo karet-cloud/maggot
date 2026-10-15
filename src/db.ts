@@ -1,5 +1,5 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
-// The schema is created idempotently on first use in each isolate, so deploys need no migration step.
+// The schema is created idempotently when it changes (see ensureSchema), so deploys need no migration step.
 import type {
 	Issue,
 	IssueComment,
@@ -96,7 +96,7 @@ const COLUMNS = [
 /** Indexes on added columns, created once the columns exist. */
 const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`];
 
-const ready = new WeakMap<D1Database, Promise<void>>();
+const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
 
 export function db(env: Env): D1Database {
 	const database = (env as { DB?: D1Database }).DB;
@@ -104,22 +104,83 @@ export function db(env: Env): D1Database {
 	return database;
 }
 
-/** Creates any missing tables. Cheap after the first call in an isolate. */
-export function ensureSchema(database: D1Database): Promise<void> {
-	let pending = ready.get(database);
-	if (!pending) {
-		pending = database
-			.batch([...AUTH_SCHEMA, ...APP_SCHEMA].map((sql) => database.prepare(sql)))
-			.then(() => Promise.all(COLUMNS.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn))))
-			.then(() => database.batch(LATE_INDEXES.map((sql) => database.prepare(sql))))
-			.then(() => undefined)
-			.catch((err) => {
-				ready.delete(database);
-				throw err;
-			});
-		ready.set(database, pending);
+export interface SchemaStatements {
+	/** Tables and indexes, created idempotently in one batch. */
+	tables: string[];
+	/** Columns added later; adding one that exists fails harmlessly. */
+	columns: string[];
+	/** Indexes on added columns, created once the columns exist. */
+	lateIndexes: string[];
+}
+
+/** How long a request waits on another request's schema check before running one itself. */
+const SHARED_CHECK_WAIT_MS = 3_000;
+
+/**
+ * An `ensureSchema` for these statements. The database records which schema it has (a fingerprint of
+ * the statements), so a deploy that changes any of them runs them once, and every other cold start
+ * reads one row instead of rerunning them all (each a D1 write that queues behind everyone else's).
+ *
+ * Free after the first success in an isolate. Until then concurrent requests share one check, so a
+ * deploy doesn't set every cold request running the DDL, but each waits on it only briefly before
+ * checking for itself: in Workers, a promise whose I/O belongs to a request that was cancelled
+ * meanwhile may never settle, and every request waiting on it would hang with it.
+ */
+export function schemaEnsurer(statements: SchemaStatements, waitMs = SHARED_CHECK_WAIT_MS): (database: D1Database) => Promise<void> {
+	const version = fnv1a([...statements.tables, ...statements.columns, ...statements.lateIndexes].join("\n"));
+	const migrated = new WeakSet<D1Database>();
+	const inflight = new WeakMap<D1Database, Promise<void>>();
+
+	async function check(database: D1Database): Promise<void> {
+		const current = await database
+			.prepare(`select "version" from "maggot_schema" where "id" = 1`)
+			.first<{ version: string }>()
+			.catch(() => null);
+		if (current?.version !== version) await migrate(database);
+		migrated.add(database);
 	}
-	return pending;
+
+	async function migrate(database: D1Database): Promise<void> {
+		await database.batch([...statements.tables, VERSION_TABLE].map((sql) => database.prepare(sql)));
+		await Promise.all(statements.columns.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn)));
+		// The version is recorded last, with the late indexes: a migration that fails partway runs again.
+		await database.batch([
+			...statements.lateIndexes.map((sql) => database.prepare(sql)),
+			database.prepare(`insert into "maggot_schema" ("id", "version") values (1, ?) on conflict ("id") do update set "version" = excluded."version"`).bind(version),
+		]);
+	}
+
+	return async function ensureSchema(database: D1Database): Promise<void> {
+		if (migrated.has(database)) return;
+		const shared = inflight.get(database);
+		if (shared) {
+			let timer: ReturnType<typeof setTimeout> | null = null;
+			await Promise.race([shared.catch(() => {}), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
+			if (timer !== null) clearTimeout(timer);
+			if (migrated.has(database)) return;
+		}
+		const own = check(database);
+		if (!inflight.has(database)) {
+			inflight.set(database, own);
+			own.catch(() => {}).finally(() => {
+				if (inflight.get(database) === own) inflight.delete(database);
+			});
+		}
+		await own;
+	};
+}
+
+/** Creates any missing tables (see schemaEnsurer). */
+export const ensureSchema = schemaEnsurer({ tables: [...AUTH_SCHEMA, ...APP_SCHEMA], columns: COLUMNS, lateIndexes: LATE_INDEXES });
+
+/** FNV-1a, as hex: a cheap, stable fingerprint of the schema statements. */
+function fnv1a(text: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function ignoreDuplicateColumn(err: unknown) {
@@ -379,7 +440,8 @@ export async function setRepoBytes(database: D1Database, id: string, bytes: numb
 	await database.prepare(`update "repo" set "bytes" = ? where "id" = ?`).bind(bytes, id).run();
 }
 
-export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean }): Promise<void> {
+export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean; defaultBranch?: string }): Promise<void> {
+	if (patch.defaultBranch !== undefined) await database.prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(patch.defaultBranch, id).run();
 	if (patch.hasWiki !== undefined) await database.prepare(`update "repo" set "hasWiki" = ? where "id" = ?`).bind(patch.hasWiki ? 1 : 0, id).run();
 	if (patch.visibility !== undefined) await database.prepare(`update "repo" set "visibility" = ? where "id" = ?`).bind(patch.visibility, id).run();
 	if (patch.description !== undefined) await database.prepare(`update "repo" set "description" = ? where "id" = ?`).bind(patch.description, id).run();
@@ -419,6 +481,8 @@ export interface ListOptions {
 	/** Matches owner, name or description (case-insensitive substring). */
 	query?: string;
 	sort?: "created" | "stars";
+	/** Only public repositories, whatever the viewer can also see. */
+	publicOnly?: boolean;
 	limit?: number;
 }
 
@@ -443,12 +507,86 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 		where.push(`(r."owner" || '/' || r."name" || ' ' || coalesce(r."description", '')) like ? escape '\\'`);
 		args.push(`%${opts.query.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
 	}
-	where.push(`(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
+	where.push(opts.publicOnly ? `r."visibility" = 'public'` : `(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
 	const order = opts.starredBy ? `mine."createdAt" desc` : opts.sort === "stars" ? `"stars" desc, r."createdAt" desc` : `r."createdAt" desc`;
 	const listing = LISTING.replace(`left join "repo" p`, `${join} left join "repo" p`);
 	const { results } = await database
 		.prepare(`${listing} where ${where.join(" and ")} order by ${order} limit ?`)
 		.bind(...args, opts.limit ?? 100)
+		.all<RepoListing>();
+	return results;
+}
+
+/**
+ * `id`'s (?2) fork network as CTEs: `up`, what it was forked from; `root`, where that ends (a repository
+ * forked from nothing, or from one since deleted); `down`, every repository forked from the root at any
+ * depth. `forkOf` is set once, when a repository is created, so there are no cycles; `union` (not
+ * `union all`) ends the walk even if there were, and `root` falls back to `id` then.
+ */
+const NETWORK = `up("id", "forkOf") as (
+	select "id", "forkOf" from "repo" where "id" = ?2
+	union select r."id", r."forkOf" from "repo" r join up on r."id" = up."forkOf"
+),
+root("id") as (select coalesce((select "id" from up where "forkOf" is null or "forkOf" not in (select "id" from "repo") limit 1), ?2)),
+down("id") as (
+	select "id" from root
+	union select r."id" from "repo" r join down on r."forkOf" = down."id"
+)`;
+
+/**
+ * The root of `id`'s fork network: the repository everything in it was forked from, directly or not.
+ * A deleted fork in the middle splits a network, as its forks lose their `forkOf`.
+ */
+export async function networkRoot(database: D1Database, id: string): Promise<string> {
+	const row = await database
+		.prepare(`with recursive ${NETWORK} select "id" from root`)
+		.bind("", id)
+		.first<{ id: string }>();
+	return row?.id ?? id;
+}
+
+/** Whether two repositories are in the same fork network (so pull requests can go between them). */
+export async function sameNetwork(database: D1Database, a: Pick<RepoRow, "id" | "forkOf">, b: Pick<RepoRow, "id" | "forkOf">): Promise<boolean> {
+	if (a.id === b.id || a.forkOf === b.id || b.forkOf === a.id) return true;
+	const [ra, rb] = await Promise.all([networkRoot(database, a.id), networkRoot(database, b.id)]);
+	return ra === rb;
+}
+
+/**
+ * `owner`'s repositories in `id`'s fork network, `id` included, with `viewerId`'s access `level`: what
+ * `owner:branch` can mean. Only ones the viewer may see, unless `everything` (the server's admin key).
+ * Lean (no listing counts), as it runs for every `owner:branch`.
+ */
+export async function ownerInNetwork(database: D1Database, id: string, owner: string, viewerId: string | null, everything = false): Promise<RepoRow[]> {
+	const { results } = await database
+		.prepare(
+			`with recursive ${NETWORK}
+			select r.*, ${accessLevel("r", "?1")} as "level" from "repo" r
+			where r."id" in (select "id" from down) and r."owner" = ?3${everything ? "" : ` and (r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`}
+			order by r."createdAt" limit 10`,
+		)
+		.bind(viewerId ?? "", id, owner.toLowerCase())
+		.all<RepoRow>();
+	return results;
+}
+
+/**
+ * The repositories in `id`'s fork network (the root and its forks, forks of forks included) that
+ * `viewerId` can see, or all of them when `everything`: where a pull request into `id` can come from.
+ * `id` first, then the newest; `query` matches owner/name, for networks too big to list.
+ */
+export async function listNetwork(
+	database: D1Database,
+	id: string,
+	viewerId: string | null,
+	opts: { limit?: number; query?: string; everything?: boolean } = {},
+): Promise<RepoListing[]> {
+	const where = [`r."id" in (select "id" from down)`];
+	if (!opts.everything) where.push(`(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
+	if (opts.query) where.push(`(r."owner" || '/' || r."name") like ?4 escape '\\'`);
+	const { results } = await database
+		.prepare(`with recursive ${NETWORK} ${LISTING} where ${where.join(" and ")} order by r."id" = ?2 desc, r."createdAt" desc limit ?3`)
+		.bind(viewerId ?? "", id, opts.limit ?? 100, ...(opts.query ? [`%${opts.query.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`] : []))
 		.all<RepoListing>();
 	return results;
 }
@@ -956,6 +1094,7 @@ export interface PullRow extends IssueRow {
 	mergedBy: string | null;
 	headOwner: string | null;
 	headName: string | null;
+	headVisibility: Visibility | null;
 	decision: "approved" | "changes_requested" | null;
 }
 
@@ -971,25 +1110,61 @@ const DECISION = `(select case
 	end)`;
 
 const PULL = `select i.*, a."username" as "author", c."username" as "closedBy", p."headRepoId", p."headBranch", p."baseBranch", p."mergedAt", p."mergedById", p."mergeCommit",
-	m."username" as "mergedBy", h."owner" as "headOwner", h."name" as "headName", ${DECISION} as "decision"
+	m."username" as "mergedBy", h."owner" as "headOwner", h."name" as "headName", h."visibility" as "headVisibility", ${DECISION} as "decision"
 	from "issue" i join "pull" p on p."issueId" = i."id" join "repo" r on r."id" = i."repoId"
 	left join "user" a on a."id" = i."authorId" left join "user" c on c."id" = i."closedById" left join "user" m on m."id" = p."mergedById"
 	left join "repo" h on h."id" = p."headRepoId"`;
 
-export function toPullSummary(row: PullRow): PullSummary {
+/** Who sees pull requests: a user's id, or null; `everything` for the server's admin key. */
+export interface PullViewer {
+	viewerId: string | null;
+	everything?: boolean;
+}
+
+/**
+ * The private forks among `rows`' heads that the viewer can't read. Their names and branches are
+ * hidden: a pull request into a repository you can read doesn't tell you what's in one you can't.
+ */
+export async function hiddenHeads(database: D1Database, rows: PullRow[], viewer: PullViewer): Promise<Set<string>> {
+	return unreadableRepos(database, rows.filter((r) => r.headRepoId && r.headRepoId !== r.repoId && r.headVisibility !== "public").map((r) => r.headRepoId as string), viewer);
+}
+
+/**
+ * Which of these repository ids the viewer can't read: private ones they have no access to, and ones
+ * since deleted (nobody can say any more who could). `{ viewerId: null }` is nobody in particular, as
+ * for webhooks: every private repository is hidden then.
+ */
+export async function unreadableRepos(database: D1Database, ids: string[], viewer: PullViewer): Promise<Set<string>> {
+	const unique = [...new Set(ids)];
+	if (viewer.everything || unique.length === 0) return new Set();
+	const readable = new Set<string>();
+	// D1 permits at most 100 bound parameters per query.
+	for (let offset = 0; offset < unique.length; offset += 90) {
+		const batch = unique.slice(offset, offset + 90);
+		const { results } = await database
+			.prepare(`select r."id" from "repo" r where r."id" in (${batch.map((_, i) => `?${i + 2}`).join(", ")}) and (r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`)
+			.bind(viewer.viewerId ?? "", ...batch)
+			.all<{ id: string }>();
+		for (const row of results) readable.add(row.id);
+	}
+	return new Set(unique.filter((id) => !readable.has(id)));
+}
+
+export function toPullSummary(row: PullRow, hidden?: Set<string>): PullSummary {
+	const secret = row.headRepoId !== null && Boolean(hidden?.has(row.headRepoId));
 	return {
 		...toIssueSummary(row),
 		pullState: row.mergedAt ? "merged" : row.state,
 		base: row.baseBranch,
-		head: row.headBranch,
-		headRepo: row.headRepoId !== row.repoId ? (row.headOwner ? `${row.headOwner}/${row.headName}` : "(deleted fork)") : null,
+		head: secret ? "" : row.headBranch,
+		headRepo: row.headRepoId !== row.repoId ? (secret ? "(private fork)" : row.headOwner ? `${row.headOwner}/${row.headName}` : "(deleted fork)") : null,
 		decision: row.decision,
 	};
 }
 
-export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge: boolean }, required: { review: boolean; checks: boolean }): Pull {
+export function toPull(row: PullRow, can: { edit: boolean; label: boolean; merge: boolean }, required: { review: boolean; checks: boolean }, hidden?: Set<string>): Pull {
 	return {
-		...toPullSummary(row),
+		...toPullSummary(row, hidden),
 		body: row.body,
 		closedBy: row.closedBy,
 		mergedAt: row.mergedAt,
@@ -1008,7 +1183,7 @@ export async function getPull(database: D1Database, repoId: string, number: numb
 }
 
 /** Pull requests newest first: open, closed (merged or not) or all, with the counts. */
-export async function listPulls(database: D1Database, repoId: string, opts: { state?: "open" | "closed" | "all"; query?: string; limit?: number }): Promise<PullList> {
+export async function listPulls(database: D1Database, repoId: string, viewer: PullViewer, opts: { state?: "open" | "closed" | "all"; query?: string; limit?: number }): Promise<PullList> {
 	const where = [`i."repoId" = ?`];
 	const args: unknown[] = [repoId];
 	if (opts.query) {
@@ -1022,7 +1197,9 @@ export async function listPulls(database: D1Database, repoId: string, opts: { st
 		database.prepare(`select i."state", count(*) as "n" from "issue" i where ${filter} and i."isPull" = 1 group by i."state"`).bind(...args),
 	]);
 	const count = (s: IssueState) => Number((counts.results as { state: string; n: number }[]).find((r) => r.state === s)?.n ?? 0);
-	return { pulls: (list.results as unknown as PullRow[]).map(toPullSummary), open: count("open"), closed: count("closed") };
+	const rows = list.results as unknown as PullRow[];
+	const hidden = await hiddenHeads(database, rows, viewer);
+	return { pulls: rows.map((r) => toPullSummary(r, hidden)), open: count("open"), closed: count("closed") };
 }
 
 /** Records a merge: the pull request is closed and marked merged by `userId` at `commit`. */

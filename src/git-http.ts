@@ -7,6 +7,7 @@ import { addRepoBytes, db, ensureSchema, findRepo, type RepoRow } from "./db.ts"
 import { toHttpError } from "./errors.ts";
 import { clientIp, formatBytes, guardCredentials, limit, policy, pushBlocked, RateLimited, rules, verificationRequired } from "./policy.ts";
 import { listRefs, pushAccepted, RefUpdateRejected, setRef } from "./git/protocol.ts";
+import { isLsRefs, pointHeadV0, pointHeadV2 } from "./git/head.ts";
 import { checkPush, isAncestor, mapReport, parseCommands, quarantine, refusalReport, type Staged } from "./protection.ts";
 import { repoStore } from "./store.ts";
 import type { RemoteAccess } from "./git/workspace.ts";
@@ -94,13 +95,13 @@ export async function authorizeGit(env: Env, principal: Principal, owner: string
  * Where an authorized git request goes: the repository's storage, with its branch rules for pushes,
  * or its wiki's, which has neither branch rules nor Actions. Null for a clone of a wiki with no pages yet.
  */
-export async function gitUpstream(env: Env, access: Extract<GitAccess, { ok: true }>, pushing: boolean): Promise<{ remote: RemoteAccess; rules: BranchRule[] } | null> {
+export async function gitUpstream(env: Env, access: Extract<GitAccess, { ok: true }>, pushing: boolean): Promise<{ remote: RemoteAccess; rules: BranchRule[]; head?: { branch: string; oid?: string } } | null> {
 	const coordinator = (env.PROJECT as DurableObjectNamespace<ProjectCoordinator>).getByName(access.row.id);
 	if (access.wiki) {
 		const remote = await coordinator.wikiRemote(pushing ? "write" : "read");
 		return remote ? { remote, rules: [] } : null;
 	}
-	return pushing ? coordinator.pushContext() : { remote: await coordinator.gitRemote("read"), rules: [] };
+	return pushing ? coordinator.pushContext() : coordinator.fetchContext();
 }
 
 /** What git hears when it clones a wiki nobody has written a page in yet. */
@@ -327,10 +328,22 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 
 	const target = await gitUpstream(env, access, pushing);
 	if (!target) return deny(404, EMPTY_WIKI);
-	const { remote: upstream, rules: branchRules } = target;
+	const { remote: upstream, rules: branchRules, head } = target;
 	const headers = Object.fromEntries(["user-agent", "content-type", "accept", "content-encoding", "git-protocol"].map((name) => [name, request.headers.get(name)]));
 	const receiving = pushing && route.endpoint === "git-receive-pack";
 	let requestBody = request.body;
+	// After a default branch change, clones are told HEAD is the new default (see git/head.ts).
+	let lsRefs: Uint8Array | null = null;
+	if (head && route.endpoint === "git-upload-pack" && requestBody) {
+		if (headers["content-encoding"] === "gzip") {
+			requestBody = requestBody.pipeThrough(new DecompressionStream("gzip") as ReadableWritablePair<Uint8Array, Uint8Array>);
+			headers["content-encoding"] = null;
+		} else if (headers["content-encoding"]) return deny(415, "Unsupported content encoding");
+		const peeked = await peekLsRefs(requestBody);
+		if (!peeked) return deny(413, "That ls-refs request is too large.");
+		lsRefs = peeked.lsRefs;
+		requestBody = peeked.body;
+	}
 	// Protected branches: refuse what the commands alone show is not allowed, and note the branches
 	// that may only fast-forward, to check once the push is stored.
 	let protect: { staged: Staged[]; capabilities: string[] } | null = null;
@@ -392,7 +405,54 @@ export async function handleGit(request: Request, env: Env, ctx: ExecutionContex
 		}
 		return new Response(watchPush(env, ctx, row, res.body, () => sent, pusher, access.wiki), { status: res.status, headers: out });
 	}
+	if (head && res.ok && !pushing && (lsRefs || (route.endpoint === "info/refs" && !/version=2/.test(headers["git-protocol"] ?? "")))) {
+		const advertised = new Uint8Array(await res.arrayBuffer());
+		// A v2 capability advertisement (asked for or not) names no refs; pointHeadV0 leaves it alone.
+		return new Response(lsRefs ? pointHeadV2(advertised, head.branch, lsRefs, head.oid) : pointHeadV0(advertised, head.branch, head.oid), { status: res.status, headers: out });
+	}
 	return new Response(res.body, { status: res.status, headers: out });
+}
+
+/** Biggest ls-refs request read whole; ref prefixes are short, and fetches are streamed, not read. */
+const MAX_LS_REFS_BYTES = 1024 * 1024;
+
+/** Reads just enough of an upload-pack request to tell whether it's `ls-refs` (then reads it all) and hands back the body. */
+async function peekLsRefs(body: ReadableStream<Uint8Array>): Promise<{ lsRefs: Uint8Array | null; body: ReadableStream<Uint8Array> } | null> {
+	const reader = body.getReader();
+	let buffer = new Uint8Array(0);
+	const more = async () => {
+		const { done, value } = await reader.read();
+		if (done) return false;
+		const next = new Uint8Array(buffer.length + value.length);
+		next.set(buffer);
+		next.set(value, buffer.length);
+		buffer = next;
+		return true;
+	};
+	const want = 4 + "command=ls-refs".length;
+	while (buffer.length < want && (await more()));
+	if (!isLsRefs(buffer)) {
+		// Pulls only when read, so it never reads alongside the peek above.
+		const rest = new ReadableStream<Uint8Array>(
+			{
+				async pull(controller) {
+					const { done, value } = await reader.read();
+					if (done) controller.close();
+					else controller.enqueue(value);
+				},
+				cancel: (reason) => reader.cancel(reason),
+			},
+			{ highWaterMark: 0 },
+		);
+		return { lsRefs: null, body: concatStreams(buffer, rest) };
+	}
+	while (await more()) {
+		if (buffer.length > MAX_LS_REFS_BYTES) {
+			await reader.cancel();
+			return null;
+		}
+	}
+	return { lsRefs: buffer, body: new Response(buffer).body as ReadableStream<Uint8Array> };
 }
 
 /** `head`, then everything `rest` yields. */

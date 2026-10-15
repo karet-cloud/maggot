@@ -1,19 +1,103 @@
 @import "tailwindcss";
 
+/*
+ * One look for the whole site, the landing page's: grey and one green, light or dark. The page
+ * follows the system unless the visitor picks a theme; a script in <head> puts `light` or `dark` on
+ * <html> before the first paint (see app/lib/theme.ts). The values below are the light theme, and
+ * `.dark` swaps them.
+ *
+ * The frame shadow and the commit graph's lane colours are plain variables rather than theme values:
+ * Tailwind copies a theme shadow's value into its utility, which would leave the dark one unused.
+ */
+:root {
+	--header-h: 57px;
+	--shadow-frame: 0 1px 0 rgba(15, 17, 21, 0.04), 0 24px 48px -32px rgba(15, 17, 21, 0.25);
+	--lane-0: #15803d;
+	--lane-1: #2563eb;
+	--lane-2: #c026d3;
+	--lane-3: #b45309;
+	--lane-4: #0891b2;
+	--lane-5: #7c3aed;
+	--lane-6: #e11d48;
+	--lane-7: #4d7c0f;
+	--lane-8: #ea580c;
+	--lane-9: #0d9488;
+}
 @theme {
-	--font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+	--font-sans: "Instrument Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 	--font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+	--color-bg: #ffffff;
+	--color-panel: #ffffff;
+	--color-soft: #f8f9fa;
+	--color-raised: #f1f3f5;
+	--color-line: #e4e7eb;
+	--color-line-strong: #d9dde3;
+	--color-fg: #0f1115;
+	--color-dim: #4b5563;
+	--color-faint: #6b7280;
+	--color-accent: #15803d;
+	--color-on-accent: #ffffff;
+	--color-btn: #0f1115;
+	--color-btn-fg: #ffffff;
+	--animate-fresh: fresh 2.4s ease-out;
+	--animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+}
+
+:root.dark {
 	--color-bg: #0b0d10;
 	--color-panel: #111418;
+	--color-soft: #111418;
 	--color-raised: #171b21;
 	--color-line: #232830;
 	--color-line-strong: #2f3540;
 	--color-fg: #e6e8eb;
 	--color-dim: #9aa3ad;
 	--color-faint: #6b7480;
-	--color-accent: #6366f1;
-	--animate-fresh: fresh 2.4s ease-out;
-	--animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
+	--color-accent: #4ade80;
+	--color-on-accent: #0b0d10;
+	--color-btn: #e6e8eb;
+	--color-btn-fg: #0b0d10;
+	--shadow-frame: 0 1px 0 rgba(0, 0, 0, 0.3), 0 24px 48px -32px rgba(0, 0, 0, 0.8);
+	--lane-0: #4ade80;
+	--lane-1: #60a5fa;
+	--lane-2: #f472b6;
+	--lane-3: #fbbf24;
+	--lane-4: #22d3ee;
+	--lane-5: #a78bfa;
+	--lane-6: #fb7185;
+	--lane-7: #a3e635;
+	--lane-8: #fb923c;
+	--lane-9: #2dd4bf;
+	color-scheme: dark;
+}
+
+/*
+ * Status colours (green for open, rose for closed, amber for pending...) are written as the light
+ * shades that read well on dark. On a light page those shades flip to their dark counterparts
+ * (300 to 700 and so on), so every badge and note keeps its contrast without a second set of classes.
+ */
+:root:not(.dark) {
+	color-scheme: light;
+	--color-red-200: oklch(44.4% 0.177 26.899);
+	--color-red-300: oklch(50.5% 0.213 27.518);
+	--color-red-400: oklch(57.7% 0.245 27.325);
+	--color-orange-300: oklch(55.3% 0.195 38.402);
+	--color-orange-400: oklch(64.6% 0.222 41.116);
+	--color-amber-100: oklch(41.4% 0.112 45.904);
+	--color-amber-200: oklch(47.3% 0.137 46.201);
+	--color-amber-300: oklch(55.5% 0.163 48.998);
+	--color-amber-400: oklch(66.6% 0.179 58.318);
+	--color-emerald-200: oklch(43.2% 0.095 166.913);
+	--color-emerald-300: oklch(50.8% 0.118 165.612);
+	--color-emerald-400: oklch(59.6% 0.145 163.225);
+	--color-sky-300: oklch(50% 0.134 242.749);
+	--color-sky-400: oklch(58.8% 0.158 241.966);
+	--color-violet-300: oklch(49.1% 0.27 292.581);
+	--color-violet-400: oklch(54.1% 0.281 293.009);
+	--color-rose-200: oklch(45.5% 0.188 13.697);
+	--color-rose-300: oklch(51.4% 0.222 16.935);
+	--color-rose-400: oklch(58.6% 0.253 17.585);
+	--color-zinc-400: oklch(44.2% 0.017 285.786);
 }
 
 @keyframes fresh {
@@ -36,21 +120,19 @@
 }
 
 html {
-	color-scheme: dark;
 	background: var(--color-bg);
 	color: var(--color-fg);
 }
 
 body {
 	@apply font-sans antialiased;
-	font-feature-settings: "cv11", "ss01";
 }
 
 ::selection {
-	background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+	background: color-mix(in srgb, var(--color-accent) 30%, transparent);
 }
 
-/* Syntax highlighting (highlight.js classes), tuned for the dark theme. */
+/* Syntax highlighting (highlight.js classes): the dark theme here, the light one below. */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-meta .hljs-keyword,
@@ -106,6 +188,54 @@ body {
 }
 .hljs-strong {
 	font-weight: 600;
+}
+
+:root:not(.dark) {
+	.hljs-keyword,
+	.hljs-selector-tag,
+	.hljs-meta .hljs-keyword,
+	.hljs-doctag,
+	.hljs-deletion {
+		color: #cf222e;
+	}
+	.hljs-string,
+	.hljs-regexp,
+	.hljs-addition,
+	.hljs-meta .hljs-string {
+		color: #0a3069;
+	}
+	.hljs-number,
+	.hljs-literal,
+	.hljs-symbol,
+	.hljs-bullet,
+	.hljs-attr,
+	.hljs-attribute,
+	.hljs-variable,
+	.hljs-template-variable,
+	.hljs-property {
+		color: #0550ae;
+	}
+	.hljs-title,
+	.hljs-title.function_,
+	.hljs-section {
+		color: #8250df;
+	}
+	.hljs-title.class_,
+	.hljs-type,
+	.hljs-built_in {
+		color: #953800;
+	}
+	.hljs-name,
+	.hljs-tag,
+	.hljs-selector-class,
+	.hljs-selector-id {
+		color: #116329;
+	}
+	.hljs-comment,
+	.hljs-quote,
+	.hljs-meta {
+		color: #6e7781;
+	}
 }
 
 /* Rendered Markdown (READMEs). */
