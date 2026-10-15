@@ -1,5 +1,6 @@
-import { queryOptions, useQuery, type DataTag, type QueryClient, type QueryKey } from "@tanstack/react-query";
-import { api, keys } from "./api.ts";
+import { experimental_streamedQuery as streamedQuery, queryOptions, useQuery, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import { api, keys, streamDiff, type DiffEvent } from "./api.ts";
+import { emptyDiff, reduceDiff, STREAMED, type StreamedDiff } from "./diff-stream.ts";
 import { preloadQueries, type PreloadOptions } from "./preload.ts";
 import { isServer, serverWaitMs } from "./ssr.ts";
 
@@ -12,16 +13,30 @@ export const tasksQuery = (project: string) => queryOptions({ queryKey: keys.tas
 
 export const useProjectTasks = (project: string) => useQuery(tasksQuery(project));
 
+export { isStreamedQuery, STREAMED } from "./diff-stream.ts";
+
+/**
+ * A diff endpoint (`path`, from `diffs`) streamed into the cache: the query has data (the header's
+ * file list and `meta`) as soon as the first line arrives, and files fill in as they come; `done`
+ * says when all have. A refetch (say after a push) keeps showing the old diff until the new one is in.
+ * Browser-only (STREAMED).
+ */
+export const diffQuery = <M>(queryKey: QueryKey, path: string) =>
+	queryOptions({
+		queryKey,
+		meta: STREAMED,
+		queryFn: streamedQuery<DiffEvent<M>[], StreamedDiff<M>>({
+			streamFn: ({ signal }) => streamDiff<M>(path, signal),
+			reducer: reduceDiff,
+			initialValue: emptyDiff<M>(),
+			refetchMode: "replace",
+		}),
+	});
+
 /** How long a navigation waits for data it has never fetched before rendering with spinners instead. */
 const WAIT_MS = 300;
 /** The most of one file a server render reads; bigger (or binary) files load in the browser. */
 export const SERVER_FILE_BYTES = 100 * 1024;
-
-/** In a server render, forgets a fetched query too big to render and send with the page: the browser fetches it. */
-export function dropIfTooBig<T>(queryClient: QueryClient, options: { queryKey: DataTag<QueryKey, T, any> }, tooBig: (data: T) => boolean) {
-	const data = isServer ? queryClient.getQueryData(options.queryKey) : undefined;
-	if (data !== undefined && tooBig(data as T)) queryClient.removeQueries({ queryKey: options.queryKey, exact: true });
-}
 
 /**
  * Fetches a route's queries from its loader. In the browser it warms the cache, so hovering a link

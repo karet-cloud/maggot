@@ -99,8 +99,8 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
   to Artifacts; pushes stream the commands and pack as one receive-pack request. The same permission,
   verification, archive, quota and rate-limit checks apply as over HTTPS.
 - **Push an existing project**: an empty repository shows GitHub-style quick-setup commands
-  (`git remote add maggot <url>`, `git branch -M <branch>`, `git push -u maggot <branch>`, plus `--all` and
-  `--tags`). The default branch is chosen at creation (`master` unless you change it).
+  (`git remote add origin <url>`, `git branch -M <branch>`, `git push -u origin <branch>`, plus
+  `git push origin --all` and `--tags`). The default branch is chosen at creation (`master` unless you change it).
 - **Agents**: the board: tasks in four columns (working, merge queue, needs attention, merged), updated live over
   the project WebSocket. Cards glow as events touch them; tasks still waiting for a fork show "Forking".
 - **Activity**: the project's event stream, in plain sentences, next to every page.
@@ -265,14 +265,26 @@ npm run deploy
 ```
 
 CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
-pull request, and on every push to `master` runs them again and then `cf deploy` to production. It
+pull request, and on every push to `master` runs them again and then `cf deploy` to https://maggot.karet.cloud. The custom domain is declared in
+`cloudflare.config.ts`, and CI checks it before seeding the demo. It
 needs a `CLOUDFLARE_API_TOKEN` repository secret (a dashboard token from the "Edit Cloudflare
-Workers" template, plus Artifacts edit and D1 edit) and a `CLOUDFLARE_ACCOUNT_ID` repository variable.
+Workers" template, plus Artifacts edit and D1 edit), a stable `MAGGOT_API_KEY` secret, and a
+`CLOUDFLARE_ACCOUNT_ID` repository variable. Secrets can be scoped to the GitHub `production`
+environment. CI passes the admin key with `--secrets-file` so a new or renamed Worker can deploy
+without a previous version to inherit it from. The temporary secret file is removed when the
+step exits. Set the key once and keep it stable: changing it also changes the derived session
+secret and SSH host key.
+
+To store the key from an existing deployment without printing it, use a file outside the repo:
+
+```sh
+gh secret set MAGGOT_API_KEY --env production < /path/to/admin-key.txt
+```
 The first deploy creates the `maggot` D1 database; tables are created by the Worker on first use, so
 there's no migration step. Better Auth's secret is derived from `MAGGOT_API_KEY` unless a
 `BETTER_AUTH_SECRET` secret is set.
 
-Point the CLI at it with `MAGGOT_URL=https://maggot.<subdomain>.workers.dev` and `MAGGOT_API_KEY` from
+Point the CLI at it with `MAGGOT_URL=https://maggot.karet.cloud` and `MAGGOT_API_KEY` from
 `.secrets/prod.env`. The "maggot" Artifacts namespace is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
 
@@ -309,12 +321,13 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
 | GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
 | GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
-| POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, readme? }` | `{ repo, project }` (signed-in users) |
+| POST | `/repos` | `{ name, description?, visibility?, defaultBranch?, importUrl?, importDepth?, readme? }` | `{ repo, project }` (signed-in users) |
 | GET | `/repos/:owner/:repo` | | `{ project, repo }` |
 | PATCH | `/repos/:owner/:repo` | `{ visibility?, description?, name?, archived? }` | `{ repo }` (owner); a new `name` leaves the old one redirecting |
 | GET / POST / DELETE | `/repos/:owner/:repo/transfer` | `{ to }` | the pending offer; offer the repository to user `to`; cancel the offer (owner) |
 | GET | `/transfers` | | `{ transfers: RepoTransfer[] }`: offers made to you |
 | POST | `/transfers/:id/accept`, `/transfers/:id/decline` | `{ name? }` | take the repository (under `name` if given) → `{ repo }`, or turn it down |
+| POST | `/repos/:owner/:repo/storage/recount` | `{}` | recount code and wiki storage, enforce quotas and refresh refs (instance admin key only) |
 | GET | `/repos/:owner/:repo/paths` | `?ref=` | `FileList`: every file path at `ref` (up to 20,000), for the file finder |
 | GET | `/repos/:owner/:repo/history`, `/blame` | `?path=&ref=` (`&from=` to page history) | `FileHistory`, `Blame` |
 | GET / POST | `/repos/:owner/:repo/pulls` | `?state=`; `{ title, body?, base, head, headRepo? }` | `PullList`; open one (signed in, read access; `headRepo` is a fork, `owner/name`) |
@@ -322,7 +335,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/repos/:owner/:repo/pulls/:n`, `…/files` | | the pull request, comments, reviews and line comments; its commits and diff |
 | POST | `/repos/:owner/:repo/pulls/:n/reviews` | `{ state: "commented" \| "approved" \| "changes_requested", body?, commit?, comments: [{ path, line, side, body }] }` | a review |
 | POST | `/repos/:owner/:repo/pulls/:n/merge` | `{ method: "merge" \| "squash" }` | merges it (write access) → `{ pull, commit }`; 409 on conflicts |
-| GET / PUT / DELETE | `/repos/:owner/:repo/collaborators`, `…/:username` | `{ permission }` | collaborators (admins) |
+| GET / PUT / DELETE | `/repos/:owner/:repo/collaborators`, `…/:username` | `{ permission }` (default read) | collaborators (admins) |
 | GET / POST | `/orgs`, `/orgs/:org` | `{ name, displayName? }` | your organizations; create one; one organization (members and teams for members) |
 | POST / PATCH / DELETE | `/orgs/:org/members`, `…/:username` | `{ username, role }`, `{ role }` | invite, change role, remove or leave (owners; members can leave) |
 | POST / DELETE | `/orgs/:org/teams`, `…/:team`, `…/members/:username` (PUT), `…/repos/:repo` (PUT `{ permission }`) | | teams (owners) |
@@ -360,7 +373,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
 | GET | `/projects` | | `{ projects: Project[] }` |
-| POST | `/projects` | `{ name, description?, defaultBranch? (default `master`), importUrl?, importBranch?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
+| POST | `/projects` | `{ name, description?, defaultBranch? (default `master`), importUrl?, importBranch?, importDepth?, readme? }` | `{ project }`; `readme: false` leaves the repo empty for a first `git push` |
 | GET | `/projects/:p` | | `{ project: Project }` (head, per-status counts, queue length) |
 | DELETE | `/projects/:p` | | deletes repo, forks, and state |
 | GET | `/projects/:p/tasks` | `?status=` | `{ tasks: Task[] }` newest first |
@@ -369,7 +382,7 @@ shapes are the types in [`src/api.ts`](src/api.ts).
 | POST | `/projects/:p/tasks/:id/access` | | `TaskAccess` with fresh tokens (`fork: null` while provisioning) |
 | POST | `/projects/:p/tasks/:id/submit` | | `{ task }`, enqueues for merge (202) |
 | POST | `/projects/:p/tasks/:id/abandon` | | `{ task }`, deletes the fork |
-| POST | `/projects/:p/credentials` | `{ scope? }` (`write` default) | `GitCredentials` for the project repo itself, valid 30 days (admin key only: pushes with them skip maggot's limits) |
+| POST | `/projects/:p/credentials` | `{ scope?, ttlSeconds? }` (`write`, 30 days default; TTL 1–2,592,000 seconds) | `GitCredentials` for the project repo itself (admin key only: direct pushes skip the proxy) |
 | GET | `/projects/:p/queue` | | `{ queue: QueueEntry[] }` |
 | GET | `/projects/:p/events` | `?after=<seq>&limit=` | `{ events: ProjectEvent[] }`: from `after` forward, or the newest `limit` without it |
 | WS | `/projects/:p/live` | `?key=&after=<seq>` | stream of `ProjectEvent` JSON; replays from `after`; send `ping` → `pong` |
@@ -483,3 +496,15 @@ npm run typecheck
 - Stacked tasks (a task based on another unmerged task) and splitting merges into batches.
 - Large repos: the coordinator keeps an in-memory clone, so repos near the 128 MB Worker memory
   limit need ArtifactFS or a Sandbox-backed merge.
+
+The production landing page links its cached Linux root listing to the public `maggot-mirror/linux` repository. CI seeds it with a shallow Git clone and push from
+`torvalds/linux` on `master` (depth 1) and the full source tree. Blob batches use temporary tree tags
+to keep each upload small; the final master commit retains its upstream hash and metadata, and
+staging tags are removed. Interrupted seeds clean up their staging tags on reruns. The Artifacts URL import service
+currently fails for Linux. CI uses a five-minute storage Git token through the admin-only
+credentials endpoint, then calls `/api/repos/:owner/:repo/storage/recount` to restore quota
+accounting and refresh repository views. This avoids large uploads through the Worker proxy. Set a stable
+`MAGGOT_MIRROR_PASSWORD` production environment secret for the mirror service account. Existing
+mirrors are left unchanged; this is a demo snapshot, not continuous upstream synchronization.
+The repository creation API accepts optional `importDepth` (1–10,000) for shallow imports;
+omitting it keeps the existing full-history import behavior.

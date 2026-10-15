@@ -1,15 +1,34 @@
+import { useQuery, type QueryKey } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight, Columns2, FileCode2, Rows2 } from "lucide-react";
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from "react";
-import type { Diff, DiffHunk, FileDiff } from "../lib/api.ts";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { api, repoParams, type Diff, type DiffEntry, type DiffHunk, type FileDiff } from "../lib/api.ts";
+import { completeDiff, fileDiffKey, STREAMED, type StreamedDiff } from "../lib/diff-stream.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
-import { cx, Panel } from "./ui.tsx";
-import { repoParams } from "../lib/api.ts";
+import { Button, cx, ErrorNote, Panel, Spinner } from "./ui.tsx";
 
 type Layout = "unified" | "split";
 const LAYOUT_KEY = "maggot.diff.layout";
 /** Files with more changed lines than this start collapsed. */
 const COLLAPSE_ABOVE = 400;
+/** How far outside the viewport a file's lines are rendered ahead of scrolling to them. */
+const RENDER_MARGIN = "1200px 0px";
+/** A diff line's height in px, for holding a not-yet-rendered file's place. */
+const LINE_PX = 20;
+
+/** True once `ref`'s element has come near the viewport, and from then on. */
+function useNearViewport(ref: RefObject<Element | null>): boolean {
+	const [near, setNear] = useState(false);
+	useEffect(() => {
+		const el = ref.current;
+		if (near || !el) return;
+		if (typeof IntersectionObserver === "undefined") return setNear(true);
+		const observer = new IntersectionObserver((entries) => entries.some((e) => e.isIntersecting) && setNear(true), { rootMargin: RENDER_MARGIN });
+		observer.observe(el);
+		return () => observer.disconnect();
+	}, [ref, near]);
+	return near;
+}
 
 function useLayout(): [Layout, (l: Layout) => void] {
 	const [layout, setLayout] = useState<Layout>("unified");
@@ -35,32 +54,69 @@ export interface DiffNotes {
 }
 
 export const lineKey = (path: string, side: "new" | "old", line: number) => `${side}:${line}:${path}`;
+const keyPath = (key: string) => key.split(":").slice(2).join(":");
+
+/** Where a streamed diff came from, so one file's hunks can load on their own: its query key and endpoint path (from `diffs`). */
+export interface DiffSource {
+	key: QueryKey;
+	path: string;
+}
 
 /**
- * A full diff: a summary with a file index, then each file's hunks. `viewRef` is where "View file"
- * links point (the new side of the diff).
+ * A full diff: a summary with a file index, then each file's hunks. `diff` is a whole diff, or one
+ * streaming in: files show as they arrive, and with `source`, collapsed large ones load on demand.
+ * A file renders its lines only once scrolled near, so hundreds of files stay quick. `viewRef` is
+ * where "View file" links point (the new side of the diff). `error` is a stream that broke partway:
+ * it shows with what arrived, and `onRetry` fetches the diff again.
  */
-export function DiffView({ diff, project, viewRef, title, notes }: { diff: Diff; project: string; viewRef?: string; title?: ReactNode; notes?: DiffNotes }) {
+export function DiffView({
+	diff,
+	source,
+	project,
+	viewRef,
+	title,
+	notes,
+	error,
+	onRetry,
+	links = true,
+}: {
+	diff: Diff | StreamedDiff<unknown>;
+	source?: DiffSource;
+	project: string;
+	viewRef?: string;
+	title?: ReactNode;
+	notes?: DiffNotes;
+	error?: unknown;
+	onRetry?: () => void;
+	/** Off where the files can't be browsed (the landing page's demo). */
+	links?: boolean;
+}) {
+	const view = useMemo(() => ("list" in diff ? diff : completeDiff(diff)), [diff]);
 	const [layout, setLayout] = useLayout();
-	const [indexOpen, setIndexOpen] = useState(diff.files.length <= 12);
-	if (diff.files.length === 0) {
+	const [indexOpen, setIndexOpen] = useState<boolean | null>(null);
+	const commented = useMemo(() => new Set([...(notes?.under.keys() ?? [])].map(keyPath)), [notes]);
+	if (view.done && view.list.length === 0) {
 		return (
 			<Panel title={title ?? "Changes"}>
 				<p className="px-4 py-6 text-center text-xs text-faint">No changes.</p>
 			</Panel>
 		);
 	}
+	const arrived = view.files.size;
+	const showIndex = indexOpen ?? view.list.length <= 12;
+	const streaming = !view.done && !error;
 	return (
 		<div className="space-y-3">
 			<Panel
 				title={title ?? "Changes"}
 				actions={
 					<div className="flex items-center gap-3">
-						<span className="text-xs text-dim">
-							{diff.files.length}
-							{diff.truncated ? "+" : ""} {diff.files.length === 1 ? "file" : "files"}{" "}
-							<span className="font-mono text-emerald-300">+{diff.additions}</span>{" "}
-							<span className="font-mono text-rose-300">−{diff.deletions}</span>
+						<span className="flex items-center gap-1 text-xs text-dim">
+							{streaming && <Spinner className="size-3.5" />}
+							{view.list.length}
+							{view.truncated ? "+" : ""} {view.list.length === 1 ? "file" : "files"}{" "}
+							<span className="font-mono text-emerald-300">+{view.additions}</span>{" "}
+							<span className="font-mono text-rose-300">−{view.deletions}</span>
 						</span>
 						<div className="flex overflow-hidden rounded-md border border-line-strong">
 							<LayoutButton active={layout === "unified"} onClick={() => setLayout("unified")} label="Unified">
@@ -75,33 +131,62 @@ export function DiffView({ diff, project, viewRef, title, notes }: { diff: Diff;
 			>
 				<button
 					type="button"
-					onClick={() => setIndexOpen(!indexOpen)}
+					onClick={() => setIndexOpen(!showIndex)}
 					className="flex w-full items-center gap-1.5 px-4 py-2 text-left text-xs text-dim hover:text-fg"
 				>
-					{indexOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+					{showIndex ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
 					Files changed
+					{!view.done && (
+						<span className="text-faint">
+							· {arrived} of {view.list.length} loaded
+						</span>
+					)}
 				</button>
-				{indexOpen && (
+				{showIndex && (
 					<ul className="border-t border-line/60 py-1">
-						{diff.files.map((f) => (
-							<li key={f.path}>
-								<a href={`#diff-${encodeURIComponent(f.path)}`} className="flex items-center gap-2 px-4 py-1 font-mono text-xs text-dim hover:bg-raised hover:text-fg">
-									<StatusMark status={f.status} />
-									<span className="min-w-0 flex-1 truncate">{f.path}</span>
-									<Counts file={f} />
+						{view.list.map((entry) => (
+							<li key={entry.path}>
+								<a href={`#diff-${encodeURIComponent(entry.path)}`} className="flex items-center gap-2 px-4 py-1 font-mono text-xs text-dim hover:bg-raised hover:text-fg">
+									<StatusMark status={entry.status} />
+									<span className="min-w-0 flex-1 truncate">{entry.path}</span>
+									<EntryCounts file={view.files.get(entry.path)} />
 								</a>
 							</li>
 						))}
 					</ul>
 				)}
-				{diff.truncated && (
+				{view.truncated && (
 					<p className="border-t border-line/60 px-4 py-2 text-xs text-amber-300">
-						Only the first {diff.files.length} files are shown. Clone the repository to see the full diff.
+						Only the first {view.list.length} files are shown. Clone the repository to see the full diff.
 					</p>
 				)}
+				{Boolean(error) && (
+					<div className="flex flex-wrap items-center gap-2 border-t border-line/60 px-4 py-2">
+						<div className="min-w-0 flex-1">
+							<ErrorNote error={error} />
+						</div>
+						{onRetry && (
+							<Button className="text-xs" onClick={onRetry}>
+								Retry
+							</Button>
+						)}
+					</div>
+				)}
 			</Panel>
-			{diff.files.map((f) => (
-				<FileSection key={f.path} file={f} layout={layout} project={project} viewRef={viewRef} notes={notes} />
+			{view.list.map((entry) => (
+				<FileSection
+					key={entry.path}
+					entry={entry}
+					file={view.files.get(entry.path)}
+					layout={layout}
+					project={project}
+					viewRef={viewRef}
+					notes={notes}
+					commented={commented.has(entry.path)}
+					load={source && view.trees ? { source, trees: view.trees } : undefined}
+					stalled={!streaming && !view.done}
+					links={links}
+				/>
 			))}
 		</div>
 	);
@@ -127,6 +212,8 @@ function StatusMark({ status }: { status: FileDiff["status"] }) {
 	return <span className={cx("w-3 shrink-0 text-center font-mono text-[11px] font-semibold", s[1])}>{s[0]}</span>;
 }
 
+const EntryCounts = ({ file }: { file: FileDiff | undefined }) => (file ? <Counts file={file} /> : null);
+
 function Counts({ file }: { file: FileDiff }) {
 	if (file.binary) return <span className="text-[11px] text-faint">binary</span>;
 	if (file.tooLarge) return <span className="text-[11px] text-faint">large</span>;
@@ -137,25 +224,112 @@ function Counts({ file }: { file: FileDiff }) {
 	);
 }
 
-function FileSection({ file, layout, project, viewRef, notes }: { file: FileDiff; layout: Layout; project: string; viewRef?: string; notes?: DiffNotes }) {
-	const [open, setOpen] = useState(file.additions + file.deletions <= COLLAPSE_ABOVE);
-	const modeChange = file.oldMode && file.newMode && file.oldMode !== file.newMode ? `${file.oldMode} → ${file.newMode}` : null;
-	const parent = file.path.split("/").slice(0, -1).join("/") || undefined;
+/** Room a file's lines take, roughly, so a placeholder holds its place on the page. */
+const estimate = (file: FileDiff) => file.hunks.reduce((n, h) => n + h.lines.length + 1, 0) * LINE_PX;
+
+/** Why a file starts collapsed, if it does; its "Load diff" button says so. */
+function collapsedBecause(file: FileDiff): string | null {
+	if (file.binary) return null;
+	if (file.deferred === "generated") return "Generated or lock file.";
+	if (file.deferred === "large" || file.additions + file.deletions > COLLAPSE_ABOVE) return `Large diff (${file.additions + file.deletions} changed lines).`;
+	if (file.tooLarge) return "Too large to diff with the rest.";
+	return null;
+}
+
+function FileSection({
+	entry,
+	file: streamed,
+	layout,
+	project,
+	viewRef,
+	notes,
+	commented,
+	load,
+	stalled,
+	links,
+}: {
+	entry: DiffEntry;
+	/** Undefined until it arrives. */
+	file: FileDiff | undefined;
+	layout: Layout;
+	project: string;
+	viewRef?: string;
+	notes?: DiffNotes;
+	/** A review comment is on one of its lines, so it opens (and loads) by itself. */
+	commented: boolean;
+	load?: { source: DiffSource; trees: { from: string | null; to: string } };
+	/** The stream stopped; a file that hasn't arrived won't. */
+	stalled: boolean;
+	links: boolean;
+}) {
+	const section = useRef<HTMLElement>(null);
+	const near = useNearViewport(section);
+	const [opened, setOpened] = useState<boolean | null>(null);
+	const reason = streamed ? collapsedBecause(streamed) : null;
+	const open = opened ?? (reason === null || commented);
+	// Hunks the stream left out (or couldn't fit), fetched for this one file once it's opened.
+	const missing = Boolean(streamed && !streamed.binary && (streamed.deferred || streamed.tooLarge));
+	const loaded = useQuery({
+		meta: STREAMED,
+		queryKey: fileDiffKey(load?.source.key ?? [], load?.trees ?? { from: null, to: "" }, entry.path),
+		queryFn: () => api.diffFile(load?.source.path ?? "", entry.path, load?.trees ?? { from: null, to: "" }),
+		enabled: missing && open && Boolean(load),
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	const file = loaded.data ?? streamed;
+	const modeChange = entry.oldMode && entry.newMode && entry.oldMode !== entry.newMode ? `${entry.oldMode} → ${entry.newMode}` : null;
+	const parent = entry.path.split("/").slice(0, -1).join("/") || undefined;
+	const note = (text: ReactNode) => <p className="flex items-center gap-2 px-4 py-3 text-xs text-faint">{text}</p>;
+	let body: ReactNode;
+	if (!file) {
+		body = stalled
+			? note("Not loaded: the diff stopped before this file.")
+			: note(
+					<>
+						<Spinner className="size-3.5" /> Loading…
+					</>,
+				);
+	} else if (!open) {
+		body =
+			missing && !load ? (
+				note("This diff is too large to show here.")
+			) : (
+				<button type="button" onClick={() => setOpened(true)} className="w-full px-4 py-3 text-xs text-accent hover:underline">
+					{reason} Load diff
+				</button>
+			);
+	} else if (file.binary) body = note(`Binary file ${file.status}.`);
+	else if (missing && load && loaded.isPending) {
+		body = note(
+			<>
+				<Spinner className="size-3.5" /> Loading the diff…
+			</>,
+		);
+	} else if (missing && loaded.error) {
+		body = (
+			<div className="px-4 py-3">
+				<ErrorNote error={loaded.error} />
+			</div>
+		);
+	} else if (file.tooLarge || file.deferred) body = note("This diff is too large to show here.");
+	else if (file.hunks.length === 0) body = note(modeChange ? "File mode changed." : file.status === "added" ? "Empty file added." : "Empty file.");
+	else if (!near) body = <div style={{ height: estimate(file) }} aria-hidden />;
+	else body = layout === "unified" ? <Unified file={file} notes={notes} /> : <Split file={file} notes={notes} />;
 	return (
-		<section id={`diff-${encodeURIComponent(file.path)}`} className="scroll-mt-16 overflow-clip rounded-lg border border-line bg-panel">
-			<header className="sticky top-[49px] z-[1] flex items-center gap-2 border-b border-line bg-panel px-3 py-2">
-				<button type="button" onClick={() => setOpen(!open)} className="text-faint hover:text-fg" aria-label={open ? "Collapse" : "Expand"}>
+		<section ref={section} id={`diff-${encodeURIComponent(entry.path)}`} className="scroll-mt-16 overflow-clip rounded-lg border border-line bg-panel">
+			<header className="sticky top-(--header-h) z-[1] flex items-center gap-2 border-b border-line bg-panel px-3 py-2">
+				<button type="button" onClick={() => setOpened(!open)} className="text-faint hover:text-fg" aria-label={open ? "Collapse" : "Expand"} aria-expanded={open}>
 					{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
 				</button>
-				<StatusMark status={file.status} />
-				<span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{file.path}</span>
+				<StatusMark status={entry.status} />
+				<span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{entry.path}</span>
 				{modeChange && <span className="font-mono text-[11px] text-faint">{modeChange}</span>}
-				<Counts file={file} />
-				{file.status !== "deleted" && (
+				{file && <Counts file={file} />}
+				{links && entry.status !== "deleted" && (
 					<Link
 						to="/$owner/$repo"
 						params={repoParams(project)}
-						search={{ ref: viewRef, path: parent, file: file.path }}
+						search={{ ref: viewRef, path: parent, file: entry.path }}
 						className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-dim hover:bg-raised hover:text-fg"
 					>
 						<FileCode2 className="size-3.5" />
@@ -163,23 +337,8 @@ function FileSection({ file, layout, project, viewRef, notes }: { file: FileDiff
 					</Link>
 				)}
 			</header>
-			{open &&
-				(file.binary ? (
-					<p className="px-4 py-3 text-xs text-faint">Binary file {file.status}.</p>
-				) : file.tooLarge ? (
-					<p className="px-4 py-3 text-xs text-faint">This diff is too large to show here.</p>
-				) : file.hunks.length === 0 ? (
-					<p className="px-4 py-3 text-xs text-faint">{modeChange ? "File mode changed." : file.status === "added" ? "Empty file added." : "Empty file."}</p>
-				) : layout === "unified" ? (
-					<Unified file={file} notes={notes} />
-				) : (
-					<Split file={file} notes={notes} />
-				))}
-			{!open && !file.binary && !file.tooLarge && (
-				<button type="button" onClick={() => setOpen(true)} className="w-full px-4 py-3 text-xs text-accent hover:underline">
-					Load diff ({file.additions + file.deletions} lines)
-				</button>
-			)}
+			{/* Once rendered, files scrolled far away still skip layout and paint. */}
+			<div style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${file && open ? Math.max(estimate(file), 40) : 40}px` }}>{body}</div>
 		</section>
 	);
 }
@@ -256,7 +415,7 @@ function AddNote({ notes, path, row }: { notes?: DiffNotes; path: string; row: R
 		<button
 			type="button"
 			onClick={() => notes.onAdd?.(path, at.side, at.line)}
-			className="absolute top-0 left-0 hidden size-5 items-center justify-center rounded bg-accent text-[13px] leading-none text-white group-hover:flex"
+			className="absolute top-0 left-0 hidden size-5 items-center justify-center rounded bg-accent text-[13px] leading-none text-on-accent group-hover:flex"
 			aria-label="Comment on this line"
 		>
 			+

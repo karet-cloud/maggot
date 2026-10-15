@@ -1,5 +1,5 @@
 import { structuredPatch } from "diff";
-import type { Commit, Diff, DiffHunk, FileDiff } from "../api.ts";
+import type { Commit, Diff, DiffEntry, DiffEvent, DiffHunk, FileDiff } from "../api.ts";
 
 // Structural copies of the Artifacts types this module reads, so it also type-checks (and runs) outside
 // the Worker, in tests.
@@ -39,6 +39,16 @@ const MAX_TOTAL_BYTES = 16 * 1024 * 1024;
  */
 const MAX_EDIT_LENGTH = 1_000;
 const READ_CONCURRENCY = 8;
+/** One file asked for on its own ("Load diff") may be bigger than the files of a whole diff. */
+const MAX_SINGLE_FILE_BYTES = 2 * 1024 * 1024;
+/** Streamed diffs send files with more changed lines than this without hunks, to be loaded on demand. */
+export const DEFER_ABOVE = 400;
+/** Lock files and build output: nobody reads their diffs, so streamed diffs leave the hunks out. */
+const GENERATED =
+	/(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|Cargo\.lock|Gemfile\.lock|composer\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|go\.sum|flake\.lock|mix\.lock|Podfile\.lock|pubspec\.lock|packages\.lock\.json)$|\.min\.(js|css)$|\.(js|css)\.map$|\.gen\.[^/]+$|\.snap$/;
+
+/** True for lock files and generated output, whose diffs are collapsed. */
+export const isGenerated = (path: string) => GENERATED.test(path);
 /**
  * Tree reads one diff may make. Trees can share subtrees (a small repository can describe a huge
  * directory structure), so the walk is bounded by reads and directories, not just by changed files.
@@ -57,14 +67,19 @@ type Content = { kind: "text"; text: string } | { kind: "binary" } | { kind: "la
 interface Budget {
 	lines: number;
 	bytes: number;
+	/** Bigger files are listed without hunks. */
+	fileBytes: number;
+	/** Large and generated files keep their counts but lose their hunks, and don't spend `lines`. */
+	defer: boolean;
 }
+
+const budget = (defer = false): Budget => ({ lines: MAX_TOTAL_LINES, bytes: MAX_TOTAL_BYTES, fileBytes: MAX_FILE_BYTES, defer });
 
 /** Diffs two root trees. `base` null means everything in `head` is added (a root commit). */
 export async function diffTrees(repo: ObjectReader, base: string | null, head: string): Promise<Diff> {
-	const { changes, truncated } = await collect(repo, base, head);
-	changes.sort((a, b) => a.path.localeCompare(b.path));
-	const budget: Budget = { lines: MAX_TOTAL_LINES, bytes: MAX_TOTAL_BYTES };
-	const files = await mapLimit(changes, READ_CONCURRENCY, (change) => fileDiff(repo, change, budget));
+	const { changes, truncated } = await diffList(repo, base, head);
+	const shared = budget();
+	const files = await mapLimit(changes, READ_CONCURRENCY, (change) => fileDiff(repo, change, shared));
 	return {
 		files,
 		additions: files.reduce((n, f) => n + f.additions, 0),
@@ -73,15 +88,112 @@ export async function diffTrees(repo: ObjectReader, base: string | null, head: s
 	};
 }
 
+/** The files a diff of two root trees lists, sorted by path; diff them with diffStream. */
+export async function diffList(repo: ObjectReader, base: string | null, head: string): Promise<{ changes: Change[]; truncated: boolean }> {
+	const { changes, truncated } = await collect(repo, base, head);
+	changes.sort((a, b) => a.path.localeCompare(b.path));
+	return { changes, truncated };
+}
+
+/** How a streamed diff names a file before its hunks arrive. */
+export const diffEntry = ({ path, before, after }: Change): DiffEntry => ({
+	path,
+	status: !before ? "added" : !after ? "deleted" : "modified",
+	oldMode: before?.mode ?? null,
+	newMode: after?.mode ?? null,
+});
+
+/**
+ * A diff as NDJSON (one DiffEvent per line): a header with `meta` and every file's name, then each
+ * file in order as it's worked out (a few ahead, in parallel), then the totals. Large and generated
+ * files come without hunks (`deferred`); diffPath gives them on demand. A failure partway ends the
+ * stream with an error line, since the status has been sent. `onDone` runs once, however it ends.
+ */
+export function diffStream(
+	repo: ObjectReader,
+	list: { changes: Change[]; truncated: boolean },
+	head: { meta: unknown; trees: { from: string | null; to: string } },
+	onDone?: () => void,
+): ReadableStream<Uint8Array> {
+	const utf8 = new TextEncoder();
+	const line = (event: DiffEvent) => utf8.encode(`${JSON.stringify(event)}\n`);
+	const shared = budget(true);
+	const pending: Promise<FileDiff>[] = [];
+	let next = 0;
+	let additions = 0;
+	let deletions = 0;
+	let finished = false;
+	const finish = () => {
+		if (finished) return;
+		finished = true;
+		onDone?.();
+	};
+	const fill = () => {
+		while (pending.length < READ_CONCURRENCY && next < list.changes.length) {
+			const file = fileDiff(repo, list.changes[next++], shared);
+			// Observed now so a read-ahead failure is never unhandled; the pull that reaches it reports it.
+			file.catch(() => {});
+			pending.push(file);
+		}
+	};
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(line({ type: "header", meta: head.meta, trees: head.trees, files: list.changes.map(diffEntry), truncated: list.truncated }));
+			fill();
+		},
+		async pull(controller) {
+			const file = pending.shift();
+			if (!file) {
+				controller.enqueue(line({ type: "end", additions, deletions }));
+				controller.close();
+				finish();
+				return;
+			}
+			try {
+				const done = await file;
+				additions += done.additions;
+				deletions += done.deletions;
+				controller.enqueue(line({ type: "file", file: done }));
+				fill();
+			} catch (err) {
+				controller.enqueue(line({ type: "error", message: err instanceof Error ? err.message : String(err) }));
+				controller.close();
+				finish();
+			}
+		},
+		cancel: finish,
+	});
+}
+
+/** One file of the diff between two root trees, with its hunks whatever its size (within reason); null if neither side has it. */
+export async function diffPath(repo: ObjectReader, base: string | null, head: string, path: string): Promise<FileDiff | null> {
+	const file = async (tree: string | null) => {
+		const entry = tree ? await entryAt(repo, tree, path) : null;
+		return entry && entry.type !== "tree" ? entry : null;
+	};
+	const [before, after] = await Promise.all([file(base), file(head)]);
+	if (!before && !after) return null;
+	return fileDiff(repo, { path, before, after }, { ...budget(), fileBytes: MAX_SINGLE_FILE_BYTES, bytes: 2 * MAX_SINGLE_FILE_BYTES });
+}
+
+/** The tree entry at `path` under the root tree `tree`, or null. */
+export async function entryAt(repo: ObjectReader, tree: string, path: string): Promise<TreeEntry | null> {
+	const parts = path.split("/");
+	let hash = tree;
+	for (const [i, part] of parts.entries()) {
+		const entry = (await repo.readTree(hash))?.find((e) => e.name === part);
+		if (!entry) return null;
+		if (i === parts.length - 1) return entry;
+		if (entry.type !== "tree") return null;
+		hash = entry.hash;
+	}
+	return null;
+}
+
 /**
  * Walks both trees breadth-first with bounded concurrency, skipping identical subtrees, and stops
  * once more than MAX_FILES changed files are found.
  */
-/** Paths that differ between two root trees (`base` null: everything in `head`), up to `maxFiles`. */
-export async function changedFiles(repo: ObjectReader, base: string | null, head: string, maxFiles: number, maxTreeReads = MAX_TREE_READS) {
-	return collect(repo, base, head, maxFiles, maxTreeReads);
-}
-
 async function collect(
 	repo: ObjectReader,
 	base: string | null,
@@ -167,26 +279,37 @@ async function fileDiff(repo: ObjectReader, { path, before, after }: Change, bud
 		hunks: [],
 	};
 	if (before?.hash === after?.hash) return file; // a mode-only change
-	if (budget.lines <= 0 || budget.bytes <= 0) return { ...file, tooLarge: true };
+	if (budget.bytes <= 0 || (!budget.defer && budget.lines <= 0)) return { ...file, tooLarge: true };
 	const [a, b] = await Promise.all([content(repo, before, budget), content(repo, after, budget)]);
 	if (a.kind === "large" || b.kind === "large") return { ...file, tooLarge: true };
 	if (a.kind === "binary" || b.kind === "binary") return { ...file, binary: true };
 	const patch = structuredPatch(path, path, a.text, b.text, "", "", { context: 3, maxEditLength: MAX_EDIT_LENGTH });
 	const hunks: DiffHunk[] = patch
-		? patch.hunks.map((h) => ({ oldStart: h.oldStart, oldLines: h.oldLines, newStart: h.newStart, newLines: h.newLines, lines: h.lines }))
+		? patch.hunks.map((h) => ({ oldStart: gitStart(h.oldStart, h.oldLines), oldLines: h.oldLines, newStart: gitStart(h.newStart, h.newLines), newLines: h.newLines, lines: h.lines }))
 		: [replacement(a.text, b.text)];
-	const lines = hunks.reduce((n, h) => n + h.lines.length, 0);
-	// Checked and spent with no await in between, so concurrent files can't overdraw it.
-	if (lines > budget.lines) return { ...file, tooLarge: true };
-	budget.lines -= lines;
+	let additions = 0;
+	let deletions = 0;
 	for (const h of hunks) {
 		for (const line of h.lines) {
-			if (line[0] === "+") file.additions++;
-			else if (line[0] === "-") file.deletions++;
+			if (line[0] === "+") additions++;
+			else if (line[0] === "-") deletions++;
 		}
 	}
-	return { ...file, hunks };
+	const lines = hunks.reduce((n, h) => n + h.lines.length, 0);
+	// Checked and spent with no await in between, so concurrent files can't overdraw it.
+	if (budget.defer && (isGenerated(path) || additions + deletions > DEFER_ABOVE || lines > budget.lines)) {
+		return { ...file, additions, deletions, deferred: isGenerated(path) ? "generated" : "large" };
+	}
+	if (lines > budget.lines) return { ...file, tooLarge: true };
+	budget.lines -= lines;
+	return { ...file, additions, deletions, hunks };
 }
+
+/**
+ * Where a hunk starts on one side, as git writes it: jsdiff puts an empty side at the line after the
+ * gap, git at the line before it (so 0 for an empty file: `@@ -0,0 +1,2 @@`).
+ */
+export const gitStart = (start: number, lines: number) => (lines === 0 ? Math.max(start - 1, 0) : start);
 
 /** One hunk that removes every old line and adds every new one: the diff when Myers gives up. */
 function replacement(before: string, after: string): DiffHunk {
@@ -213,7 +336,7 @@ async function content(repo: ObjectReader, entry: TreeEntry | null, budget: Budg
 		throw err;
 	}
 	if (!blob) throw new Error(`Blob ${entry.hash} is missing`);
-	if (blob.size > MAX_FILE_BYTES || blob.size > budget.bytes) return { kind: "large" };
+	if (blob.size > budget.fileBytes || blob.size > budget.bytes) return { kind: "large" };
 	budget.bytes -= blob.size;
 	const bytes = new Uint8Array(await blob.arrayBuffer());
 	if (isBinary(bytes)) return { kind: "binary" };

@@ -1,33 +1,29 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { FolderCode } from "lucide-react";
 import { ChecksBadge } from "../components/actions.tsx";
-import { DiffView } from "../components/diff.tsx";
+import { DiffView, type DiffSource } from "../components/diff.tsx";
 import { ErrorNote, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, keys, repoParams } from "../lib/api.ts";
+import { diffs, keys, repoParams, type CommitDetail } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
-import { dropIfTooBig, preload } from "../lib/queries.ts";
+import { diffQuery, preload } from "../lib/queries.ts";
 
 type Search = { ref?: string };
 
 export const Route = createFileRoute("/$owner/$repo/commit/$hash")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ ref: typeof s.ref === "string" && s.ref ? s.ref : undefined }),
 	loaderDeps: ({ search }) => ({ ref: search.ref }),
-	loader: async ({ context, params, deps }) => {
-		const query = commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref);
-		await preload(context.queryClient, query);
-		// A big diff is too much to highlight on the server and send with the page: the browser loads it.
-		dropIfTooBig(context.queryClient, query, ({ diff }) => diff.truncated || diff.files.length > SERVER_DIFF_FILES || diff.additions + diff.deletions > SERVER_DIFF_LINES);
-	},
+	// The diff streams in the browser (diffQuery is browser-only), so a server render leaves it out.
+	loader: ({ context, params, deps }) => preload(context.queryClient, commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref)),
 	component: CommitPage,
 });
 
-const commitQuery = (project: string, hash: string, ref?: string) =>
-	queryOptions({ queryKey: [...keys.commit(project, hash), ref ?? ""], queryFn: () => api.commit(project, hash, ref), staleTime: Infinity });
-
-/** The biggest commit diff a server render shows. */
-const SERVER_DIFF_FILES = 50;
-const SERVER_DIFF_LINES = 1000;
+const commitDiff = (project: string, hash: string, ref?: string): DiffSource => ({ key: [...keys.commit(project, hash), ref ?? ""], path: diffs.commit(project, hash, ref) });
+// Streamed: the commit (in the header) shows at once, then each file as it's diffed.
+const commitQuery = (project: string, hash: string, ref?: string) => {
+	const { key, path } = commitDiff(project, hash, ref);
+	return { ...diffQuery<{ commit: CommitDetail }>(key, path), staleTime: Infinity };
+};
 
 const TASK_MERGE = /^Merge task (t[0-9a-f]+): /;
 
@@ -38,8 +34,9 @@ function CommitPage() {
 	const result = useQuery(commitQuery(project, hash, ref));
 
 	if (result.isPending) return <Spinner />;
-	if (result.error) return <ErrorNote error={result.error} />;
-	const { commit: c, diff } = result.data;
+	if (!result.data?.meta) return <ErrorNote error={result.error} />;
+	const diff = result.data;
+	const c = result.data.meta.commit;
 	const [subject, ...rest] = c.message.split("\n");
 	const body = rest.join("\n").trim();
 	const taskId = TASK_MERGE.exec(subject)?.[1];
@@ -103,7 +100,14 @@ function CommitPage() {
 			{c.parents.length > 1 && (
 				<p className="text-xs text-faint">Showing changes against the first parent ({shortOid(c.parents[0])}), the branch this was merged into.</p>
 			)}
-			<DiffView diff={diff} project={project} viewRef={ref?.startsWith("task:") ? ref : c.hash} />
+			<DiffView
+				diff={diff}
+				source={commitDiff(project, hash, ref)}
+				project={project}
+				viewRef={ref?.startsWith("task:") ? ref : c.hash}
+				error={result.error}
+				onRetry={() => void result.refetch()}
+			/>
 		</div>
 	);
 }

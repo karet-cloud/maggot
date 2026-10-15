@@ -1,8 +1,9 @@
 import { Hono, type Context } from "hono";
 import { requireVerified, type Principal } from "../auth.ts";
-import type { RepoRow } from "../db.ts";
+import { db, unreadableRepos, type RepoRow } from "../db.ts";
 import { HttpError } from "../errors.ts";
 import type { ProjectCoordinator } from "../project.ts";
+import { privateRun } from "./runs.ts";
 
 /**
  * Actions under /api/repos/:owner/:repo/actions (and /api/projects/:project/actions). The repository
@@ -41,6 +42,28 @@ function optionalInt(value: string | undefined, name: string, min = 0): number |
 	return n;
 }
 
+/**
+ * Runs among `numbers` that ran the code of another repository the caller can't read: a private fork's
+ * pull request workflows. Their jobs, logs and artifacts are that fork's code and what it printed, so
+ * only the fork's readers see them, approve them or re-run them; others see that they ran, and the result.
+ */
+async function hiddenRuns(c: Context<App>, numbers: number[]): Promise<Set<number>> {
+	if (numbers.length === 0) return new Set();
+	const heads = await project(c).ciRunHeads(numbers);
+	if (Object.keys(heads).length === 0) return new Set();
+	const p = c.var.principal;
+	const unreadable = await unreadableRepos(db(c.env), Object.values(heads), { viewerId: p.kind === "user" ? p.id : null, everything: p.kind === "admin" });
+	return new Set(Object.entries(heads).flatMap(([n, head]) => (unreadable.has(head) ? [Number(n)] : [])));
+}
+
+/** Refuses a run that ran a private fork's code the caller can't read (see hiddenRuns). */
+async function requireRunReadable(c: Context<App>, number: number): Promise<number> {
+	if ((await hiddenRuns(c, [number])).has(number)) {
+		throw new HttpError(403, "HEAD_PRIVATE", "This run ran a private fork's code; only people who can read the fork see it, approve it or re-run it");
+	}
+	return number;
+}
+
 async function body<T>(c: Context<App>): Promise<T> {
 	try {
 		return (await c.req.json()) as T;
@@ -52,29 +75,31 @@ async function body<T>(c: Context<App>): Promise<T> {
 actions.get("/runs", async (c) => {
 	const sha = c.req.query("sha");
 	if (sha !== undefined && !/^[0-9a-f]{40}$/.test(sha)) throw new HttpError(400, "INVALID_INPUT", "sha is a full commit hash");
-	return c.json(
-		await project(c).ciRuns({
-			before: optionalInt(c.req.query("before"), "before", 1),
-			sha,
-			pull: optionalInt(c.req.query("pull"), "pull", 1),
-			workflow: c.req.query("workflow") || undefined,
-			branch: c.req.query("branch") || undefined,
-			limit: optionalInt(c.req.query("limit"), "limit", 1),
-		}),
-	);
+	const list = await project(c).ciRuns({
+		before: optionalInt(c.req.query("before"), "before", 1),
+		sha,
+		pull: optionalInt(c.req.query("pull"), "pull", 1),
+		workflow: c.req.query("workflow") || undefined,
+		branch: c.req.query("branch") || undefined,
+		limit: optionalInt(c.req.query("limit"), "limit", 1),
+	});
+	const hidden = await hiddenRuns(c, list.runs.map((r) => r.number));
+	return c.json({ ...list, runs: list.runs.map((r) => (hidden.has(r.number) ? privateRun(r) : r)) });
 });
 
-actions.get("/runs/:number", async (c) => c.json(await project(c).ciRun(runNumber(c))));
+actions.get("/runs/:number", async (c) => c.json(await project(c).ciRun(await requireRunReadable(c, runNumber(c)))));
 
-actions.get("/runs/:number/jobs/:job/logs", async (c) => c.json(await project(c).ciLogs(runNumber(c), c.req.param("job"), optionalInt(c.req.query("after"), "after"))));
+actions.get("/runs/:number/jobs/:job/logs", async (c) =>
+	c.json(await project(c).ciLogs(await requireRunReadable(c, runNumber(c)), c.req.param("job"), optionalInt(c.req.query("after"), "after"))),
+);
 
-actions.post("/runs/:number/cancel", async (c) => c.json(await project(c).ciCancel(runNumber(c))));
+actions.post("/runs/:number/cancel", async (c) => c.json(await project(c).ciCancel(await requireRunReadable(c, runNumber(c)))));
 
-actions.get("/runs/:number/artifacts", async (c) => c.json({ artifacts: await project(c).ciArtifacts(runNumber(c)) }));
+actions.get("/runs/:number/artifacts", async (c) => c.json({ artifacts: await project(c).ciArtifacts(await requireRunReadable(c, runNumber(c))) }));
 
 /** An artifact's files, as the .tar.gz the job uploaded. */
 actions.get("/runs/:number/artifacts/:id/download", async (c) => {
-	const { key, name } = await project(c).ciArtifactObject(runNumber(c), c.req.param("id"));
+	const { key, name } = await project(c).ciArtifactObject(await requireRunReadable(c, runNumber(c)), c.req.param("id"));
 	const object = await c.env.CI_BUCKET?.get(key);
 	if (!object) throw new HttpError(404, "NOT_FOUND", "The artifact's files are gone");
 	const file = `${name.replace(/[^\w.-]+/g, "_")}.tar.gz`;
@@ -100,12 +125,12 @@ actions.delete("/caches/:id", async (c) => {
 
 actions.post("/runs/:number/rerun", async (c) => {
 	canStart(c);
-	return c.json(await project(c).ciRerun(runNumber(c), actor(c)), 201);
+	return c.json(await project(c).ciRerun(await requireRunReadable(c, runNumber(c)), actor(c)), 201);
 });
 
 actions.post("/runs/:number/approve", async (c) => {
 	canStart(c);
-	return c.json(await project(c).ciApprove(runNumber(c)));
+	return c.json(await project(c).ciApprove(await requireRunReadable(c, runNumber(c))));
 });
 
 actions.get("/workflows", async (c) => c.json({ workflows: await project(c).ciWorkflows(c.req.query("ref") || undefined) }));

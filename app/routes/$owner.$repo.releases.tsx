@@ -1,4 +1,4 @@
-import { keepPreviousData, queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Download, Package, Pencil, Plus, Tag as TagIcon, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -76,6 +76,17 @@ function Downloads({ project, refName }: { project: string; refName: string }) {
 			))}
 		</span>
 	);
+}
+
+/**
+ * Applies a change the server just confirmed to every loaded page of the list (keyed by limit), so it
+ * shows at once, then refetches all of them (active or not) for what else may have moved.
+ */
+function updateReleases(queryClient: QueryClient, project: string, change: (list: Release[]) => Release[]) {
+	queryClient.setQueriesData<{ releases: Release[]; more: boolean }>({ queryKey: keys.releases(project) }, (page) =>
+		page ? { ...page, releases: change(page.releases) } : page,
+	);
+	void queryClient.invalidateQueries({ queryKey: keys.releases(project), refetchType: "all" });
 }
 
 function ReleaseList({ project, writable }: { project: string; writable: boolean }) {
@@ -235,7 +246,7 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 	if (tags.data.length === 0) {
 		return (
 			<Empty icon={<TagIcon className="size-6" />} title="No tags yet">
-				Push one with <code className="font-mono">git push maggot v1.0</code>, or create one here.
+				Push one with <code className="font-mono">git push origin v1.0</code>, or create one here.
 			</Empty>
 		);
 	}
@@ -327,8 +338,8 @@ function NewRelease({ project, onDone }: { project: string; onDone: () => void }
 	const exists = tags.data?.some((t) => t.name === tag.trim()) ?? false;
 	const create = useMutation({
 		mutationFn: () => api.createRelease(project, { tag: tag.trim(), target: exists ? undefined : target, name: name.trim() || undefined, notes, prerelease }),
-		onSuccess: () => {
-			void queryClient.invalidateQueries({ queryKey: keys.releases(project) });
+		onSuccess: (release) => {
+			updateReleases(queryClient, project, (list) => [release, ...list.filter((x) => x.id !== release.id)]);
 			void queryClient.invalidateQueries({ queryKey: keys.tags(project) });
 			onDone();
 		},

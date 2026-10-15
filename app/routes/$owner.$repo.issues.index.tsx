@@ -3,7 +3,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { CircleDot, MessageSquare, Plus, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { IssueStateIcon, Label } from "../components/issues.tsx";
-import { cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
+import { buttonClass, cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type IssueState } from "../lib/api.ts";
 import { preload, projectQuery } from "../lib/queries.ts";
 
@@ -69,7 +69,7 @@ function Issues() {
 					<Link
 						to="/$owner/$repo/issues/new"
 						params={repoParams(project)}
-						className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90"
+						className={buttonClass("primary")}
 					>
 						<Plus className="size-4" />
 						New issue

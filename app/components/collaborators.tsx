@@ -18,7 +18,7 @@ export function Collaborators({ project }: { project: string }) {
 	const queryClient = useQueryClient();
 	const list = useQuery(collaboratorsQuery(project));
 	const [username, setUsername] = useState("");
-	const [permission, setPermission] = useState<Permission>("write");
+	const [permission, setPermission] = useState<Permission>("read");
 	// Inviting waits for the server, which looks the user up.
 	const add = useMutation({ mutationFn: () => api.setCollaborator(project, username.trim(), permission), onSuccess: (next) => {
 		queryClient.setQueryData(keys.collaborators(project), next);

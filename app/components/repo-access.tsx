@@ -1,10 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { KeyRound } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { ChevronDown, Code2, Download, KeyRound, Terminal } from "lucide-react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api, type GitCredentials, type RepoInfo } from "../lib/api.ts";
 import { viewerQuery } from "../lib/queries.ts";
-import { Button, CopyField, cx, ErrorNote } from "./ui.tsx";
+import { Button, buttonClass, CopyField, cx, ErrorNote, Modal } from "./ui.tsx";
 
 /** An Artifacts remote URL with the token as the password (task forks; agents use these directly). */
 export function authUrl(creds: GitCredentials) {
@@ -55,18 +55,18 @@ export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }
 	return (
 		<div className="space-y-4 text-xs">
 			<Section title="Push an existing repository">
-				<CopyField value={`git remote add maggot ${remote}`} secret={secret} />
+				<CopyField value={`git remote add origin ${remote}`} secret={secret} />
 				<CopyField value={`git branch -M ${branch}`} />
-				<CopyField value={`git push -u maggot ${branch}`} />
+				<CopyField value={`git push -u origin ${branch}`} />
 				<p className="text-faint">
-					Other branches and tags: <code className="font-mono text-dim">git push maggot --all && git push maggot --tags</code>
+					Other branches and tags: <code className="font-mono text-dim">git push origin --all && git push origin --tags</code>
 				</p>
 			</Section>
 			{empty ? (
 				<Section title="Or start a new one">
 					<CopyField value={`git init -b ${branch} ${dir} && cd ${dir}`} />
 					<CopyField value={`echo ${sh(`# ${repo.name}`)} > README.md && git add . && git commit -m "Initial commit"`} />
-					<CopyField value={`git remote add maggot ${remote} && git push -u maggot ${branch}`} secret={secret} />
+					<CopyField value={`git remote add origin ${remote} && git push -u origin ${branch}`} secret={secret} />
 				</Section>
 			) : (
 				<Section title="Clone">
@@ -123,7 +123,7 @@ function SshSection({ repo }: { repo: RepoInfo }) {
 const CLONE_KIND = "maggot.cloneKind";
 
 /** The repository's clone URL, HTTPS or SSH; the choice is remembered in this browser. */
-export function CloneUrl({ repo }: { repo: RepoInfo }) {
+function CloneUrl({ repo }: { repo: RepoInfo }) {
 	const [kind, setKind] = useState<"https" | "ssh">("https");
 	// Read after mounting, so the server-rendered page and the first client render agree.
 	useEffect(() => {
@@ -161,6 +161,88 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 		<div className="space-y-1.5">
 			<p className="font-medium text-dim">{title}</p>
 			{children}
+		</div>
+	);
+}
+
+/**
+ * Everything for getting the code out, in one menu: the clone URL (HTTPS or SSH), the full git
+ * commands, and the tree at `refName` as a .zip or .tar.gz.
+ */
+export function CodeMenu({ repo, refName }: { repo: RepoInfo; refName?: string }) {
+	const [open, setOpen] = useState(false);
+	const [commands, setCommands] = useState(false);
+	const ref = useRef<HTMLDivElement>(null);
+	const button = useRef<HTMLButtonElement>(null);
+	const panel = useId();
+	// Closes on a click elsewhere, Escape (back to the button) or tabbing out, like a native popover.
+	useEffect(() => {
+		if (!open) return;
+		const away = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+		const escape = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			setOpen(false);
+			button.current?.focus();
+		};
+		document.addEventListener("pointerdown", away);
+		document.addEventListener("keydown", escape);
+		return () => {
+			document.removeEventListener("pointerdown", away);
+			document.removeEventListener("keydown", escape);
+		};
+	}, [open]);
+	return (
+		<div ref={ref} className="relative" onBlur={(e) => open && e.relatedTarget && !ref.current?.contains(e.relatedTarget) && setOpen(false)}>
+			<button
+				ref={button}
+				type="button"
+				onClick={() => setOpen(!open)}
+				aria-expanded={open}
+				aria-haspopup="dialog"
+				aria-controls={open ? panel : undefined}
+				className={buttonClass("primary", "px-2.5 text-xs")}
+			>
+				<Code2 className="size-3.5" />
+				Code
+				<ChevronDown className={cx("size-3.5 transition-transform", open && "rotate-180")} />
+			</button>
+			{open && (
+				<div id={panel} role="dialog" aria-label="Clone or download" className="absolute right-0 z-20 mt-1.5 w-[min(400px,calc(100vw-2.5rem))] rounded-xl border border-line bg-panel shadow-(--shadow-frame)">
+					<div className="space-y-2.5 p-4">
+						<p className="flex items-center gap-1.5 text-[13px] font-semibold">
+							<Terminal className="size-3.5 text-dim" />
+							Clone
+						</p>
+						<CloneUrl repo={repo} />
+						<button
+							type="button"
+							onClick={() => {
+								setOpen(false);
+								setCommands(true);
+							}}
+							className="text-xs text-accent hover:underline"
+						>
+							{repo.canWrite ? "Push, clone and token setup" : "More ways to clone"}
+						</button>
+					</div>
+					<div className="border-t border-line py-1.5">
+						{(["zip", "tar.gz"] as const).map((format) => (
+							<a
+								key={format}
+								href={api.archiveUrl(repo.fullName, format, refName)}
+								onClick={() => setOpen(false)}
+								className="flex items-center gap-2 px-4 py-2 text-[13px] text-dim hover:bg-raised hover:text-fg"
+							>
+								<Download className="size-3.5" />
+								Download .{format}
+							</a>
+						))}
+					</div>
+				</div>
+			)}
+			<Modal open={commands} onClose={() => setCommands(false)} title={`Use ${repo.fullName} with git`}>
+				<RepoCommands repo={repo} empty={false} />
+			</Modal>
 		</div>
 	);
 }

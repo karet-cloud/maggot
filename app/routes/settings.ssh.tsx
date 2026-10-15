@@ -55,7 +55,7 @@ function SshKeys() {
 	const host = info.data?.host ?? "maggot";
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
-			<h1 className="text-lg font-semibold">Settings</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 			<SettingsNav />
 			<p className="text-sm text-dim">
 				Clone and push with an SSH key instead of a token. maggot runs on Cloudflare Workers, which can't take connections on port 22, so{" "}

@@ -1,15 +1,16 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useHydrated, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
+import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, GitPullRequest, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
-import { RepoCommands } from "../components/repo-access.tsx";
+import { CodeMenu, RepoCommands } from "../components/repo-access.tsx";
 import { BlameView } from "../components/blame.tsx";
 import { GoToFile } from "../components/file-finder.tsx";
 import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useCopy } from "../components/ui.tsx";
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
+import { formatBytes } from "../lib/format.ts";
 import { preload, projectQuery, SERVER_FILE_BYTES } from "../lib/queries.ts";
 import { isServer } from "../lib/ssr.ts";
 
@@ -91,9 +92,10 @@ function Code() {
 				<div className="space-y-4 p-4">
 					<p className="text-sm text-dim">
 						This repository is empty.{" "}
-						{info.data.repo.canWrite ? "Push your code to it with git:" : "Its owner hasn't pushed anything yet."}
+						{info.data.repo.canWrite ? "Push your code to it with git:" : "Its owner hasn't pushed anything yet. Clone it now and pull once they do:"}
 					</p>
-					{info.data.repo.canWrite && <RepoCommands repo={info.data.repo} empty />}
+					{/* Writers get push and setup commands; everyone else gets the clone URLs (there's nothing to download yet). */}
+					<RepoCommands repo={info.data.repo} empty />
 				</div>
 			</Panel>
 		);
@@ -104,45 +106,62 @@ function Code() {
 			<div className="flex flex-wrap items-center gap-3">
 				<BranchSelect project={project} value={ref} onChange={(next) => void navigate({ search: { ref: next } })} />
 				<Breadcrumbs project={project} refName={ref} path={path} />
-				{tree.data?.commit && (
-					<div className="ml-auto flex items-center gap-3">
-						<span className="flex items-center gap-1.5 text-xs text-faint">
-							at
-							<Link
-								to="/$owner/$repo/commit/$hash"
-								params={{ ...repoParams(project), hash: tree.data.commit }}
-								search={{ ref: ref?.startsWith("task:") ? ref : undefined }}
-								className="font-mono text-[12px] text-dim hover:text-accent"
-							>
-								{tree.data.commit.slice(0, 7)}
-							</Link>
-						</span>
-						<GoToFile project={project} refName={ref} commit={tree.data.commit} />
-						{writable && onBranch && (
-							<Link
-								to="/$owner/$repo/edit"
-								params={repoParams(project)}
-								search={{ ref, dir: path || undefined }}
-								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
-							>
-								<FilePlus2 className="size-3.5" />
-								Add file
-							</Link>
-						)}
-						{writable && onBranch && (
-							<Link
-								to="/$owner/$repo/upload"
-								params={repoParams(project)}
-								search={{ ref, dir: path || undefined }}
-								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
-							>
-								<Upload className="size-3.5" />
-								Upload
-							</Link>
-						)}
-						<ArchiveMenu project={project} refName={ref} />
-					</div>
-				)}
+				{/* Wraps right-aligned on narrow screens, so the Code menu's panel stays on screen. */}
+				<div className="flex w-full flex-wrap items-center justify-end gap-3 sm:ml-auto sm:w-auto">
+					{tree.data?.commit && (
+						<>
+							<span className="flex items-center gap-1.5 text-xs text-faint">
+								at
+								<Link
+									to="/$owner/$repo/commit/$hash"
+									params={{ ...repoParams(project), hash: tree.data.commit }}
+									search={{ ref: ref?.startsWith("task:") ? ref : undefined }}
+									className="font-mono text-[12px] text-dim hover:text-accent"
+								>
+									{tree.data.commit.slice(0, 7)}
+								</Link>
+							</span>
+							<GoToFile project={project} refName={ref} commit={tree.data.commit} />
+							{writable && onBranch && (
+								<Link
+									to="/$owner/$repo/edit"
+									params={repoParams(project)}
+									search={{ ref, dir: path || undefined }}
+									className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+								>
+									<FilePlus2 className="size-3.5" />
+									Add file
+								</Link>
+							)}
+							{writable && onBranch && (
+								<Link
+									to="/$owner/$repo/upload"
+									params={repoParams(project)}
+									search={{ ref, dir: path || undefined }}
+									className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+								>
+									<Upload className="size-3.5" />
+									Upload
+								</Link>
+							)}
+								{/* A fork's branch goes back to its source as a pull request into the source's default branch. */}
+								{info.data?.repo.forkOf && onBranch && (ref ?? info.data.defaultBranch) && (
+									<Link
+										to="/$owner/$repo/pulls/new"
+										params={{ owner: info.data.repo.forkOf.owner, repo: info.data.repo.forkOf.name }}
+										search={{ headRepo: project, head: ref ?? info.data.defaultBranch }}
+										title={`Open a pull request from this branch into ${info.data.repo.forkOf.owner}/${info.data.repo.forkOf.name}`}
+										className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+									>
+										<GitPullRequest className="size-3.5" />
+										Contribute
+									</Link>
+								)}
+						</>
+					)}
+					{/* Cloning doesn't need the tree, so the menu stays while it loads or fails. */}
+					{info.data && <CodeMenu repo={info.data.repo} refName={ref} />}
+				</div>
 			</div>
 
 			<div className="grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
@@ -205,6 +224,8 @@ function EntryLink({ entry: e, refName, active }: { entry: TreeEntry; refName?: 
 		<Link
 			from={Route.fullPath}
 			search={dir ? { ref: refName, path: e.path } : { ref: refName, path: parent, file: e.path }}
+			// Sizes come with listings from the default branch's index.
+			title={typeof e.size === "number" ? `${e.name} · ${formatBytes(e.size)}` : undefined}
 			className={cx(
 				"flex items-center gap-2 px-3 py-1 font-mono text-xs hover:bg-raised",
 				active ? "bg-raised text-fg" : dir ? "text-fg" : "text-dim",
@@ -489,25 +510,6 @@ function IconLink({ href, label, icon, newTab }: { href: string; label: string; 
 			{icon}
 			{label}
 		</a>
-	);
-}
-
-/** Downloads the whole tree at the current ref. */
-function ArchiveMenu({ project, refName }: { project: string; refName?: string }) {
-	return (
-		<details className="relative">
-			<summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint">
-				<Download className="size-3.5" />
-				Download
-			</summary>
-			<div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-md border border-line-strong bg-panel py-1 shadow-xl">
-				{(["zip", "tar.gz"] as const).map((format) => (
-					<a key={format} href={api.archiveUrl(project, format, refName)} className="block px-3 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
-						Download .{format}
-					</a>
-				))}
-			</div>
-		</details>
 	);
 }
 

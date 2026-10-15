@@ -35,7 +35,7 @@ function ResetPassword() {
 	if (!token || error) {
 		return (
 			<main className="mx-auto max-w-sm px-5 py-24 text-center">
-				<h1 className="text-lg font-semibold">This reset link doesn't work</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">This reset link doesn't work</h1>
 				<p className="mt-2 text-sm text-dim">It may have expired (links last an hour) or already been used.</p>
 				<p className="mt-6 text-xs text-dim">{authLink("/forgot-password", "Get a new link")}</p>
 			</main>
