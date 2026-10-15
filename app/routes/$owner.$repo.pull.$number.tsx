@@ -58,7 +58,7 @@ function PullPage() {
 	return (
 		<div className="space-y-4">
 			<header className="space-y-2">
-				<h1 className="text-xl font-semibold break-words">
+				<h1 className="text-2xl font-semibold tracking-tight break-words">
 					{pull.title} <span className="font-normal text-faint">#{pull.number}</span>
 				</h1>
 				<div className="flex flex-wrap items-center gap-2 text-sm text-dim">

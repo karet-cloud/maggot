@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ExploreRouteImport } from './routes/explore'
 import { Route as ForgotPasswordRouteImport } from './routes/forgot-password'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as NewRouteImport } from './routes/new'
@@ -27,6 +28,7 @@ import { Route as SettingsPasswordRouteImport } from './routes/settings.password
 import { Route as SettingsSshRouteImport } from './routes/settings.ssh'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner.$repo.index'
+import { Route as OwnerRepoActivityRouteImport } from './routes/$owner.$repo.activity'
 import { Route as OwnerRepoAgentsRouteImport } from './routes/$owner.$repo.agents'
 import { Route as OwnerRepoBranchesRouteImport } from './routes/$owner.$repo.branches'
 import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.compare'
@@ -56,6 +58,11 @@ import { Route as OwnerRepoWikiChar91_historyChar93PageRouteImport } from './rou
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ExploreRoute = ExploreRouteImport.update({
+  id: '/explore',
+  path: '/explore',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ForgotPasswordRoute = ForgotPasswordRouteImport.update({
@@ -141,6 +148,11 @@ const SettingsTokensRoute = SettingsTokensRouteImport.update({
 const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoActivityRoute = OwnerRepoActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
 const OwnerRepoAgentsRoute = OwnerRepoAgentsRouteImport.update({
@@ -275,6 +287,7 @@ const OwnerRepoWikiChar91_historyChar93PageRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/explore': typeof ExploreRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
@@ -291,6 +304,7 @@ export interface FileRoutesByFullPath {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -320,6 +334,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/explore': typeof ExploreRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
@@ -335,6 +350,7 @@ export interface FileRoutesByTo {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner': typeof OwnerIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -365,6 +381,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/explore': typeof ExploreRoute
   '/forgot-password': typeof ForgotPasswordRoute
   '/login': typeof LoginRoute
   '/new': typeof NewRoute
@@ -381,6 +398,7 @@ export interface FileRoutesById {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -412,6 +430,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/explore'
     | '/forgot-password'
     | '/login'
     | '/new'
@@ -428,6 +447,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -457,6 +477,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/explore'
     | '/forgot-password'
     | '/login'
     | '/new'
@@ -472,6 +493,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -501,6 +523,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/explore'
     | '/forgot-password'
     | '/login'
     | '/new'
@@ -517,6 +540,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -547,6 +571,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ExploreRoute: typeof ExploreRoute
   ForgotPasswordRoute: typeof ForgotPasswordRoute
   LoginRoute: typeof LoginRoute
   NewRoute: typeof NewRoute
@@ -572,6 +597,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/explore': {
+      id: '/explore'
+      path: '/explore'
+      fullPath: '/explore'
+      preLoaderRoute: typeof ExploreRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/forgot-password': {
@@ -691,6 +723,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/$owner/$repo/'
       preLoaderRoute: typeof OwnerRepoIndexRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
+    '/$owner/$repo/activity': {
+      id: '/$owner/$repo/activity'
+      path: '/activity'
+      fullPath: '/$owner/$repo/activity'
+      preLoaderRoute: typeof OwnerRepoActivityRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
     '/$owner/$repo/agents': {
@@ -872,6 +911,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface OwnerRepoRouteChildren {
+  OwnerRepoActivityRoute: typeof OwnerRepoActivityRoute
   OwnerRepoAgentsRoute: typeof OwnerRepoAgentsRoute
   OwnerRepoBranchesRoute: typeof OwnerRepoBranchesRoute
   OwnerRepoCompareRoute: typeof OwnerRepoCompareRoute
@@ -901,6 +941,7 @@ interface OwnerRepoRouteChildren {
 }
 
 const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
+  OwnerRepoActivityRoute: OwnerRepoActivityRoute,
   OwnerRepoAgentsRoute: OwnerRepoAgentsRoute,
   OwnerRepoBranchesRoute: OwnerRepoBranchesRoute,
   OwnerRepoCompareRoute: OwnerRepoCompareRoute,
@@ -937,6 +978,7 @@ const OwnerRepoRouteWithChildren = OwnerRepoRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ExploreRoute: ExploreRoute,
   ForgotPasswordRoute: ForgotPasswordRoute,
   LoginRoute: LoginRoute,
   NewRoute: NewRoute,

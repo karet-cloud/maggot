@@ -64,7 +64,7 @@ function Profile() {
 			<div className="flex items-center gap-3">
 				<div className="flex size-12 items-center justify-center rounded-full bg-accent/15 font-mono text-lg text-accent">{owner.slice(0, 2)}</div>
 				<div>
-					<h1 className="font-mono text-xl font-semibold">{owner}</h1>
+					<h1 className="font-mono text-2xl font-semibold tracking-tight">{owner}</h1>
 					<p className="text-xs text-dim">{tab === "stars" ? (self ? "Repositories you starred" : "Repositories they starred") : self ? "Your repositories, public and private" : "Public repositories"}</p>
 				</div>
 				{self && (

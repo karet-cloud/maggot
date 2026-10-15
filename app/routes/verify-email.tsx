@@ -35,7 +35,7 @@ function VerifyEmail() {
 			{error ? (
 				<>
 					<CircleAlert className="mx-auto size-8 text-rose-300" />
-					<h1 className="mt-3 text-lg font-semibold">Couldn't verify your email</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">Couldn't verify your email</h1>
 					<p className="mt-2 text-sm text-dim">
 						{REASONS[error] ?? "Something went wrong."} Sign in and use “Resend the email” at the top of the page to get a new link.
 					</p>
@@ -43,7 +43,7 @@ function VerifyEmail() {
 			) : !verified ? (
 				<>
 					<MailWarning className="mx-auto size-8 text-amber-300" />
-					<h1 className="mt-3 text-lg font-semibold">{me.data ? "Your email isn't verified yet" : "Sign in to continue"}</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">{me.data ? "Your email isn't verified yet" : "Sign in to continue"}</h1>
 					<p className="mt-2 text-sm text-dim">
 						{me.data
 							? "Open the link in the email we sent you. If it's gone, use “Resend the email” at the top of the page."
@@ -53,7 +53,7 @@ function VerifyEmail() {
 			) : (
 				<>
 					<CheckCircle2 className="mx-auto size-8 text-emerald-300" />
-					<h1 className="mt-3 text-lg font-semibold">Email verified</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">Email verified</h1>
 					<p className="mt-2 text-sm text-dim">You can create repositories and push to them now.</p>
 				</>
 			)}

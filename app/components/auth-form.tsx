@@ -23,7 +23,7 @@ export function AuthForm({
 	children: ReactNode;
 }) {
 	return (
-		<main className="flex min-h-[calc(100vh-3rem)] items-center justify-center px-5 py-10">
+		<main className="flex items-center justify-center px-5 py-20">
 			<form
 				onSubmit={(e: FormEvent) => {
 					e.preventDefault();
@@ -33,7 +33,7 @@ export function AuthForm({
 			>
 				<div className="space-y-2 text-center">
 					<img src="/favicon.svg" alt="" className="mx-auto size-10" />
-					<h1 className="text-lg font-semibold">{title}</h1>
+					<h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
 					<p className="text-sm text-dim">{subtitle}</p>
 				</div>
 				<div className="space-y-3 rounded-xl border border-line bg-panel p-5">

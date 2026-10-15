@@ -1,37 +1,30 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, CheckCircle2, Moon, Sun } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ArrowRight, CheckCircle2 } from "lucide-react";
+import { ThemeToggle } from "../ui.tsx";
 import { AppDemo } from "./demos.tsx";
 import { AGENT_POINTS, API_POINTS, GROUPS, STACK } from "./content.ts";
 
 /*
  * The signed-out home page. Grey and one green; centered and typographic. The hero is the repository
- * as the app shows it, working: browse files, open issues, review a pull request. Light or dark,
- * following the system unless the visitor picks one.
+ * as the app shows it, working: browse files, open issues, review a pull request. Its colours are the
+ * site's own (app/styles.css), so light and dark follow the same choice as every other page.
  */
-
-const DARK = `
-	--bg: #0b0d10; --fg: #e6e8eb; --muted: #9aa3ad; --faint: #6b7480; --line: #232830; --line-strong: #2f3540; --soft: #111418;
-	--green: #4ade80; --btn: #e6e8eb; --btn-fg: #0b0d10; --btn-hover: #4ade80; --shadow: 0 1px 0 rgba(0,0,0,0.3), 0 24px 48px -32px rgba(0,0,0,0.8);
-	color-scheme: dark;`;
 
 const CSS = `
 .pp {
-	--bg: #ffffff; --fg: #0f1115; --muted: #4b5563; --faint: #6b7280; --line: #e4e7eb; --line-strong: #d9dde3; --soft: #f8f9fa;
-	--green: #15803d; --btn: #0f1115; --btn-fg: #ffffff; --btn-hover: #15803d; --shadow: 0 1px 0 rgba(15,17,21,0.04), 0 24px 48px -32px rgba(15,17,21,0.25);
-	color-scheme: light;
-	background: var(--bg); color: var(--fg); font-family: "Instrument Sans", "Inter", ui-sans-serif, system-ui, sans-serif;
+	--bg: var(--color-bg); --fg: var(--color-fg); --muted: var(--color-dim); --faint: var(--color-faint); --line: var(--color-line);
+	--line-strong: var(--color-line-strong); --soft: var(--color-soft); --green: var(--color-accent); --btn: var(--color-btn);
+	--btn-fg: var(--color-btn-fg); --btn-hover: var(--color-accent); --shadow: var(--shadow-frame);
+	background: var(--bg); color: var(--fg);
 }
-.pp.dark { ${DARK} }
-@media (prefers-color-scheme: dark) { .pp:not(.light) { ${DARK} } }
-.pp .mono { font-family: "JetBrains Mono", ui-monospace, Menlo, monospace; }
+.pp .mono { font-family: var(--font-mono); }
 .pp .green { color: var(--green); }
 .pp .muted { color: var(--muted); }
 .pp .faint { color: var(--faint); }
 .pp .line { border-color: var(--line); }
 .pp .soft { background: var(--soft); }
 .pp .btn { background: var(--btn); color: var(--btn-fg); }
-.pp .btn:hover { background: var(--btn-hover); color: #fff; }
+.pp .btn:hover { background: var(--btn-hover); color: var(--color-on-accent); }
 .pp .ghost { border: 1px solid var(--line-strong); }
 .pp .ghost:hover { border-color: var(--fg); }
 .pp .frame { border: 1px solid var(--line); box-shadow: var(--shadow); }
@@ -39,60 +32,18 @@ const CSS = `
 .pp .divide > * + * { border-top: 1px solid var(--line); }
 `;
 
-type Theme = "light" | "dark";
-const THEME_KEY = "maggot.landing.theme";
-
-/** The visitor's choice, if they made one; otherwise the page follows the system. */
-function useTheme(): [Theme | null, (t: Theme | null) => void] {
-	const [theme, setTheme] = useState<Theme | null>(null);
-	useEffect(() => {
-		const saved = localStorage.getItem(THEME_KEY);
-		if (saved === "light" || saved === "dark") setTheme(saved);
-	}, []);
-	return [
-		theme,
-		(t) => {
-			setTheme(t);
-			if (t) localStorage.setItem(THEME_KEY, t);
-			else localStorage.removeItem(THEME_KEY);
-		},
-	];
-}
-
-function ThemeToggle({ theme, onChange }: { theme: Theme | null; onChange: (t: Theme | null) => void }) {
-	// What's showing right now, so the button offers the other one.
-	const [system, setSystem] = useState<Theme>("light");
-	useEffect(() => {
-		const mq = window.matchMedia("(prefers-color-scheme: dark)");
-		const sync = () => setSystem(mq.matches ? "dark" : "light");
-		sync();
-		mq.addEventListener("change", sync);
-		return () => mq.removeEventListener("change", sync);
-	}, []);
-	const current = theme ?? system;
-	return (
-		<button
-			type="button"
-			onClick={() => onChange(current === "dark" ? "light" : "dark")}
-			className="muted hover-fg rounded-md p-2"
-			title={current === "dark" ? "Switch to light" : "Switch to dark"}
-			aria-label={current === "dark" ? "Switch to light" : "Switch to dark"}
-		>
-			{current === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
-		</button>
-	);
-}
-
 export function Landing() {
-	const [theme, setTheme] = useTheme();
 	return (
-		<div className={`pp min-h-screen ${theme ?? ""}`}>
+		<div className="pp min-h-screen">
 			<style>{CSS}</style>
 			<header className="mx-auto flex h-16 max-w-[1080px] items-center justify-between px-5">
 				<Link to="/" className="text-[15px] font-semibold">
 					maggot
 				</Link>
 				<nav className="muted hidden items-center gap-7 text-[14px] md:flex">
+					<Link to="/explore" className="hover-fg">
+						Explore
+					</Link>
 					<a href="#features" className="hover-fg">
 						Features
 					</a>
@@ -104,7 +55,7 @@ export function Landing() {
 					</a>
 				</nav>
 				<div className="flex items-center gap-1">
-					<ThemeToggle theme={theme} onChange={setTheme} />
+					<ThemeToggle />
 					<Link to="/login" className="muted hover-fg px-3 py-1.5 text-[13.5px]">
 						Sign in
 					</Link>
@@ -126,9 +77,9 @@ export function Landing() {
 					<Link to="/signup" className="btn flex items-center gap-2 rounded-md px-5 py-2.5 text-sm font-semibold">
 						Create a repository <ArrowRight className="size-4" />
 					</Link>
-					<a href="#features" className="ghost rounded-md px-5 py-2.5 text-sm">
-						See what's included
-					</a>
+					<Link to="/explore" className="ghost rounded-md px-5 py-2.5 text-sm">
+						Explore repositories
+					</Link>
 				</div>
 				<div className="mx-auto mt-16 max-w-[1000px]">
 					<p className="faint mb-3 text-[13px]">Browse a cached Linux kernel preview. Open files in the public mirror, or try the demo issue and review.</p>
@@ -230,7 +181,12 @@ export function Landing() {
 				<span className="font-semibold" style={{ color: "var(--fg)" }}>
 					maggot
 				</span>
-				<span>Git hosting on Cloudflare.</span>
+				<span className="flex flex-wrap items-center gap-5">
+					<Link to="/explore" className="hover-fg">
+						Explore
+					</Link>
+					<span>Git hosting on Cloudflare.</span>
+				</span>
 			</footer>
 		</div>
 	);

@@ -419,6 +419,8 @@ export interface ListOptions {
 	/** Matches owner, name or description (case-insensitive substring). */
 	query?: string;
 	sort?: "created" | "stars";
+	/** Only public repositories, whatever the viewer can also see. */
+	publicOnly?: boolean;
 	limit?: number;
 }
 
@@ -443,7 +445,7 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 		where.push(`(r."owner" || '/' || r."name" || ' ' || coalesce(r."description", '')) like ? escape '\\'`);
 		args.push(`%${opts.query.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
 	}
-	where.push(`(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
+	where.push(opts.publicOnly ? `r."visibility" = 'public'` : `(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
 	const order = opts.starredBy ? `mine."createdAt" desc` : opts.sort === "stars" ? `"stars" desc, r."createdAt" desc` : `r."createdAt" desc`;
 	const listing = LISTING.replace(`left join "repo" p`, `${join} left join "repo" p`);
 	const { results } = await database
