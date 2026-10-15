@@ -1,4 +1,5 @@
-// Browser client for the maggot API. Same origin; the session cookie set at login authenticates it.
+// Client for the maggot API. Same origin; the session cookie set at login authenticates it. While a page
+// renders on the server, the calls go to the API in-process as the visitor (./ssr.ts).
 import { readDiff } from "./diff-stream.ts";
 import type {
 	Branches,
@@ -61,23 +62,41 @@ import type {
 	WikiIndex,
 	WikiPage,
 } from "../../src/api.ts";
+import { ApiError, isTerminal, tooBigToRender } from "./api-error.ts";
+import { apiFetch } from "./ssr.ts";
 
 export type * from "../../src/api.ts";
 
-export class ApiError extends Error {
-	readonly status: number;
-	readonly code: string;
-	constructor(status: number, code: string, message: string) {
-		super(message);
-		this.status = status;
-		this.code = code;
+export { ApiError, isTerminal, tooBigToRender };
+
+/** A response's text, or tooBigToRender past `max` bytes or for binary content; stops reading at the cap. */
+async function cappedText(res: Response, max: number): Promise<string> {
+	const reader = res.body?.getReader();
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const chunk = await reader?.read();
+		if (!chunk || chunk.done) break;
+		size += chunk.value.byteLength;
+		if (size > max) {
+			await reader?.cancel();
+			throw tooBigToRender();
+		}
+		chunks.push(chunk.value);
 	}
+	const bytes = new Uint8Array(size);
+	let at = 0;
+	for (const c of chunks) {
+		bytes.set(c, at);
+		at += c.byteLength;
+	}
+	if (bytes.subarray(0, 8000).includes(0)) throw tooBigToRender();
+	return new TextDecoder().decode(bytes);
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-	const res = await fetch(`/api${path}`, {
+	const res = await apiFetch(path, {
 		method,
-		credentials: "same-origin",
 		headers: body === undefined ? undefined : { "content-type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
@@ -383,11 +402,12 @@ export const api = {
 		),
 	tree: (project: string, path: string, ref?: string) =>
 		call<{ tree: Tree }>("GET", `${p(project)}/tree?${new URLSearchParams({ path, ...(ref ? { ref } : {}) })}`).then((r) => r.tree),
-	file: async (project: string, path: string, ref?: string) => {
+	/** `maxBytes` caps what's read (a server render's limit), else it's the whole file. */
+	file: async (project: string, path: string, ref?: string, maxBytes?: number) => {
 		const q = ref ? `?${new URLSearchParams({ ref })}` : "";
-		const res = await fetch(`/api${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
+		const res = await apiFetch(`${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
 		if (!res.ok) throw await responseError(res);
-		return res.text();
+		return maxBytes === undefined ? res.text() : cappedText(res, maxBytes);
 	},
 	commit: (project: string, hash: string, ref?: string) => call<{ commit: CommitDetail; diff: Diff }>("GET", diffs.commit(project, hash, ref)),
 	compare: (project: string, base: string, head: string) => call<{ comparison: Comparison }>("GET", diffs.compare(project, base, head)).then((r) => r.comparison),

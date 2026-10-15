@@ -1,12 +1,29 @@
 import { QueryClient } from "@tanstack/react-query";
 import { createRouter } from "@tanstack/react-router";
+import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
+import { ApiError, isTerminal } from "./lib/api.ts";
+import { isServer } from "./lib/ssr.ts";
+import { keepSendable, sendable } from "./lib/ssr-policy.ts";
 import { routeTree } from "./routeTree.gen";
 
+/** How long fetched data (and a lasting error) counts as fresh. */
+const STALE_MS = 10_000;
+
+// Called once per server request (each render gets its own cache) and once in the browser.
 export function getRouter() {
 	const queryClient = new QueryClient({
-		defaultOptions: { queries: { staleTime: 10_000, retry: (count, err) => !isClientError(err) && count < 2 } },
+		defaultOptions: {
+			queries: {
+				staleTime: STALE_MS,
+				// A server render doesn't retry: past its deadline, the browser picks the query up anyway.
+				retry: (count, err) => !isServer && !isClientError(err) && count < 2,
+				// A lasting error (a 404) is fresh for as long as data would be, so a server-rendered one shows
+				// as it did on the server instead of loading again; past that, a page that mounts asks again.
+				retryOnMount: (q) => !(q.state.status === "error" && isTerminal(q.state.error) && Date.now() - q.state.errorUpdatedAt < STALE_MS),
+			},
+		},
 	});
-	return createRouter({
+	const router = createRouter({
 		routeTree,
 		context: { queryClient },
 		defaultPreload: "intent",
@@ -14,6 +31,24 @@ export function getRouter() {
 		defaultPreloadStaleTime: 0,
 		scrollRestoration: true,
 	});
+	// What the server fetched goes into the page, so the browser starts with it instead of fetching it
+	// again, and lasting errors as ApiErrors (app/start.ts: nothing else about an error, such as a stack,
+	// leaves the server). Only settled queries go (lib/ssr-policy.ts); the rest leave the server's cache
+	// before it renders, so the browser fetches them, just as the server render showed them.
+	setupRouterSsrQueryIntegration({
+		router,
+		queryClient,
+		wrapQueryClient: false,
+		dehydrateOptions: { shouldDehydrateQuery: sendable, shouldRedactErrors: (err) => !(err instanceof ApiError) },
+	});
+	if (isServer) {
+		const dehydrate = router.options.dehydrate;
+		router.options.dehydrate = () => {
+			keepSendable(queryClient);
+			return dehydrate?.() ?? {};
+		};
+	}
+	return router;
 }
 
 function isClientError(err: unknown) {

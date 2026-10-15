@@ -11,14 +11,14 @@ import { api, diffs, keys, type Branches, type ComparisonMeta, type Task, repoPa
 import { duration } from "../lib/format.ts";
 import { useLive } from "../lib/live.ts";
 import { patch, useOptimistic } from "../lib/optimistic.ts";
-import { diffQuery, preload, tasksQuery } from "../lib/queries.ts";
+import { browserOnly, diffQuery, preload, tasksQuery } from "../lib/queries.ts";
 
 export const Route = createFileRoute("/$owner/$repo/t/$task")({
 	loader: ({ context, params }) => {
 		const project = `${params.owner}/${params.repo}`;
 		// The changes only exist once there's a fork; go by whatever the cache already knows of the task.
 		const known = context.queryClient.getQueryData(taskQuery(project, params.task).queryKey) ?? context.queryClient.getQueryData(tasksQuery(project).queryKey)?.find((t) => t.id === params.task);
-		return preload(context.queryClient, taskQuery(project, params.task), known !== undefined && hasChanges(known) && taskChangesQuery(project, params.task));
+		return preload(context.queryClient, taskQuery(project, params.task), known !== undefined && hasChanges(known) && browserOnly(false, taskChangesQuery(project, params.task)));
 	},
 	component: TaskPage,
 });

@@ -9,6 +9,8 @@ type Search = { title?: string };
 export const Route = createFileRoute("/$owner/$repo/wiki/_new")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ title: typeof s.title === "string" && s.title ? s.title : undefined }),
 	loader: ({ context, params }) => preload(context.queryClient, ...wikiQueries(context.queryClient, `${params.owner}/${params.repo}`)),
+	// The editor restores a draft from session storage, which the server can't see: it renders in the browser.
+	ssr: "data-only",
 	component: NewWikiPage,
 });
 

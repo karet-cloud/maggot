@@ -8,6 +8,7 @@ import { Button, cx, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui
 import { api, keys, repoParams, type CiRunSummary } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
 import { preload, projectQuery } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 
 type Search = { sha?: string; pull?: number; help?: boolean };
 
@@ -18,17 +19,18 @@ export const Route = createFileRoute("/$owner/$repo/actions/")({
 		help: s.help === true || undefined,
 	}),
 	loaderDeps: ({ search }) => ({ sha: search.sha, pull: search.pull }),
-	loader: ({ context, params, deps }) => {
+	loader: async ({ context, params, deps }) => {
 		const project = `${params.owner}/${params.repo}`;
-		// The workflow list and branch picker depend on the repository, so they're warmed only once it's cached.
-		const info = context.queryClient.getQueryData(projectQuery(project).queryKey);
-		return preload(
-			context.queryClient,
-			projectQuery(project),
-			runsQuery(project, deps.sha, deps.pull),
+		// The workflow list and branch picker depend on the repository, so they're warmed only once it's
+		// cached; a server render fetches the repository first.
+		const known = () => context.queryClient.getQueryData(projectQuery(project).queryKey);
+		const dependents = (info: ReturnType<typeof known>) => [
 			info?.defaultBranch ? workflowsQuery(project, info.defaultBranch) : null,
 			info?.repo.canWrite && !info.repo.archivedAt && branchNamesQuery(project),
-		);
+		];
+		const cached = known();
+		await preload(context.queryClient, projectQuery(project), runsQuery(project, deps.sha, deps.pull), ...dependents(cached));
+		if (isServer && !cached) await preload(context.queryClient, ...dependents(known()));
 	},
 	component: Actions,
 });

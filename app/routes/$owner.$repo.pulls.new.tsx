@@ -8,7 +8,7 @@ import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { BranchSelect, HeadPicker, usePullHead } from "../components/refs.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
-import { preload, projectQuery } from "../lib/queries.ts";
+import { browserOnly, preload, projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { base?: string; head?: string; headRepo?: string };
@@ -29,8 +29,8 @@ export const Route = createFileRoute("/$owner/$repo/pulls/new")({
 		// Without a base in the URL the preview is against the default branch, known once the project is cached.
 		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
 		// `owner:branch` names another repository, which the page looks up before previewing.
-		const local = deps.head && !deps.head.includes(":");
-		return preload(context.queryClient, projectQuery(project), base && local ? previewQuery(project, base, deps.head as string, deps.headRepo) : null);
+		const local = Boolean(deps.head && !deps.head.includes(":"));
+		return preload(context.queryClient, projectQuery(project), Boolean(base && local) && browserOnly(false, previewQuery(project, base as string, deps.head as string, deps.headRepo)));
 	},
 	component: NewPull,
 });

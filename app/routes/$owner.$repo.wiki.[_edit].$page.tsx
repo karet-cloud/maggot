@@ -10,6 +10,8 @@ import { preload } from "../lib/queries.ts";
 export const Route = createFileRoute("/$owner/$repo/wiki/_edit/$page")({
 	// Not the page itself: each edit reads it fresh, under its own key.
 	loader: ({ context, params }) => preload(context.queryClient, ...wikiQueries(context.queryClient, `${params.owner}/${params.repo}`)),
+	// The editor restores a draft from session storage, which the server can't see: it renders in the browser.
+	ssr: "data-only",
 	component: EditWikiPage,
 });
 

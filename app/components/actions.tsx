@@ -1,5 +1,5 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useHydrated } from "@tanstack/react-router";
 import { Archive, Ban, CircleCheck, CircleDashed, CircleMinus, CirclePause, CircleX, Database, Download, KeyRound, LoaderCircle, Play, Plus, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { useState } from "react";
 import { api, ApiError, keys, repoParams, type CiArtifact, type CiCache, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
@@ -47,9 +47,10 @@ export function CiIcon({ state, className }: { state: CiState; className?: strin
 	}
 }
 
-/** How long something ran, ticking while it still runs. */
+/** How long something ran, ticking while it still runs (from hydration on: the server's clock isn't the visitor's). */
 export function Elapsed({ from, to }: { from: string | null; to: string | null }) {
-	if (!from) return null;
+	const hydrated = useHydrated();
+	if (!from || (!to && !hydrated)) return null;
 	return <span className="tabular-nums">{duration(from, to ?? new Date().toISOString())}</span>;
 }
 

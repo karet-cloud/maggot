@@ -13,6 +13,7 @@ type Search = { ref?: string };
 export const Route = createFileRoute("/$owner/$repo/commit/$hash")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ ref: typeof s.ref === "string" && s.ref ? s.ref : undefined }),
 	loaderDeps: ({ search }) => ({ ref: search.ref }),
+	// The diff streams in the browser (diffQuery is browser-only), so a server render leaves it out.
 	loader: ({ context, params, deps }) => preload(context.queryClient, commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref)),
 	component: CommitPage,
 });

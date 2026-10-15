@@ -1,5 +1,5 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { createFileRoute, Link, useHydrated, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, GitPullRequest, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
@@ -11,7 +11,8 @@ import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, useC
 import { api, ApiError, keys, type TreeEntry, repoParams } from "../lib/api.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
 import { formatBytes } from "../lib/format.ts";
-import { preload, projectQuery } from "../lib/queries.ts";
+import { preload, projectQuery, SERVER_FILE_BYTES } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 
 type Search = { ref?: string; path?: string; file?: string };
 
@@ -22,9 +23,9 @@ export const Route = createFileRoute("/$owner/$repo/")({
 		file: typeof s.file === "string" && s.file ? s.file : undefined,
 	}),
 	loaderDeps: ({ search }) => ({ ref: search.ref, path: search.path ?? "", file: search.file }),
-	loader: ({ context, params, deps, preload: hover }) => {
+	loader: async ({ context, params, deps, preload: hover }) => {
 		const project = `${params.owner}/${params.repo}`;
-		return preload(
+		await preload(
 			context.queryClient,
 			treeQuery(project, deps.ref, deps.path),
 			// Not on hover: running down the tree would download every file it passed.
@@ -32,6 +33,9 @@ export const Route = createFileRoute("/$owner/$repo/")({
 			branchNamesQuery(project),
 			tagNamesQuery(project),
 		);
+		// A server render shows the README too, once the listing says there is one.
+		const readme = isServer && deps.file === undefined && findReadme(context.queryClient.getQueryData(treeQuery(project, deps.ref, deps.path).queryKey)?.entries);
+		if (readme) await preload(context.queryClient, fileQuery(project, deps.ref, readme.path));
 	},
 	component: Code,
 });
@@ -39,7 +43,13 @@ export const Route = createFileRoute("/$owner/$repo/")({
 const treeQuery = (project: string, ref: string | undefined, path: string) =>
 	queryOptions({ queryKey: [...keys.code(project), "tree", ref ?? "", path], queryFn: () => api.tree(project, path, ref) });
 const fileQuery = (project: string, ref: string | undefined, path: string) =>
-	queryOptions({ queryKey: [...keys.code(project), "file", ref ?? "", path], queryFn: () => api.file(project, path, ref) });
+	queryOptions({
+		queryKey: [...keys.code(project), "file", ref ?? "", path],
+		// A server render reads small files only (SERVER_FILE_BYTES); the browser loads the rest.
+		queryFn: () => api.file(project, path, ref, isServer ? SERVER_FILE_BYTES : undefined),
+	});
+
+const findReadme = (entries: TreeEntry[] | undefined) => entries?.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name));
 
 const MAX_LINES = 5000;
 /** Past this, files are shown plain: highlighting runs on the main thread. */
@@ -57,7 +67,7 @@ function Code() {
 		...treeQuery(project, ref, path),
 		placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === project && prevQuery.queryKey[4] === (ref ?? "") ? prev : undefined),
 	});
-	const readme = !file ? tree.data?.entries.find((e) => e.type !== "tree" && /^readme(\.md|\.txt)?$/i.test(e.name)) : undefined;
+	const readme = !file ? findReadme(tree.data?.entries) : undefined;
 	const shown = file ?? readme?.path;
 	// Archived repositories are read-only, even for their owner.
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
@@ -265,7 +275,9 @@ function FileView({
 	const [blaming, setBlaming] = useState(false);
 	const navigate = useNavigate({ from: Route.fullPath });
 	const hash = useRouterState({ select: (s) => s.location.hash });
-	const selected = parseLines(hash);
+	// The server never sees the hash: highlight linked lines from hydration on, so both renders agree.
+	const hydrated = useHydrated();
+	const selected = hydrated ? parseLines(hash) : null;
 	const { copied, copy } = useCopy();
 	const binary = file.data?.slice(0, 8000).includes("\0") ?? false;
 	const lines = useMemo(() => {

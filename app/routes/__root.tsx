@@ -7,6 +7,7 @@ import { Toaster } from "../components/toast.tsx";
 import { Button, buttonClass, ThemeToggle } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
 import { configQuery, preload, viewerQuery } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 import { THEME_SCRIPT } from "../lib/theme.ts";
 import css from "../styles.css?url";
 
@@ -26,6 +27,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 			{ rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
 		],
 	}),
+	// A server render settles who's signed in first: pages' loaders pick signed-in queries by it (signedIn).
+	beforeLoad: ({ context }) => (isServer ? preload(context.queryClient, viewerQuery) : undefined),
 	loader: ({ context }) => preload(context.queryClient, viewerQuery, configQuery),
 	shellComponent: Shell,
 	component: Root,
