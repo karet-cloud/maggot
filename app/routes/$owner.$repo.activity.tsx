@@ -19,7 +19,6 @@ function ActivityPage() {
 	const status = { connecting: "Connecting…", live: "Live", offline: "Reconnecting…" }[live.status];
 	return (
 		<Panel
-			className="max-w-[900px]"
 			title="Activity"
 			actions={
 				<span className="flex items-center gap-3 text-[11px] text-faint">

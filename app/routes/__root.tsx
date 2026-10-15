@@ -218,7 +218,7 @@ function TopBar() {
 					maggot
 				</Link>
 				{params.owner && (
-					<nav className="flex min-w-0 items-center gap-1.5 font-mono text-sm">
+					<nav className="hidden min-w-0 items-center gap-1.5 font-mono text-sm sm:flex">
 						<span className="text-faint">/</span>
 						<Link to="/$owner" params={{ owner: params.owner }} className="truncate text-dim hover:text-fg">
 							{params.owner}
