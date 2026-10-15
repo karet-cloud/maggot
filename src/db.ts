@@ -76,6 +76,10 @@ const APP_SCHEMA = [
 	// People a repository's admins invited to it, with read, write or admin access.
 	`create table if not exists "repo_collaborator" ("repoId" text not null references "repo" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("repoId", "userId"))`,
 	`create index if not exists "repo_collaborator_user_idx" on "repo_collaborator" ("userId")`,
+	// People waiting for an account while sign-ups are full or invite-only; an admin invites them from here.
+	`create table if not exists "waitlist" ("id" text not null primary key, "email" text not null unique collate nocase, "note" text not null, "createdAt" text not null, "invitedAt" text, "inviteId" text)`,
+	// Sign-up invite codes an admin issued (see MAGGOT_POLICY.signUps). Only the code's hash is kept.
+	`create table if not exists "invite" ("id" text not null primary key, "hash" text not null unique, "prefix" text not null, "note" text not null, "uses" integer not null, "used" integer not null default 0, "expiresAt" text not null, "createdAt" text not null)`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -93,6 +97,8 @@ const COLUMNS = [
 	`alter table "issue" add column "isPull" integer not null default 0`,
 	// 'user' or 'org'.
 	`alter table "user" add column "kind" text not null default 'user'`,
+	// The invite an account signed up with, so a leaked code's accounts can be found.
+	`alter table "user" add column "inviteId" text`,
 ];
 
 /** Indexes on added columns, created once the columns exist. */
@@ -100,6 +106,8 @@ const LATE_INDEXES = [
 	`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`,
 	// What someone opened, for their home page.
 	`create index if not exists "issue_author_idx" on "issue" ("authorId", "state", "isPull")`,
+	// The accounts made from each invite.
+	`create index if not exists "user_inviteId_idx" on "user" ("inviteId")`,
 ];
 
 const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
@@ -764,6 +772,139 @@ export async function userForToken(database: D1Database, token: string): Promise
 		await database.prepare(`update "token" set "lastUsedAt" = ? where "id" = ?`).bind(new Date().toISOString(), row.tokenId).run();
 	}
 	return { id: row.id, username: row.username, verified: Boolean(row.emailVerified) };
+}
+
+// ── Sign-up invites ──────────────────────────────────────────────────────────
+
+export const INVITE_PREFIX = "maggot_inv_";
+
+export interface InviteInfo {
+	id: string;
+	prefix: string;
+	note: string;
+	uses: number;
+	used: number;
+	expiresAt: string;
+	createdAt: string;
+}
+
+/** Mints an invite code good for `uses` sign-ups until it expires. Only its hash is stored. */
+export async function createInvite(database: D1Database, input: { note: string; uses: number; days: number }): Promise<{ code: string; info: InviteInfo }> {
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	const code = INVITE_PREFIX + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+	const now = Date.now();
+	const info: InviteInfo = {
+		id: crypto.randomUUID(),
+		prefix: code.slice(0, INVITE_PREFIX.length + 4),
+		note: input.note,
+		uses: input.uses,
+		used: 0,
+		expiresAt: new Date(now + input.days * 24 * 3600 * 1000).toISOString(),
+		createdAt: new Date(now).toISOString(),
+	};
+	await database
+		.prepare(`insert into "invite" ("id", "hash", "prefix", "note", "uses", "used", "expiresAt", "createdAt") values (?, ?, ?, ?, ?, 0, ?, ?)`)
+		.bind(info.id, await sha256(code), info.prefix, info.note, info.uses, info.expiresAt, info.createdAt)
+		.run();
+	return { code, info };
+}
+
+export async function listInvites(database: D1Database): Promise<(InviteInfo & { accounts: string[] })[]> {
+	const { results } = await database
+		.prepare(
+			`select i."id", i."prefix", i."note", i."uses", i."used", i."expiresAt", i."createdAt",
+			        coalesce((select json_group_array(u."username") from "user" u where u."inviteId" = i."id"), '[]') as "accounts"
+			 from "invite" i order by i."createdAt" desc limit 500`,
+		)
+		.all<InviteInfo & { accounts: string }>();
+	return results.map((r) => ({ ...r, accounts: JSON.parse(r.accounts) as string[] }));
+}
+
+export async function revokeInvite(database: D1Database, id: string): Promise<boolean> {
+	const result = await database.prepare(`delete from "invite" where "id" = ?`).bind(id).run();
+	return result.meta.changes > 0;
+}
+
+/** Takes one use of an invite code, returning its id, or null if it's unknown, used up or expired. */
+export async function claimInvite(database: D1Database, code: string): Promise<string | null> {
+	if (!code.startsWith(INVITE_PREFIX)) return null;
+	const row = await database
+		.prepare(`update "invite" set "used" = "used" + 1 where "hash" = ? and "used" < "uses" and "expiresAt" > ? returning "id"`)
+		.bind(await sha256(code), new Date().toISOString())
+		.first<{ id: string }>();
+	return row?.id ?? null;
+}
+
+/** Gives back a use taken by a sign-up that then failed (a taken username, say). */
+export async function releaseInvite(database: D1Database, id: string): Promise<void> {
+	await database.prepare(`update "invite" set "used" = "used" - 1 where "id" = ? and "used" > 0`).bind(id).run();
+}
+
+/** Whether an account with this username and email address exists. */
+export async function userExists(database: D1Database, username: string, email: string): Promise<boolean> {
+	return Boolean(await database.prepare(`select 1 as "x" from "user" where "username" = ? and lower("email") = ?`).bind(username, email).first());
+}
+
+/** People's accounts (not organizations), which `maxAccounts` is checked against. */
+export async function countAccounts(database: D1Database): Promise<number> {
+	return (await database.prepare(`select count(*) as "n" from "user" where "kind" = 'user'`).first<{ n: number }>())?.n ?? 0;
+}
+
+/** Records which invite an account signed up with. */
+export async function recordInvite(database: D1Database, username: string, inviteId: string): Promise<void> {
+	await database.prepare(`update "user" set "inviteId" = ? where "username" = ? and "inviteId" is null`).bind(inviteId, username).run();
+}
+
+// ── Waitlist ─────────────────────────────────────────────────────────────────
+
+export const MAX_WAITLIST = 10_000;
+
+export interface WaitlistEntry {
+	id: string;
+	email: string;
+	note: string;
+	createdAt: string;
+	invitedAt: string | null;
+	/** The account made with the invite they were sent, once there is one. */
+	account: string | null;
+}
+
+/** Adds an address to the waitlist; one already on it is left as it was. */
+export async function joinWaitlist(database: D1Database, email: string, note: string): Promise<void> {
+	const result = await database
+		.prepare(
+			`insert into "waitlist" ("id", "email", "note", "createdAt")
+			 select ?, ?, ?, ? where (select count(*) from "waitlist") < ?
+			 on conflict ("email") do nothing`,
+		)
+		.bind(crypto.randomUUID(), email, note, new Date().toISOString(), MAX_WAITLIST)
+		.run();
+	if (result.meta.changes === 0 && !(await database.prepare(`select 1 as "x" from "waitlist" where "email" = ?`).bind(email).first())) {
+		throw new HttpError(503, "WAITLIST_FULL", "The waitlist is full for now; try again later");
+	}
+}
+
+export async function listWaitlist(database: D1Database, pending: boolean): Promise<WaitlistEntry[]> {
+	const { results } = await database
+		.prepare(
+			`select w."id", w."email", w."note", w."createdAt", w."invitedAt",
+			        (select u."username" from "user" u where u."inviteId" = w."inviteId" and w."inviteId" is not null limit 1) as "account"
+			 from "waitlist" w ${pending ? `where w."invitedAt" is null` : ""} order by w."createdAt" limit 1000`,
+		)
+		.all<WaitlistEntry>();
+	return results;
+}
+
+export async function getWaitlistEntry(database: D1Database, id: string): Promise<WaitlistEntry | null> {
+	return database.prepare(`select "id", "email", "note", "createdAt", "invitedAt", null as "account" from "waitlist" where "id" = ?`).bind(id).first<WaitlistEntry>();
+}
+
+export async function markWaitlistInvited(database: D1Database, id: string, inviteId: string): Promise<void> {
+	await database.prepare(`update "waitlist" set "invitedAt" = ?, "inviteId" = ? where "id" = ?`).bind(new Date().toISOString(), inviteId, id).run();
+}
+
+export async function removeFromWaitlist(database: D1Database, id: string): Promise<boolean> {
+	return (await database.prepare(`delete from "waitlist" where "id" = ?`).bind(id).run()).meta.changes > 0;
 }
 
 // ── SSH keys ─────────────────────────────────────────────────────────────────

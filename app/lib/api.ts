@@ -191,11 +191,13 @@ export interface CreateRepoInput {
 
 export const api = {
 	me: () => call<{ user: Viewer | null }>("GET", "/me").then((r) => r.user),
-	signUp: (input: { email: string; password: string; name: string; username: string }) =>
+	signUp: (input: { email: string; password: string; name: string; username: string; inviteCode?: string; turnstileToken?: string }) =>
 		call<unknown>("POST", "/auth/sign-up/email", { ...input, callbackURL: "/verify-email" }),
 	signIn: (input: { username: string; password: string }) => call<unknown>("POST", "/auth/sign-in/username", input),
 	signOut: () => call<unknown>("POST", "/auth/sign-out", {}),
-	config: () => call<{ emailDelivery: boolean; verificationRequired: boolean }>("GET", "/config"),
+	config: () =>
+		call<{ emailDelivery: boolean; verificationRequired: boolean; signUps: "open" | "invite" | "waitlist" | "closed"; turnstileSiteKey: string | null }>("GET", "/config"),
+	joinWaitlist: (input: { email: string; note: string; turnstileToken?: string }) => call<{ joined: boolean }>("POST", "/waitlist", input),
 	resendVerification: (email: string) => call<unknown>("POST", "/auth/send-verification-email", { email, callbackURL: "/verify-email" }),
 	requestPasswordReset: (email: string) => call<unknown>("POST", "/auth/request-password-reset", { email, redirectTo: "/reset-password" }),
 	resetPassword: (token: string, newPassword: string) => call<unknown>("POST", "/auth/reset-password", { token, newPassword }),

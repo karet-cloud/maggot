@@ -50,6 +50,20 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 
 - **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
   in D1). Usernames are the first part of every repository URL, so they can't be changed.
+- **Who can sign up**: anyone, until `MAGGOT_POLICY.maxAccounts` (100) accounts exist. After that the
+  sign-up page becomes a waitlist (`POST /api/waitlist {"email", "note"}`), and getting in takes an invite
+  code, which works past the limit. `GET /api/admin/waitlist[?pending]` lists who's waiting;
+  `POST /api/admin/waitlist/:id/invite` mints them a one-use code, once per entry (emailed when email is
+  set up, and returned as a `/signup?invite=…` link either way). `POST /api/admin/invites {"note", "uses",
+  "days"}` mints codes by hand, `GET /api/admin/invites` lists them with the accounts made from each, and
+  `DELETE /api/admin/invites/:id` revokes one. `signUps: "invite"` needs a code from the first account,
+  and `"closed"` turns sign-up and the waitlist off. On top of that, at most `signUpsPerDay` (20) accounts
+  are made instance-wide per day and `signUpsPerHour` (3) per address, counting only sign-ups that made
+  an account (each sign-up holds its place while it runs, so parallel ones can't share the last). The
+  admin endpoints need the admin key, which also skips every sign-up limit.
+- **Bot check**: sign-up and the waitlist run Cloudflare Turnstile's invisible widget when the deploy sets
+  `MAGGOT_TURNSTILE_SITE_KEY` (a variable in CI) and the `TURNSTILE_SECRET_KEY` secret; the server checks
+  each token with siteverify. Without them (local development, tests) there's no check.
 - **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
   works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
   Emails go out through Cloudflare Email Sending when the deploy sets `MAGGOT_EMAIL_FROM` (a sender on a
@@ -308,16 +322,23 @@ the owner); anything else needs the owner. A private repository someone can't re
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
-| POST | `/auth/sign-up/email` | `{ email, password, name, username }` | Better Auth; sets the session cookie |
+| POST | `/auth/sign-up/email` | `{ email, password, name, username, inviteCode?, turnstileToken? }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-in/username` | `{ username, password }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-out` | | clears it |
 | POST | `/auth/request-password-reset` | `{ email, redirectTo: "/reset-password" }` | always the same answer; emails a one-hour link if the account exists |
 | POST | `/auth/reset-password` | `{ token, newPassword }` | sets the password, signs out every session |
 | POST | `/auth/change-password` | `{ currentPassword, newPassword, revokeOtherSessions? }` | signed in |
 | POST | `/auth/send-verification-email` | `{ email, callbackURL: "/verify-email" }` | resends the verification link |
-| GET | `/config` | | `{ emailDelivery, verificationRequired }` |
+| GET | `/config` | | `{ emailDelivery, verificationRequired, signUps: "open" \| "invite" \| "waitlist" \| "closed", turnstileSiteKey }` |
 | POST | `/admin/password-reset` | `{ username }` or `{ email }` | `{ url }`: a reset link to hand over (admin key) |
 | POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
+| POST | `/waitlist` | `{ email, note?, turnstileToken? }` | 202 whether or not the address was already on it; 409 while sign-up is open |
+| GET | `/admin/waitlist` | `?pending` for those not yet invited | `{ waitlist }` with the `account` each invite made (admin key) |
+| POST | `/admin/waitlist/:id/invite` | `{ days? (14) }` | `{ code, url, emailed, invite }`: a one-use invite, once per entry (admin key) |
+| DELETE | `/admin/waitlist/:id` | | removes the entry (admin key) |
+| POST | `/admin/invites` | `{ note?, uses? (1), days? (14) }` | `{ code, url, invite }`: a sign-up invite code, shown once (admin key) |
+| GET | `/admin/invites` | | `{ invites }`, each with `used`/`uses` and the `accounts` created with it (admin key) |
+| DELETE | `/admin/invites/:id` | | revokes an invite code (admin key) |
 | GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
 | GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
 | GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
@@ -426,7 +447,8 @@ app/server.ts         Worker entry: git smart HTTP, /api/* to the API, everythin
 app/routes/           UI pages (TanStack Start file routes); app/lib/live.ts streams project events
 src/index.ts          API: routing, permissions, errors
 src/auth.ts           Better Auth, personal access tokens, who-may-do-what
-src/policy.ts         Rate limits (Limiter DO), quotas, email verification policy
+src/policy.ts         Rate limits (Limiter DO), quotas, sign-up and email verification policy
+src/turnstile.ts      Turnstile token checks for sign-up and the waitlist
 src/db.ts             D1 schema (created on first use), repositories, tokens
 src/git-http.ts       git clone/fetch/push at /<owner>/<repo>.git, proxied to Artifacts
 src/ssh/              SSH server over a WebSocket (transport, keys, git bridge) and the client proxy script

@@ -41,6 +41,9 @@ jobs:
       MAGGOT_EMAIL_FROM: ${{ vars.MAGGOT_EMAIL_FROM }}
       # Optional: JSON overrides for the rate limits and quotas in src/policy.ts.
       MAGGOT_POLICY: ${{ vars.MAGGOT_POLICY }}
+      # Optional: a Turnstile widget's site key turns on the bot check for sign-up and the waitlist; its
+      # secret key is the TURNSTILE_SECRET_KEY secret.
+      MAGGOT_TURNSTILE_SITE_KEY: ${{ vars.MAGGOT_TURNSTILE_SITE_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,18 +55,25 @@ jobs:
       - name: Deploy
         env:
           MAGGOT_API_KEY: ${{ secrets.MAGGOT_API_KEY }}
+          TURNSTILE_SECRET_KEY: ${{ secrets.TURNSTILE_SECRET_KEY }}
         run: |
           if [ -z "$MAGGOT_API_KEY" ]; then
             echo "::error::Set MAGGOT_API_KEY in the GitHub production environment secrets before deploying."
+            exit 1
+          fi
+          if [ -n "$MAGGOT_TURNSTILE_SITE_KEY" ] && [ -z "$TURNSTILE_SECRET_KEY" ]; then
+            echo "::error::MAGGOT_TURNSTILE_SITE_KEY is set; also set TURNSTILE_SECRET_KEY in the production environment secrets."
             exit 1
           fi
           secret_file=$(mktemp "$RUNNER_TEMP/maggot-secrets.XXXXXX")
           trap 'rm -f "$secret_file"' EXIT
           node --input-type=module -e '
             import { writeFileSync } from "node:fs";
-            writeFileSync(process.argv[1], JSON.stringify({ MAGGOT_API_KEY: process.env.MAGGOT_API_KEY }), { mode: 0o600 });
+            const secrets = { MAGGOT_API_KEY: process.env.MAGGOT_API_KEY };
+            if (process.env.MAGGOT_TURNSTILE_SITE_KEY) secrets.TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY;
+            writeFileSync(process.argv[1], JSON.stringify(secrets), { mode: 0o600 });
           ' "$secret_file"
-          unset MAGGOT_API_KEY
+          unset MAGGOT_API_KEY TURNSTILE_SECRET_KEY
           npx cf deploy --secrets-file "$secret_file"
       - name: Smoke test
         run: |

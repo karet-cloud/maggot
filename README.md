@@ -19,7 +19,7 @@ Repositories, pull requests, code review, issues, Actions, wikis and organizatio
 
 ## Get started
 
-1. Sign up at [maggot.karet.cloud](https://maggot.karet.cloud).
+1. Sign up at [maggot.karet.cloud](https://maggot.karet.cloud). Accounts are limited for now; if sign-ups are full, join the waitlist and you'll get an invite.
 2. Create a repository: empty, with a README, or imported from any public Git URL.
 3. Add an access token (Settings → Access tokens) or an SSH key (Settings → SSH keys).
 4. Push your code. Use your username, and the token as the password:

@@ -50,3 +50,18 @@ If you didn't create this account, ignore this email.`;
 <p>If you didn't create this account, ignore this email.</p>`;
 	return { subject: "Verify your maggot email address", text, html };
 }
+
+export function inviteEmail(url: string, days: number) {
+	const text = `Hi,
+
+You're off the maggot waitlist. To create your account, open this link within ${days} days:
+
+${url}
+
+If you didn't ask to join, ignore this email.`;
+	const html = `<p>Hi,</p>
+<p>You're off the maggot waitlist. To create your account, open this link within ${days} days:</p>
+<p><a href="${escape(url)}">Create your account</a></p>
+<p>If you didn't ask to join, ignore this email.</p>`;
+	return { subject: "Your maggot invite", text, html };
+}

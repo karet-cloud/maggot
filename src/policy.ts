@@ -6,13 +6,24 @@ import { HttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
 
 export interface Policy {
+	/**
+	 * Who may create an account: anyone until `maxAccounts` exist ("open"), only people with an invite
+	 * code from an admin ("invite"), or nobody ("closed"). Whoever can't sign up may join the waitlist
+	 * (except when closed), and an invite code works past `maxAccounts`. Requests carrying the admin API
+	 * key may always sign up.
+	 */
+	signUps: "open" | "invite" | "closed";
+	/** Accounts after which open sign-up stops and the sign-up page offers the waitlist instead. */
+	maxAccounts: number;
 	/** Accounts per IP address per hour. */
 	signUpsPerHour: number;
+	/** Accounts created per day across the whole instance, however they were invited. */
+	signUpsPerDay: number;
 	/** Sign-in attempts per IP address per 5 minutes. */
 	signInsPerIp: number;
 	/** Sign-in attempts per username or email per 15 minutes, from anywhere. */
 	signInsPerAccount: number;
-	/** Password reset and verification emails per IP address, and per address, per hour. */
+	/** Password reset and verification emails, and waitlist entries, per IP address (and per email address) per hour. */
 	emailsPerHour: number;
 	/** API requests per user (or per IP address when signed out) per minute. */
 	apiPerMinute: number;
@@ -42,7 +53,10 @@ export interface Policy {
 const MB = 1024 * 1024;
 
 export const DEFAULT_POLICY: Policy = {
-	signUpsPerHour: 5,
+	signUps: "open",
+	maxAccounts: 100,
+	signUpsPerHour: 3,
+	signUpsPerDay: 20,
 	signInsPerIp: 20,
 	signInsPerAccount: 10,
 	emailsPerHour: 5,
@@ -72,6 +86,10 @@ export function policy(env: Env): Policy {
 			console.error("MAGGOT_POLICY is not valid JSON; using the defaults");
 		}
 		found = { ...DEFAULT_POLICY, ...overrides };
+		if (!["open", "invite", "closed"].includes(found.signUps)) {
+			console.error(`MAGGOT_POLICY.signUps must be "open", "invite" or "closed"; using "open"`);
+			found.signUps = "open";
+		}
 		parsed.set(raw, found);
 	}
 	return found;
@@ -104,6 +122,30 @@ export async function limit(env: Env, subject: string, rules: Rule[], message = 
 	const limiter = (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject);
 	const verdict = await limiter.take(rules);
 	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
+}
+
+/** Throws 429 like `limit` if any of `rules` is already full for `subject`, without counting this call. */
+export async function checkLimit(env: Env, subject: string, rules: Rule[], message = "Too many requests"): Promise<void> {
+	if (rules.length === 0) return;
+	const verdict = await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).peek(rules);
+	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
+}
+
+/** Gives back what `limit` counted for a call that then didn't go ahead (a sign-up that made no account). */
+export async function refundLimit(env: Env, subject: string, rules: Rule[]): Promise<void> {
+	if (rules.length === 0) return;
+	await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).give(rules);
+}
+
+/**
+ * Holds one of `max` places for a while, given `current` already taken: the in-flight half of a limit
+ * whose settled half lives elsewhere (accounts in D1). Returns null when there's no room; release the
+ * hold once the outcome is settled either way. Holds expire on their own, so a crash can't leak one.
+ */
+export async function hold(env: Env, subject: string, current: number, max: number): Promise<{ release: () => Promise<void> } | null> {
+	const limiter = (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject);
+	const id = await limiter.hold(current, max, 2 * 60_000);
+	return id ? { release: () => limiter.release(id) } : null;
 }
 
 /**
@@ -157,6 +199,31 @@ export class Limiter extends DurableObject<Env> {
 
 	private createTable() {
 		this.sql.exec("CREATE TABLE IF NOT EXISTS hits (bucket TEXT PRIMARY KEY, window_end INTEGER NOT NULL, count INTEGER NOT NULL)");
+		this.sql.exec("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)");
+	}
+
+	/** Takes back one count from each rule's current window (see refundLimit). */
+	async give(rules: Rule[]): Promise<void> {
+		for (const { rule, end } of this.windows(rules, Date.now())) {
+			this.sql.exec("UPDATE hits SET count = count - 1 WHERE bucket = ? AND window_end = ? AND count > 0", rule.name, end);
+		}
+	}
+
+	/** A place among `max`, `current` of them settled elsewhere, or null when they're all taken (see hold). */
+	async hold(current: number, max: number, ttlMs: number): Promise<string | null> {
+		const now = Date.now();
+		this.sql.exec("DELETE FROM holds WHERE expires <= ?", now);
+		const held = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM holds").one().n;
+		if (current + held >= max) return null;
+		const id = crypto.randomUUID();
+		this.sql.exec("INSERT INTO holds (id, expires) VALUES (?, ?)", id, now + ttlMs);
+		const alarm = await this.ctx.storage.getAlarm();
+		if (alarm === null || alarm < now + ttlMs) await this.ctx.storage.setAlarm(now + ttlMs);
+		return id;
+	}
+
+	async release(id: string): Promise<void> {
+		this.sql.exec("DELETE FROM holds WHERE id = ?", id);
 	}
 
 	/** Whether `rules` have room left, without counting this call. */
@@ -201,7 +268,8 @@ export class Limiter extends DurableObject<Env> {
 
 	async alarm(): Promise<void> {
 		this.sql.exec("DELETE FROM hits WHERE window_end <= ?", Date.now());
-		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(window_end) AS end FROM hits").one().end;
+		this.sql.exec("DELETE FROM holds WHERE expires <= ?", Date.now());
+		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(m) AS end FROM (SELECT MAX(window_end) AS m FROM hits UNION ALL SELECT MAX(expires) FROM holds)").one().end;
 		// Expired rows are gone; an empty table costs nothing. (Dropping all storage and recreating the
 		// table raced requests arriving meanwhile.)
 		if (left !== null) await this.ctx.storage.setAlarm(left);
@@ -212,9 +280,11 @@ export class Limiter extends DurableObject<Env> {
 
 const MINUTE = 60;
 const HOUR = 3600;
+const DAY = 24 * HOUR;
 
 export const rules = {
 	signUp: (p: Policy): Rule[] => [{ name: "sign-up", limit: p.signUpsPerHour, windowSeconds: HOUR }],
+	signUpGlobal: (p: Policy): Rule[] => [{ name: "sign-up", limit: p.signUpsPerDay, windowSeconds: DAY }],
 	signInIp: (p: Policy): Rule[] => [{ name: "sign-in", limit: p.signInsPerIp, windowSeconds: 5 * MINUTE }],
 	signInAccount: (p: Policy): Rule[] => [{ name: "sign-in", limit: p.signInsPerAccount, windowSeconds: 15 * MINUTE }],
 	email: (p: Policy): Rule[] => [{ name: "email", limit: p.emailsPerHour, windowSeconds: HOUR }],

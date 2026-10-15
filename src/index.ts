@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import type { ApiError, PullChecks, Comparison, ComparisonMeta, Diff, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
-import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
+import { auth, canAdmin, canRead, canWrite, isAdminKey, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
 import {
 	assertRepoName,
 	createToken,
@@ -17,6 +17,19 @@ import {
 	ownerInNetwork,
 	listRepos,
 	listTokens,
+	claimInvite,
+	countAccounts,
+	createInvite,
+	getWaitlistEntry,
+	joinWaitlist,
+	listWaitlist,
+	markWaitlistInvited,
+	removeFromWaitlist,
+	userExists,
+	listInvites,
+	recordInvite,
+	releaseInvite,
+	revokeInvite,
 	addRepoBytes,
 	addSshKey,
 	cancelTransfer,
@@ -72,7 +85,8 @@ import {
 	type RepoRow,
 } from "./db.ts";
 import { HttpError, toHttpError } from "./errors.ts";
-import { emailConfigured } from "./mail.ts";
+import { emailConfigured, inviteEmail, sendMail } from "./mail.ts";
+import { turnstileSiteKey, verifyTurnstile } from "./turnstile.ts";
 import { assertProjectName, reservedName, wikiRepoName } from "./names.ts";
 import { WIKI_BRANCH } from "./wiki-pages.ts";
 import { measureRepository, probeRemote } from "./git/protocol.ts";
@@ -81,7 +95,7 @@ import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
 import jobApi from "./ci/job-api.ts";
 import actions from "./ci/routes.ts";
-import { assertCanCreateRepo, clientIp, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
+import { assertCanCreateRepo, checkLimit, clientIp, hold, refundLimit, formatBytes, guardCredentials, limit, pushBlocked, policy, RateLimited, rules, usage, verificationRequired } from "./policy.ts";
 import type { DiffPlan, ProjectCoordinator, Registry } from "./project.ts";
 import { diffList, diffPath, diffStream, diffTrees } from "./git/diff.ts";
 import { repoStore } from "./store.ts";
@@ -142,7 +156,66 @@ app.use("/api/auth/*", async (c, next) => {
 		if (typeof fields?.username !== "string" || !fields.username.trim()) throw new HttpError(400, "INVALID_INPUT", "Choose a username");
 		const name = [field("username"), field("displayUsername")].find(reservedName);
 		if (name) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
-		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
+		// Scripts and tests holding the admin key may always create accounts.
+		if (isAdminKey(c.env, c.req.raw)) {
+			await next();
+			forgetAccountCount();
+			return;
+		}
+		if (p.signUps === "closed") throw new HttpError(403, "SIGN_UPS_CLOSED", "maggot isn't taking new accounts right now");
+		await verifyTurnstile(c.env, fields?.turnstileToken, "sign-up", clientIp(c.req.raw));
+		await ensureSchema(db(c.env));
+		const code = typeof fields?.inviteCode === "string" ? fields.inviteCode.trim() : "";
+		// An invite code is the way past the account limit (and the only way in when sign-ups are invite-only).
+		if (!code && p.signUps === "invite") throw new HttpError(403, "INVITE_REQUIRED", "Sign-ups need an invite code for now; join the waitlist to get one");
+		const username = field("username");
+		const email = field("email");
+		// Every limit is taken before the account is made and given back if none was, so sign-ups in
+		// flight together can't share the last place, and failed ones (a mistyped code, a taken username)
+		// don't use up anything.
+		const perAddress = rules.signUp(p);
+		const daily = rules.signUpGlobal(p);
+		await limit(c.env, ip, perAddress, "Too many accounts created from your network");
+		let created = false;
+		let inviteId: string | null = null;
+		let place: { release: () => Promise<void> } | null = null;
+		try {
+			await limit(c.env, "global:sign-up", daily, "maggot has taken all the new accounts it can today");
+			if (code) {
+				// Wrong codes count as wrong credentials, so an address can't try codes without end.
+				const failures = rules.authFailure(p);
+				await checkLimit(c.env, ip, failures, "Too many wrong invite codes from your network");
+				inviteId = await claimInvite(db(c.env), code);
+				if (!inviteId) {
+					await limit(c.env, ip, failures).catch(() => {});
+					throw new HttpError(403, "INVALID_INVITE", "That invite code is unknown, used up or expired");
+				}
+			} else if (p.signUps === "open") {
+				// An invite is the way past the account limit; without one, this sign-up holds one of its places.
+				const full = () => new HttpError(403, "SIGN_UPS_FULL", "maggot has all the accounts it can take for now; join the waitlist to get an invite");
+				if (await accountsFull(c.env, { fresh: true })) throw full();
+				place = await hold(c.env, "global:accounts", await countAccounts(db(c.env)), p.maxAccounts);
+				if (!place) throw full();
+			}
+			// Whether an account was made is read from the database, not the response: Better Auth writes the
+			// user before the session, so a later failure can leave an account behind an error. Matched on
+			// the email too, so a same-name sign-up racing this one isn't taken for it.
+			const existed = await userExists(db(c.env), username, email);
+			try {
+				await next();
+			} finally {
+				created = !existed && (await userExists(db(c.env), username, email).catch(() => false));
+			}
+		} finally {
+			if (created) forgetAccountCount();
+			await Promise.all([
+				place?.release(),
+				created ? undefined : refundLimit(c.env, ip, perAddress),
+				created ? undefined : refundLimit(c.env, "global:sign-up", daily),
+				inviteId && (created ? recordInvite(db(c.env), username, inviteId) : releaseInvite(db(c.env), inviteId)),
+			]);
+		}
+		return;
 	} else if (action === "sign-in/username" || action === "sign-in/email") {
 		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
 		const given = field(action === "sign-in/username" ? "username" : "email");
@@ -288,7 +361,125 @@ app.get("/api/me", async (c) => {
 });
 
 /** What the sign-in pages need to know about this server, e.g. whether reset emails actually go out. */
-app.get("/api/config", (c) => c.json({ emailDelivery: emailConfigured(c.env), verificationRequired: verificationRequired(c.env) }));
+app.get("/api/config", async (c) =>
+	c.json({ emailDelivery: emailConfigured(c.env), verificationRequired: verificationRequired(c.env), signUps: await signUpState(c.env), turnstileSiteKey: turnstileSiteKey(c.env) }),
+);
+
+/**
+ * Whether `maxAccounts` people's accounts exist. Every server-rendered page asks (through /api/config),
+ * so the answer is kept a minute per isolate, for good once it's yes (accounts aren't deleted, and the
+ * limit only changes with a deploy), and dropped when this isolate makes an account. `fresh` skips the
+ * cached "no" (sign-up itself must not go past the limit on a stale answer).
+ */
+let accountCount: { at: number; full: boolean } | null = null;
+
+async function accountsFull(env: Env, { fresh = false } = {}): Promise<boolean> {
+	if (accountCount && (accountCount.full || (!fresh && Date.now() - accountCount.at < 60_000))) return accountCount.full;
+	await ensureSchema(db(env));
+	accountCount = { at: Date.now(), full: (await countAccounts(db(env))) >= policy(env).maxAccounts };
+	return accountCount.full;
+}
+
+function forgetAccountCount() {
+	if (!accountCount?.full) accountCount = null;
+}
+
+/** How sign-up works right now: "waitlist" is open sign-up that has reached `maxAccounts`. */
+async function signUpState(env: Env): Promise<"open" | "invite" | "waitlist" | "closed"> {
+	const p = policy(env);
+	if (p.signUps !== "open") return p.signUps;
+	return (await accountsFull(env)) ? "waitlist" : "open";
+}
+
+// The waitlist, for people who can't sign up yet. It answers the same whether or not the address was
+// already on it, so it can't be used to look addresses up.
+app.post("/api/waitlist", async (c) => {
+	const p = policy(c.env);
+	const state = await signUpState(c.env);
+	if (state === "closed") throw new HttpError(403, "SIGN_UPS_CLOSED", "maggot isn't taking new accounts right now");
+	if (state === "open") throw new HttpError(409, "SIGN_UPS_OPEN", "Sign-ups are open; create an account instead");
+	const input = await body<{ email?: unknown; note?: unknown; turnstileToken?: unknown } | null>(c);
+	const email = typeof input?.email === "string" ? input.email.trim().toLowerCase() : "";
+	if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "INVALID_INPUT", "Give a valid email address");
+	const note = typeof input?.note === "string" ? input.note.trim().slice(0, 500) : "";
+	// The limit is checked before the bot check's network call, and taken after it.
+	const address = `ip:${clientIp(c.req.raw)}`;
+	await checkLimit(c.env, address, rules.email(p), "Too many waitlist requests from your network");
+	await verifyTurnstile(c.env, input?.turnstileToken, "waitlist", clientIp(c.req.raw));
+	await limit(c.env, address, rules.email(p), "Too many waitlist requests from your network");
+	await ensureSchema(db(c.env));
+	await joinWaitlist(db(c.env), email, note);
+	return c.json({ joined: true }, 202);
+});
+
+/** A whole number field from `min` to `max`, or `fallback` when it's missing. */
+function wholeNumber(value: unknown, fallback: number, min: number, max: number, name: string): number {
+	if (value === undefined || value === null) return fallback;
+	if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+		throw new HttpError(400, "INVALID_INPUT", `${name} must be a whole number from ${min} to ${max}`);
+	}
+	return value;
+}
+
+// Sign-up invite codes (MAGGOT_POLICY.signUps "invite"). The code is returned once; only its hash is kept.
+app.post("/api/admin/invites", async (c) => {
+	requireAdmin(c);
+	const input = (await body<{ note?: unknown; uses?: unknown; days?: unknown } | null>(c)) ?? {};
+	const uses = wholeNumber(input.uses, 1, 1, 100, "uses");
+	const days = wholeNumber(input.days, 14, 1, 90, "days");
+	await ensureSchema(db(c.env));
+	const { code, info } = await createInvite(db(c.env), { note: typeof input.note === "string" ? input.note.trim().slice(0, 200) : "", uses, days });
+	return c.json({ code, url: `${origin(c)}/signup?invite=${code}`, invite: info }, 201);
+});
+
+app.get("/api/admin/waitlist", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	return c.json({ waitlist: await listWaitlist(db(c.env), c.req.query("pending") !== undefined) });
+});
+
+// Sends someone on the waitlist a one-use invite (by email when this server can send it; the link is
+// returned either way, to pass on by hand).
+app.post("/api/admin/waitlist/:id/invite", async (c) => {
+	requireAdmin(c);
+	const input = (await c.req.json().catch(() => null)) as { days?: unknown } | null;
+	const days = wholeNumber(input?.days, 14, 1, 90, "days");
+	await ensureSchema(db(c.env));
+	const entry = await getWaitlistEntry(db(c.env), c.req.param("id"));
+	if (!entry) throw new HttpError(404, "NOT_FOUND", "No such waitlist entry");
+	// A second invite would leave the first one working too; revoke that (DELETE /api/admin/invites/:id) and remove the entry instead.
+	if (entry.invitedAt) throw new HttpError(409, "ALREADY_INVITED", `${entry.email} was already sent an invite on ${entry.invitedAt.slice(0, 10)}`);
+	const { code, info } = await createInvite(db(c.env), { note: `waitlist: ${entry.email}`, uses: 1, days });
+	await markWaitlistInvited(db(c.env), entry.id, info.id);
+	const url = `${origin(c)}/signup?invite=${code}`;
+	let emailed = false;
+	try {
+		emailed = await sendMail(c.env, { to: entry.email, ...inviteEmail(url, days) });
+	} catch (err) {
+		console.error("[maggot] sending a waitlist invite failed; pass the link on by hand", err);
+	}
+	return c.json({ code, url, emailed, invite: info }, 201);
+});
+
+app.delete("/api/admin/waitlist/:id", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	if (!(await removeFromWaitlist(db(c.env), c.req.param("id")))) throw new HttpError(404, "NOT_FOUND", "No such waitlist entry");
+	return c.json({ deleted: true });
+});
+
+app.get("/api/admin/invites", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	return c.json({ invites: await listInvites(db(c.env)) });
+});
+
+app.delete("/api/admin/invites/:id", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	if (!(await revokeInvite(db(c.env), c.req.param("id")))) throw new HttpError(404, "NOT_FOUND", "No such invite");
+	return c.json({ deleted: true });
+});
 
 // Without email delivery, an admin can look a user up and hand them a one-time link: a password reset
 // (valid an hour) or an email verification (valid a day).

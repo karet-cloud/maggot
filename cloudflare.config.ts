@@ -61,6 +61,11 @@ export default defineConfig(({ mode }) => {
 					: {
 							ARTIFACTS: bindings.artifacts({ namespace: "maggot" }),
 							MAGGOT_API_KEY: bindings.secret(),
+							// Turnstile on sign-up and the waitlist (src/turnstile.ts): the widget's site key at deploy
+							// time, and its secret key as a secret. Without the site key the check is off.
+							...(process.env.MAGGOT_TURNSTILE_SITE_KEY
+								? { TURNSTILE_SITE_KEY: bindings.text(process.env.MAGGOT_TURNSTILE_SITE_KEY), TURNSTILE_SECRET_KEY: bindings.secret() }
+								: {}),
 							// Password reset emails, once a domain is set up for Cloudflare Email Sending. Set
 							// MAGGOT_EMAIL_FROM (for example noreply@maggot.dev) at deploy time to turn them on.
 							...(process.env.MAGGOT_EMAIL_FROM
