@@ -1,5 +1,6 @@
 // Who is calling: a signed-in user (Better Auth session cookie), a user's personal access token, the
 // admin API key (agents, scripts, tests), or nobody. Repository permissions are decided from that.
+import { waitUntil } from "cloudflare:workers";
 import { betterAuth } from "better-auth";
 import { username } from "better-auth/plugins/username";
 import type { Viewer } from "./api.ts";
@@ -45,9 +46,7 @@ function createAuth(env: Env, origin: string, secret: string) {
 				const capture = capturing.get(`reset:${user.email.toLowerCase()}`);
 				if (capture) return capture(url);
 				const name = (user as { username?: string | null }).username ?? user.name;
-				const sent = await sendMail(env, { to: user.email, ...resetPasswordEmail(name, url) });
-				// Without email delivery the link only reaches the server log (useful in local development).
-				if (!sent) console.log(`[maggot] password reset link for ${name}: ${url}`);
+				await deliver(env, "password reset", name, url, { to: user.email, ...resetPasswordEmail(name, url) });
 			},
 		},
 		emailVerification: {
@@ -59,16 +58,41 @@ function createAuth(env: Env, origin: string, secret: string) {
 				const capture = capturing.get(`verify:${user.email.toLowerCase()}`);
 				if (capture) return capture(url);
 				const name = (user as { username?: string | null }).username ?? user.name;
-				const sent = await sendMail(env, { to: user.email, ...verifyEmail(name, url) });
-				if (!sent) console.log(`[maggot] email verification link for ${name}: ${url}`);
+				await deliver(env, "email verification", name, url, { to: user.email, ...verifyEmail(name, url) });
 			},
 		},
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
-		advanced: { cookiePrefix: "maggot" },
+		advanced: {
+			cookiePrefix: "maggot",
+			// Emails go out after the response (the request's waitUntil), so signing up or asking for a reset
+			// doesn't wait on delivery, and a reset for an existing account takes as long as one for none.
+			// Links an admin is issuing are still captured, synchronously, before anything is sent.
+			backgroundTasks: { handler: (promise) => waitUntil(promise) },
+			// ensureSchema creates these tables; Better Auth's own check would introspect every table in
+			// the database (dozens of D1 queries) on each isolate's first auth request.
+			database: { validateSchema: false },
+		},
 		// Repository URLs start with the username, so it can't change (renames would have to move them all).
 		// Reserved names are refused at sign-up (src/index.ts), since this validator checks sign-ins too.
 		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: usernameShape, immutableUsername: true })],
 	});
+}
+
+/**
+ * Sends an account email. It runs after the response (see backgroundTasks), so nothing retries it: a
+ * failure is logged, without the link, and the person asks again (Resend on the verification banner,
+ * or Forgot password). Without email delivery the link only reaches the server log (useful in local
+ * development).
+ */
+async function deliver(env: Env, what: string, name: string, url: string, message: Parameters<typeof sendMail>[1]): Promise<void> {
+	let sent: boolean;
+	try {
+		sent = await sendMail(env, message);
+	} catch (err) {
+		console.error(`[maggot] sending the ${what} email to ${name} failed; they can ask for another`, err);
+		return;
+	}
+	if (!sent) console.log(`[maggot] ${what} link for ${name}: ${url}`);
 }
 
 /** One Better Auth instance per origin per isolate (the base URL is the request's own origin). */

@@ -2,7 +2,8 @@
 // concurrent-fork failures simulated. Slower than the unit tests: npm run test:e2e
 import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, readdir, rm, writeFile } from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { createHmac } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
@@ -1961,4 +1962,106 @@ test("reserved names can't be taken through displayUsername, and re-adding a col
 	assert.ok((await put({ permission: "admin" })).ok);
 	assert.ok((await put({})).ok);
 	assert.equal(await permission(), "admin");
+});
+
+test("a branch rule changed while a merge is under way waits for it, then holds for the next merge", async () => {
+	const ada = await newUser("rla");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	assert.equal((await as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "rules", visibility: "public", readme: true }) })).status, 201);
+	const repo = `/repos/${ada.username}/rules`;
+	const exec = promisify(execFile);
+	const remote = new URL(`${api}/${ada.username}/rules.git`);
+	remote.username = ada.username;
+	remote.password = ada.token;
+	const dir = join(root, "rules");
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", remote.toString(), dir]);
+	const pulls: number[] = [];
+	for (const branch of ["one", "two"]) {
+		await git("checkout", "-q", "-B", branch, "origin/master");
+		await writeFile(join(dir, `${branch}.txt`), `${branch}\n`);
+		await git("add", "-A");
+		await git("commit", "-q", "-m", `Add ${branch}`);
+		await git("push", "-q", "origin", branch);
+		const opened = await as(ada)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: branch, base: "master", head: branch }) });
+		assert.equal(opened.status, 201, await opened.clone().text());
+		pulls.push(((await opened.json()) as { pull: { number: number } }).pull.number);
+	}
+
+	// Slow fetches hold the first merge in the coordinator's merge slot while an admin requires reviews.
+	await control("POST", "/simulate", { uploadPackDelayMs: 2_000 });
+	try {
+		const merging = as(ada)(`${repo}/pulls/${pulls[0]}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+		await until(async () => (await control<{ uploadPacks: number }>("GET", "/stats")).uploadPacks > 0 ? true : undefined);
+		const ruling = as(ada)(`${repo}/protection`, { method: "PUT", body: JSON.stringify({ pattern: "master", requireReview: true }) });
+		const [merged, ruled] = await Promise.all([merging, ruling]);
+		// The merge checked the rules it started under and pushed under them; the change waited its turn.
+		assert.equal(merged.status, 200, await merged.clone().text());
+		assert.equal(ruled.status, 200, await ruled.clone().text());
+	} finally {
+		await control("POST", "/simulate", {});
+	}
+	const refused = await as(ada)(`${repo}/pulls/${pulls[1]}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(refused.status, 403);
+	assert.equal(((await refused.json()) as { error: { code: string } }).error.code, "REVIEW_REQUIRED");
+});
+
+test("pull descriptions close issues using the coordinator's default branch when D1 is stale", async () => {
+	const ada = await newUser("dfa");
+	const as = (path: string, init: RequestInit = {}) => fetch(`${api}/api${path}`, {
+		...init, headers: { "content-type": "application/json", authorization: `Bearer ${ada.token}`, ...init.headers },
+	});
+	const created = await as("/repos", { method: "POST", body: JSON.stringify({ name: "defaults", visibility: "public", readme: true }) });
+	assert.equal(created.status, 201, await created.clone().text());
+	await created.arrayBuffer();
+	const repo = `/repos/${ada.username}/defaults`;
+	const exec = promisify(execFile);
+	const remote = new URL(`${api}/${ada.username}/defaults.git`);
+	remote.username = ada.username;
+	remote.password = ada.token;
+	const dir = join(root, "defaults");
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", remote.toString(), dir]);
+	await git("push", "-q", "origin", "master:release");
+	const cases: { base: string; issue: number; pull: number }[] = [];
+	for (const base of ["release", "master"]) {
+		const issueResponse = await as(`${repo}/issues`, { method: "POST", body: JSON.stringify({ title: `Fix ${base}` }) });
+		assert.equal(issueResponse.status, 201);
+		const { issue } = await issueResponse.json() as { issue: { number: number } };
+		const branch = `fix-${base}`;
+		await git("checkout", "-q", "-B", branch, "origin/master");
+		await writeFile(join(dir, `${branch}.txt`), `${base}\n`);
+		await git("add", "-A");
+		await git("commit", "-q", "-m", `Add ${branch}`);
+		await git("push", "-q", "origin", branch);
+		const opened = await as(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: `Update ${base}`, body: `Fixes #${issue.number}`, base, head: branch }) });
+		assert.equal(opened.status, 201, await opened.clone().text());
+		const { pull } = await opened.json() as { pull: { number: number } };
+		cases.push({ base, issue: issue.number, pull: pull.number });
+	}
+
+	// Only this test worker's temporary D1 is changed. This branch has no default-change API yet:
+	// stand in for an old D1 copy while the coordinator's authoritative default is master.
+	const files = await readdir(join(root, "state"), { recursive: true, withFileTypes: true });
+	let changed = 0;
+	for (const file of files.filter((f) => f.isFile() && f.name.endsWith(".sqlite"))) {
+		const db = new DatabaseSync(join(file.parentPath, file.name));
+		try {
+			if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'repo'").get()) {
+				changed += Number(db.prepare('UPDATE "repo" SET "defaultBranch" = ? WHERE "owner" = ? AND "name" = ?').run("release", ada.username, "defaults").changes);
+			}
+		} finally {
+			db.close();
+		}
+	}
+	assert.equal(changed, 1, "D1 now disagrees with the coordinator's default branch");
+	for (const item of cases) {
+		const merged = await as(`${repo}/pulls/${item.pull}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+		assert.equal(merged.status, 200, await merged.clone().text());
+	}
+	const actualDefault = cases.find((item) => item.base === "master")!;
+	await until(async () => ((await (await as(`${repo}/issues/${actualDefault.issue}`)).json()) as { issue: { state: string } }).issue.state === "closed" ? true : undefined);
+	const oldDefault = cases.find((item) => item.base === "release")!;
+	assert.equal(((await (await as(`${repo}/issues/${oldDefault.issue}`)).json()) as { issue: { state: string } }).issue.state, "open");
 });

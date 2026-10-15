@@ -762,9 +762,8 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 		await db(c.env).prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(created.defaultBranch, row.id).run();
 		row.defaultBranch = created.defaultBranch;
 	}
-	await projects(c.env)
-		.getByName(row.id)
-		.setRepository(repositoryRef(c, row));
+	// Independent of each other, so one round trip instead of two.
+	const [, listing] = await Promise.all([projects(c.env).getByName(row.id).setRepository(repositoryRef(c, row)), getListing(db(c.env), row.id, user.id)]);
 	if (source && source.ownerId !== owner.id) {
 		c.executionCtx.waitUntil(
 			notifyUser(db(c.env), {
@@ -778,8 +777,8 @@ async function createRepo(c: Context<App>, input: NewRepo, source?: RepoRow) {
 			}),
 		);
 	}
-	const listing = await getListing(db(c.env), row.id, user.id);
-	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true, owner.id === user.id || (await roleIn(db(c.env), owner.id, user.id)) === "owner"), project: created }, 201);
+	// newOwner already looked up the caller's role in an organization owner.
+	return c.json({ repo: toRepoInfo(listing ?? row, origin(c), true, user.id, true, owner.id === user.id || owner.role === "owner"), project: created }, 201);
 }
 
 /** How webhook payloads name a repository. */
@@ -1853,10 +1852,6 @@ async function liveHead(c: Context<App>, pull: PullRow): Promise<string | null> 
 	return pull.headRepoId;
 }
 
-async function reviewRequired(c: Context<App>, base: string): Promise<boolean> {
-	return protectionFor(await project(c).getBranchRules(), base).requireReview;
-}
-
 /** What branch rules on `base` want before a pull request merges into it. */
 async function mergeRequirements(c: Context<App>, base: string): Promise<{ review: boolean; checks: boolean }> {
 	const rule = protectionFor(await project(c).getBranchRules(), base);
@@ -2115,7 +2110,8 @@ repo.post("/pulls/:number/merge", async (c) => {
 	// Whoever merges has to be able to see what they're merging.
 	const headRepo = await liveHead(c, pull);
 	let expectedHead = input.expectedHead;
-	if (await reviewRequired(c, pull.baseBranch)) {
+	const required = await mergeRequirements(c, pull.baseBranch);
+	if (required.review) {
 		// The approval has to be of the commit that merges, not of an earlier one.
 		const head = expectedHead ?? (await project(c).pullCompare(pull.baseBranch, headRepo, pull.headBranch)).head;
 		if (pull.decision !== "approved" || !(await approvedAt(db(c.env), pull, head))) {
@@ -2123,11 +2119,14 @@ repo.post("/pulls/:number/merge", async (c) => {
 		}
 		expectedHead = head;
 	}
-	// Actions have to have passed on the very commit that merges.
-	const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo, branch: pull.headBranch, sha: expectedHead });
-	if (checks.required) {
-		if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${pull.baseBranch} requires Actions to pass. ${checks.reason}`);
-		expectedHead = checks.head;
+	// Actions have to have passed on the very commit that merges. Only asked when the branch wants them:
+	// judging the checks reads the base's workflow files from storage.
+	if (required.checks) {
+		const checks = await project(c).ciPullChecks({ number: pull.number, base: pull.baseBranch, headRepo, branch: pull.headBranch, sha: expectedHead });
+		if (checks.required) {
+			if (checks.reason) throw new HttpError(403, "CHECKS_REQUIRED", `${pull.baseBranch} requires Actions to pass. ${checks.reason}`);
+			expectedHead = checks.head;
+		}
 	}
 	const from = pull.headOwner && headRepo ? `${pull.headOwner}:${pull.headBranch}` : pull.headBranch;
 	const message = method === "squash" ? `${pull.title} (#${pull.number})\n\n${pull.body}`.trim() : `Merge pull request #${pull.number} from ${from}\n\n${pull.title}`;
@@ -2139,12 +2138,15 @@ repo.post("/pulls/:number/merge", async (c) => {
 		message,
 		author: { name: user.username, email: `${user.username}@users.noreply.${new URL(c.req.url).hostname}` },
 		expectedHead,
+		// The coordinator checks the branch's rules again right before pushing: they may change while this waits its turn.
+		pull: pull.number,
 	});
 	await markPullMerged(db(c.env), pull, user.id, result.commit);
 	closedPull(c, row, pull.number, true);
 	// "Fixes #n" in the description closes those issues too, as GitHub does.
 	const fixes = [...new Set([...`${pull.title}\n${pull.body}`.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)].map((m) => Number(m[1])))];
-	if (fixes.length > 0 && pull.baseBranch === (await project(c).getProject()).defaultBranch) {
+	// Whether the merge landed on the default branch, as the coordinator saw it when it pushed (not D1's copy, which can be changed meanwhile).
+	if (fixes.length > 0 && result.onDefaultBranch) {
 		c.executionCtx.waitUntil(closeIssuesByCommits(c.env, row.id, fixes.filter((n) => n !== pull.number).slice(0, 50).map((n) => [n, result.commit])).catch(() => []));
 	}
 	announcePull(c, row, pull, "pull.merged", user, { method, commit: result.commit });

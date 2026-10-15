@@ -19,7 +19,8 @@ const tokensQuery = queryOptions({ queryKey: keys.tokens, queryFn: api.tokens })
 function Tokens() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
-	const tokens = useQuery({ ...tokensQuery, enabled: Boolean(viewer.data) });
+	// Asked alongside the viewer rather than after it (only skipped once we know nobody's signed in).
+	const tokens = useQuery({ ...tokensQuery, enabled: viewer.data !== null });
 	const [name, setName] = useState("");
 	const create = useMutation({
 		mutationFn: () => api.createToken(name.trim()),

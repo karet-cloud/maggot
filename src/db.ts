@@ -1,5 +1,5 @@
 // D1: Better Auth's tables (users, sessions, accounts), repository records and personal access tokens.
-// The schema is created idempotently on first use in each isolate, so deploys need no migration step.
+// The schema is created idempotently when it changes (see ensureSchema), so deploys need no migration step.
 import type {
 	Issue,
 	IssueComment,
@@ -96,7 +96,7 @@ const COLUMNS = [
 /** Indexes on added columns, created once the columns exist. */
 const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`];
 
-const ready = new WeakMap<D1Database, Promise<void>>();
+const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
 
 export function db(env: Env): D1Database {
 	const database = (env as { DB?: D1Database }).DB;
@@ -104,22 +104,83 @@ export function db(env: Env): D1Database {
 	return database;
 }
 
-/** Creates any missing tables. Cheap after the first call in an isolate. */
-export function ensureSchema(database: D1Database): Promise<void> {
-	let pending = ready.get(database);
-	if (!pending) {
-		pending = database
-			.batch([...AUTH_SCHEMA, ...APP_SCHEMA].map((sql) => database.prepare(sql)))
-			.then(() => Promise.all(COLUMNS.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn))))
-			.then(() => database.batch(LATE_INDEXES.map((sql) => database.prepare(sql))))
-			.then(() => undefined)
-			.catch((err) => {
-				ready.delete(database);
-				throw err;
-			});
-		ready.set(database, pending);
+export interface SchemaStatements {
+	/** Tables and indexes, created idempotently in one batch. */
+	tables: string[];
+	/** Columns added later; adding one that exists fails harmlessly. */
+	columns: string[];
+	/** Indexes on added columns, created once the columns exist. */
+	lateIndexes: string[];
+}
+
+/** How long a request waits on another request's schema check before running one itself. */
+const SHARED_CHECK_WAIT_MS = 3_000;
+
+/**
+ * An `ensureSchema` for these statements. The database records which schema it has (a fingerprint of
+ * the statements), so a deploy that changes any of them runs them once, and every other cold start
+ * reads one row instead of rerunning them all (each a D1 write that queues behind everyone else's).
+ *
+ * Free after the first success in an isolate. Until then concurrent requests share one check, so a
+ * deploy doesn't set every cold request running the DDL, but each waits on it only briefly before
+ * checking for itself: in Workers, a promise whose I/O belongs to a request that was cancelled
+ * meanwhile may never settle, and every request waiting on it would hang with it.
+ */
+export function schemaEnsurer(statements: SchemaStatements, waitMs = SHARED_CHECK_WAIT_MS): (database: D1Database) => Promise<void> {
+	const version = fnv1a([...statements.tables, ...statements.columns, ...statements.lateIndexes].join("\n"));
+	const migrated = new WeakSet<D1Database>();
+	const inflight = new WeakMap<D1Database, Promise<void>>();
+
+	async function check(database: D1Database): Promise<void> {
+		const current = await database
+			.prepare(`select "version" from "maggot_schema" where "id" = 1`)
+			.first<{ version: string }>()
+			.catch(() => null);
+		if (current?.version !== version) await migrate(database);
+		migrated.add(database);
 	}
-	return pending;
+
+	async function migrate(database: D1Database): Promise<void> {
+		await database.batch([...statements.tables, VERSION_TABLE].map((sql) => database.prepare(sql)));
+		await Promise.all(statements.columns.map((sql) => database.prepare(sql).run().catch(ignoreDuplicateColumn)));
+		// The version is recorded last, with the late indexes: a migration that fails partway runs again.
+		await database.batch([
+			...statements.lateIndexes.map((sql) => database.prepare(sql)),
+			database.prepare(`insert into "maggot_schema" ("id", "version") values (1, ?) on conflict ("id") do update set "version" = excluded."version"`).bind(version),
+		]);
+	}
+
+	return async function ensureSchema(database: D1Database): Promise<void> {
+		if (migrated.has(database)) return;
+		const shared = inflight.get(database);
+		if (shared) {
+			let timer: ReturnType<typeof setTimeout> | null = null;
+			await Promise.race([shared.catch(() => {}), new Promise<void>((resolve) => (timer = setTimeout(resolve, waitMs)))]);
+			if (timer !== null) clearTimeout(timer);
+			if (migrated.has(database)) return;
+		}
+		const own = check(database);
+		if (!inflight.has(database)) {
+			inflight.set(database, own);
+			own.catch(() => {}).finally(() => {
+				if (inflight.get(database) === own) inflight.delete(database);
+			});
+		}
+		await own;
+	};
+}
+
+/** Creates any missing tables (see schemaEnsurer). */
+export const ensureSchema = schemaEnsurer({ tables: [...AUTH_SCHEMA, ...APP_SCHEMA], columns: COLUMNS, lateIndexes: LATE_INDEXES });
+
+/** FNV-1a, as hex: a cheap, stable fingerprint of the schema statements. */
+function fnv1a(text: string): string {
+	let hash = 0x811c9dc5;
+	for (let i = 0; i < text.length; i++) {
+		hash ^= text.charCodeAt(i);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function ignoreDuplicateColumn(err: unknown) {

@@ -20,18 +20,33 @@ export type MergeOutcome =
 
 const DIR = "/repo";
 
+/**
+ * How many commits of a branch a new workspace fetches, and how far `merge` deepens the fetch when the
+ * merge base isn't within that (then the whole history). A merge only needs history back to the merge
+ * base, and a full clone of a long-lived repository in memory takes seconds of CPU.
+ */
+const FETCH_DEPTH = 50;
+const DEEPER = [1000];
+/** git's "unshallow": deeper than any history. */
+const FULL_DEPTH = 2147483647;
+
 function onAuth(token: string) {
 	return () => ({ username: "x", password: token.split("?expires=")[0] });
 }
 
 /**
  * A bare, in-memory clone of a project's default branch. The coordinator keeps one alive
- * between merges, so each merge only fetches new objects instead of recloning.
+ * between merges, so each merge only fetches new objects instead of recloning. It starts shallow
+ * (the last FETCH_DEPTH commits) and is deepened only as far as a merge needs.
  */
 export class Workspace {
-	private readonly fs = new MemoryFS();
-	private readonly cache = {};
+	private fs = new MemoryFS();
+	private cache = {};
 	private initialized = false;
+	/** What each remote was last fetched for, so `merge` can deepen them. */
+	private readonly fetched = new Map<string, { remote: RemoteAccess; ref: string }>();
+	/** The server doesn't do shallow fetches; everything is fetched in full. */
+	private fullOnly = false;
 	readonly branch: string;
 	private readonly committer: Identity;
 	private readonly http: HttpClient;
@@ -48,11 +63,13 @@ export class Workspace {
 
 	/** Fetches the latest default branch and points the local branch at it. Returns its oid. */
 	async syncBase(remote: RemoteAccess): Promise<string> {
-		if (!this.initialized) {
+		const fresh = !this.initialized;
+		if (fresh) {
 			await git.init({ fs: this.fs, dir: DIR, defaultBranch: this.branch });
 			this.initialized = true;
 		}
-		const fetched = await this.fetchRemote("base", remote, this.branch);
+		// Later syncs fetch only what's new since the last one.
+		const fetched = await this.fetchRemote("base", remote, this.branch, fresh ? FETCH_DEPTH : undefined);
 		if (!fetched) throw new Error(`Base branch ${this.branch} does not exist`);
 		await git.writeRef({ ...this.base, ref: `refs/heads/${this.branch}`, value: fetched, force: true });
 		return fetched;
@@ -60,24 +77,138 @@ export class Workspace {
 
 	/** Fetches a task fork's branch. Returns its head oid. */
 	async fetchTask(remote: RemoteAccess, branch: string): Promise<string> {
-		const fetched = await this.fetchRemote("task", remote, branch);
+		// In a shallow workspace, a fetch without a depth could bring in the branch's whole history.
+		const shallow = (await this.shallowCommits()).size > 0;
+		const fetched = await this.fetchRemote("task", remote, branch, shallow ? FETCH_DEPTH : undefined);
 		if (!fetched) throw new Error(`Task branch ${branch} does not exist`);
 		return fetched;
 	}
 
-	private async fetchRemote(name: string, remote: RemoteAccess, ref: string): Promise<string | null> {
+	private async fetchRemote(name: string, remote: RemoteAccess, ref: string, depth?: number, hintHaves = true): Promise<string | null> {
+		this.fetched.set(name, { remote, ref });
 		// Named remotes need a fetch refspec in config; `force` re-points "task" at each new fork.
 		await git.addRemote({ ...this.base, remote: name, url: remote.url, force: true });
-		const fetched = await git.fetch({
-			...this.base,
-			http: this.http,
-			remote: name,
-			ref,
-			singleBranch: true,
-			tags: false,
-			onAuth: onAuth(remote.token),
-		});
-		return fetched.fetchHead ?? null;
+		// A fetch tells the server which commits we have by the local branch named like `ref`. For a
+		// branch named differently from the base there is none, and the server would send the branch's
+		// whole history; a local branch of that name at the base's head, for the fetch only, avoids that.
+		const hint = ref === this.branch || !hintHaves ? null : `refs/heads/${ref}`;
+		if (hint) {
+			const head = await git.resolveRef({ ...this.base, ref: this.branch }).catch(() => null);
+			if (head) await git.writeRef({ ...this.base, ref: hint, value: head, force: true }).catch(() => {});
+		}
+		const fetch = (depth: number | undefined) =>
+			git.fetch({
+				...this.base,
+				http: this.http,
+				remote: name,
+				ref,
+				singleBranch: true,
+				tags: false,
+				...(depth === undefined ? {} : { depth }),
+				onAuth: onAuth(remote.token),
+			});
+		try {
+			let fetched: Awaited<ReturnType<typeof git.fetch>>;
+			try {
+				fetched = await fetch(this.fullOnly ? undefined : depth);
+			} catch (err) {
+				// A server without shallow fetches gets full ones, as before.
+				if (depth === undefined || this.fullOnly || (err as { code?: string }).code !== "RemoteCapabilityError") throw err;
+				this.fullOnly = true;
+				fetched = await fetch(undefined);
+			}
+			return fetched.fetchHead ?? null;
+		} finally {
+			if (hint) await git.deleteRef({ ...this.base, ref: hint }).catch(() => {});
+		}
+	}
+
+	/** Commits whose parents weren't fetched. */
+	private async shallowCommits(): Promise<Set<string>> {
+		const text = await this.fs.promises.readFile(`${DIR}/.git/shallow`, "utf8").catch(() => "");
+		return new Set(String(text).split("\n").filter(Boolean));
+	}
+
+	/**
+	 * Fetches more history until everything between the two commits and their merge bases is here, so
+	 * the merge (and the push after it) sees the same merge bases a full clone would. Each step fetches
+	 * deeper; the last fetches everything. Throws (a plain Error, so callers discard the workspace) if
+	 * even that isn't enough: merging on part of the history could pick the wrong merge base, report
+	 * conflicts that aren't there, squash against the wrong base, or push without commits it needs.
+	 */
+	private async deepenFor(ours: string, theirs: string): Promise<void> {
+		if (await this.historyComplete(ours, theirs)) return;
+		if (!this.fullOnly) {
+			for (const depth of [...DEEPER, FULL_DEPTH]) {
+				for (const [name, { remote, ref }] of this.fetched) await this.fetchRemote(name, remote, ref, depth);
+				// The server stopped taking shallow fetches; plain ones can't deepen what's cut off.
+				if (this.fullOnly) break;
+				if (await this.historyComplete(ours, theirs)) return;
+			}
+		}
+		if (this.fullOnly && (await this.shallowCommits()).size > 0) {
+			await this.rebuildFull(ours, theirs);
+			if (await this.historyComplete(ours, theirs)) return;
+		}
+		throw new Error(`The history between ${ours} and ${theirs} is still incomplete after fetching all of it`);
+	}
+
+	/**
+	 * Starts over with a full clone of every remote fetched so far, with no shallow history and no
+	 * hints: for a shallow workspace whose server no longer takes shallow fetches. The local branch
+	 * stays at `ours`.
+	 */
+	private async rebuildFull(ours: string, theirs: string): Promise<void> {
+		const remotes = [...this.fetched];
+		this.fs = new MemoryFS();
+		this.cache = {};
+		this.fetched.clear();
+		await git.init({ fs: this.fs, dir: DIR, defaultBranch: this.branch });
+		for (const [name, { remote, ref }] of remotes) await this.fetchRemote(name, remote, ref, undefined, false);
+		// The branches may have moved on meanwhile; the merge is of exactly these two commits.
+		for (const oid of [ours, theirs]) {
+			await git.readCommit({ ...this.base, oid }).catch(() => {
+				throw new Error(`${oid} is no longer on its branch; start the merge again`);
+			});
+		}
+		await git.writeRef({ ...this.base, ref: `refs/heads/${this.branch}`, value: ours, force: true });
+	}
+
+	/**
+	 * Whether the merge bases found in what's here are the real ones. They are when nothing either
+	 * side reaches, short of the history the merge bases share, stops at a shallow commit: any better
+	 * merge base, and any commit the push has to send, lies in that part of the graph.
+	 */
+	private async historyComplete(ours: string, theirs: string): Promise<boolean> {
+		const shallow = await this.shallowCommits();
+		if (shallow.size === 0) return true;
+		try {
+			const bases = await git.findMergeBase({ ...this.base, oids: [ours, theirs] });
+			if (bases.length === 0) return false;
+			const shared = await this.reachable(bases, shallow, new Set());
+			const above = await this.reachable([ours, theirs], shallow, shared);
+			return ![...above].some((oid) => shallow.has(oid));
+		} catch (err) {
+			// A commit whose parent isn't here though it isn't marked shallow: a plain fetch into a shallow
+			// workspace assumed history it doesn't have.
+			if ((err as { code?: string }).code === "NotFoundError") return false;
+			throw err;
+		}
+	}
+
+	/** Commits reachable from `starts` without passing `stop`, as far as the fetched history goes. */
+	private async reachable(starts: string[], shallow: Set<string>, stop: Set<string>): Promise<Set<string>> {
+		const seen = new Set<string>();
+		const queue = starts.filter((oid) => !stop.has(oid));
+		while (queue.length > 0) {
+			const oid = queue.pop() as string;
+			if (seen.has(oid)) continue;
+			seen.add(oid);
+			if (shallow.has(oid)) continue;
+			const { commit } = await git.readCommit({ ...this.base, oid });
+			for (const parent of commit.parent) if (!seen.has(parent) && !stop.has(parent)) queue.push(parent);
+		}
+		return seen;
 	}
 
 	/** Merges `theirs` into the local default branch without touching the remote. */
@@ -88,6 +219,7 @@ export class Workspace {
 	 */
 	async merge(theirs: string, message: string, author: Identity, method: "merge" | "merge-commit" | "squash" = "merge"): Promise<MergeOutcome> {
 		const ours = await git.resolveRef({ ...this.base, ref: this.branch });
+		await this.deepenFor(ours, theirs);
 		const changedFiles = await this.changedFiles(ours, theirs);
 		try {
 			const result = await git.merge({

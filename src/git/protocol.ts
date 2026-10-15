@@ -2,6 +2,11 @@
 import type { RemoteAccess } from "./workspace.ts";
 
 const ZERO = "0".repeat(40);
+/**
+ * A ref listing is small; one that takes longer than this has hung. Merges list refs while holding the
+ * repository's merge slot, so an unbounded wait would stall every merge after it.
+ */
+const LIST_REFS_TIMEOUT_MS = 30_000;
 
 function headers(remote: RemoteAccess, extra: Record<string, string> = {}) {
 	// No token: a public repository elsewhere (an action on GitHub), asked anonymously.
@@ -31,7 +36,7 @@ const INCOMING_BRANCHES = "maggot-incoming/";
  * `incoming` includes the holding branches of pushes being checked.
  */
 export async function listRefs(remote: RemoteAccess, incoming = false): Promise<{ branches: Map<string, string>; tags: Map<string, TagRef> }> {
-	const res = await fetch(`${remote.url}/info/refs?service=git-upload-pack`, { headers: headers(remote) });
+	const res = await fetch(`${remote.url}/info/refs?service=git-upload-pack`, { headers: headers(remote), signal: AbortSignal.timeout(LIST_REFS_TIMEOUT_MS) });
 	if (!res.ok) throw new Error(`Listing refs failed: HTTP ${res.status}`);
 	const branches = new Map<string, string>();
 	const tags = new Map<string, TagRef>();
