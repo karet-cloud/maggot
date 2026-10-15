@@ -20,8 +20,9 @@ function SignUp() {
 				email: form.email.trim(),
 				password: form.password,
 			}),
-		onSuccess: async () => {
-			await queryClient.resetQueries();
+		onSuccess: () => {
+			// Everything cached was read signed out; drop it rather than wait for every query to refetch first.
+			queryClient.removeQueries();
 			void navigate({ to: "/new" });
 		},
 	});
@@ -32,7 +33,7 @@ function SignUp() {
 			onSubmit={() => signUp.mutate()}
 			busy={signUp.isPending}
 			error={signUp.error}
-			submit="Create account"
+			submit={signUp.isPending ? "Creating account…" : "Create account"}
 			footer={<>Already have an account? {authLink("/login", "Sign in")}</>}
 		>
 			<Field label="Username" hint="Lowercase letters, digits and single hyphens. It's in your repository URLs.">

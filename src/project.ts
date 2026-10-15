@@ -1612,6 +1612,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		};
 		const now = new Date().toISOString();
 		this.sql.exec("UPDATE releases SET name = ?, notes = ?, prerelease = ?, updated_at = ? WHERE id = ?", next.name, next.notes, next.prerelease, now, id);
+		this.emit("release.edited", null, { id, tag: row.tag, name: next.name, prerelease: next.prerelease });
 		return toRelease({ ...row, ...next, updated_at: now }, this.knownTags()[row.tag] ?? null);
 	}
 
@@ -1628,6 +1629,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			});
 		}
 		this.sql.exec("DELETE FROM releases WHERE id = ?", id);
+		this.emit("release.deleted", null, { id, tag: row.tag, name: row.name });
 	}
 
 	// ── Commit graph ─────────────────────────────────────────────────────────

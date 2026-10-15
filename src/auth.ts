@@ -6,24 +6,13 @@ import type { Viewer } from "./api.ts";
 import { db, ensureSchema, userForToken, type RepoRow } from "./db.ts";
 import { HttpError } from "./errors.ts";
 import { resetPasswordEmail, sendMail, verifyEmail } from "./mail.ts";
+import { usernameShape } from "./names.ts";
 import { verificationRequired } from "./policy.ts";
 
 export type Principal =
 	| { kind: "admin" }
 	| { kind: "user"; id: string; username: string; via: "session" | "token" | "ssh"; verified: boolean }
 	| { kind: "anonymous" };
-
-/** Usernames become URL segments, so app routes can't be taken. */
-const RESERVED = new Set([
-	"api", "assets", "login", "signup", "logout", "new", "settings", "explore", "p", "admin", "about", "help",
-	"_build", "_serverfn", "favicon.svg", "robots.txt", "static", "maggot", "forgot-password", "reset-password",
-	"verify-email", "search", "notifications", "stars", "dashboard", "parity", "transfers", "ssh", "orgs", "invitations", "organizations",
-]);
-const USERNAME = /^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/;
-
-export function validUsername(name: string): boolean {
-	return USERNAME.test(name) && !name.includes("--") && !RESERVED.has(name);
-}
 
 const instances = new Map<string, ReturnType<typeof createAuth>>();
 
@@ -77,7 +66,8 @@ function createAuth(env: Env, origin: string, secret: string) {
 		session: { expiresIn: 30 * 24 * 3600, updateAge: 24 * 3600 },
 		advanced: { cookiePrefix: "maggot" },
 		// Repository URLs start with the username, so it can't change (renames would have to move them all).
-		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: validUsername, immutableUsername: true })],
+		// Reserved names are refused at sign-up (src/index.ts), since this validator checks sign-ins too.
+		plugins: [username({ minUsernameLength: 2, maxUsernameLength: 39, usernameValidator: usernameShape, immutableUsername: true })],
 	});
 }
 

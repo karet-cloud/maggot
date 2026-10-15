@@ -24,6 +24,7 @@ import { Route as VerifyEmailRouteImport } from './routes/verify-email'
 import { Route as OwnerIndexRouteImport } from './routes/$owner.index'
 import { Route as OwnerRepoRouteImport } from './routes/$owner.$repo'
 import { Route as OrgsNewRouteImport } from './routes/orgs.new'
+import { Route as SettingsIndexRouteImport } from './routes/settings.index'
 import { Route as SettingsPasswordRouteImport } from './routes/settings.password'
 import { Route as SettingsSshRouteImport } from './routes/settings.ssh'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
@@ -128,6 +129,11 @@ const OwnerRepoRoute = OwnerRepoRouteImport.update({
 const OrgsNewRoute = OrgsNewRouteImport.update({
   id: '/orgs/new',
   path: '/orgs/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SettingsIndexRoute = SettingsIndexRouteImport.update({
+  id: '/settings/',
+  path: '/settings/',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsPasswordRoute = SettingsPasswordRouteImport.update({
@@ -304,6 +310,7 @@ export interface FileRoutesByFullPath {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
+  '/settings/': typeof SettingsIndexRoute
   '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
@@ -350,6 +357,7 @@ export interface FileRoutesByTo {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner': typeof OwnerIndexRoute
+  '/settings': typeof SettingsIndexRoute
   '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
@@ -398,6 +406,7 @@ export interface FileRoutesById {
   '/settings/ssh': typeof SettingsSshRoute
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
+  '/settings/': typeof SettingsIndexRoute
   '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
@@ -447,6 +456,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
+    | '/settings/'
     | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
@@ -493,6 +503,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner'
+    | '/settings'
     | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
@@ -540,6 +551,7 @@ export interface FileRouteTypes {
     | '/settings/ssh'
     | '/settings/tokens'
     | '/$owner/'
+    | '/settings/'
     | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
@@ -588,6 +600,7 @@ export interface RootRouteChildren {
   SettingsSshRoute: typeof SettingsSshRoute
   SettingsTokensRoute: typeof SettingsTokensRoute
   OwnerIndexRoute: typeof OwnerIndexRoute
+  SettingsIndexRoute: typeof SettingsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -695,6 +708,13 @@ declare module '@tanstack/react-router' {
       path: '/orgs/new'
       fullPath: '/orgs/new'
       preLoaderRoute: typeof OrgsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/settings/': {
+      id: '/settings/'
+      path: '/settings'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof SettingsIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/password': {
@@ -995,10 +1015,12 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsSshRoute: SettingsSshRoute,
   SettingsTokensRoute: SettingsTokensRoute,
   OwnerIndexRoute: OwnerIndexRoute,
+  SettingsIndexRoute: SettingsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
 
 import type { getRouter } from './router.tsx'
 import type { createStart } from '@tanstack/react-start'

@@ -1631,3 +1631,29 @@ test("shallow imports keep the requested history depth and reject invalid depths
 	assert.equal((await call("POST", "/projects", { name: full, importUrl: `file://${source}` })).status, 201);
 	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${full}/log`)).json.commits.length, 3);
 });
+
+test("reserved names can't be taken through displayUsername, and re-adding a collaborator keeps their access", async () => {
+	const signUp = (fields: Record<string, unknown>) =>
+		fetch(`${api}/api/auth/sign-up/email`, {
+			method: "POST",
+			headers: { "content-type": "application/json", origin: api },
+			body: JSON.stringify({ email: `${String(fields.displayUsername ?? fields.username)}${run}@test.invalid`, password: "correct-horse-battery", name: "x", ...fields }),
+		});
+	assert.equal((await signUp({ displayUsername: "settings" })).status, 400);
+	assert.equal((await signUp({ username: `ok${run}`.toLowerCase(), displayUsername: "explore" })).status, 400);
+	assert.equal((await signUp({ username: "Settings" })).status, 400);
+
+	const owner = await newUser("keeper");
+	const helper = await newUser("helper");
+	const as = (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${owner.token}`, ...init.headers } });
+	assert.equal((await as("/repos", { method: "POST", body: JSON.stringify({ name: "kept", visibility: "private" }) })).status, 201);
+	const put = (body: unknown) => as(`/repos/${owner.username}/kept/collaborators/${helper.username}`, { method: "PUT", body: JSON.stringify(body) });
+	assert.ok((await put({})).ok);
+	const permission = async () =>
+		((await (await as(`/repos/${owner.username}/kept/collaborators`)).json()) as { collaborators: { username: string; permission: string }[] }).collaborators.find((k) => k.username === helper.username)?.permission;
+	assert.equal(await permission(), "read");
+	assert.ok((await put({ permission: "admin" })).ok);
+	assert.ok((await put({})).ok);
+	assert.equal(await permission(), "admin");
+});
