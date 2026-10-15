@@ -29,6 +29,7 @@ import type {
 	Release,
 	Tag,
 	Comparison,
+	Dashboard,
 	Diff,
 	DiffEvent,
 	FileDiff,
@@ -311,6 +312,7 @@ export const api = {
 	pingHook: (project: string, id: string) => call<{ delivery: WebhookDelivery }>("POST", `${p(project)}/hooks/${id}/ping`),
 	redeliver: (project: string, id: string, delivery: string) =>
 		call<{ delivery: WebhookDelivery }>("POST", `${p(project)}/hooks/${id}/deliveries/${delivery}/redeliver`),
+	dashboard: () => call<Dashboard>("GET", "/dashboard"),
 	notifications: (unread = false) => call<{ notifications: Notification[]; unread: number }>("GET", `/notifications${unread ? "?unread" : ""}`),
 	markRead: (ids?: string[]) => call<{ ok: true }>("POST", "/notifications/read", ids ? { ids } : {}),
 
@@ -439,6 +441,7 @@ export const keys = {
 	hooks: (project: string) => ["project", project, "hooks"] as const,
 	deliveries: (project: string, id: string) => ["project", project, "hooks", id] as const,
 	search: (project: string, q: string) => ["project", project, "search", q] as const,
+	dashboard: ["dashboard"] as const,
 	notifications: ["notifications"] as const,
 	tokens: ["tokens"] as const,
 	ssh: ["ssh"] as const,

@@ -2133,3 +2133,41 @@ test("pull descriptions close issues using the coordinator's default branch when
 	const oldDefault = cases.find((item) => item.base === "release")!;
 	assert.equal(((await (await as(`${repo}/issues/${oldDefault.issue}`)).json()) as { issue: { state: string } }).issue.state, "open");
 });
+
+test("the home dashboard lists open issues in repositories you can push to, and yours where you can still read them", async () => {
+	const ada = await newUser("dsa");
+	const bob = await newUser("dsb");
+	const as = (who: { token: string }) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}`, ...init.headers } });
+	const create = async (who: { token: string }, name: string, visibility: string) =>
+		assert.equal((await as(who)("/repos", { method: "POST", body: JSON.stringify({ name, visibility, readme: true }) })).status, 201);
+	const open = async (who: { token: string }, repo: string, title: string) =>
+		assert.equal((await as(who)(`/repos/${repo}/issues`, { method: "POST", body: JSON.stringify({ title }) })).status, 201);
+	const titles = async (who: { token: string }) => {
+		const res = await as(who)("/dashboard");
+		assert.equal(res.status, 200);
+		const body = (await res.json()) as { pulls: unknown[]; issues: { title: string; repo: string }[] };
+		assert.ok(Array.isArray(body.pulls));
+		return body.issues.map((i) => i.title).sort();
+	};
+	await create(ada, "secret", "private");
+	await create(ada, "open", "public");
+	await create(bob, "own", "public");
+	await open(ada, `${ada.username}/secret`, "private work");
+	await open(bob, `${ada.username}/open`, "bob asks ada");
+	await open(bob, `${bob.username}/own`, "bob's own");
+
+	// Ada owns both of hers; Bob's own repository isn't hers. Bob sees his repository and what he opened.
+	assert.deepEqual(await titles(ada), ["bob asks ada", "private work"]);
+	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own"]);
+
+	// Write access to the private repository brings its issues; losing it takes them away.
+	assert.ok((await as(ada)(`/repos/${ada.username}/secret/collaborators/${bob.username}`, { method: "PUT", body: JSON.stringify({ permission: "write" }) })).ok);
+	const invites = (await (await as(bob)("/invitations")).json()) as { invitations: { kind: string; id: string }[] };
+	for (const i of invites.invitations) assert.equal((await as(bob)(`/invitations/${i.kind}/${i.id}/accept`, { method: "POST" })).status, 200);
+	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own", "private work"]);
+	assert.ok((await as(ada)(`/repos/${ada.username}/secret/collaborators/${bob.username}`, { method: "DELETE" })).ok);
+	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own"]);
+
+	assert.equal((await fetch(`${api}/api/dashboard`)).status, 401);
+});

@@ -5,6 +5,7 @@ import type {
 	IssueComment,
 	IssueList,
 	IssueState,
+	DashboardItem,
 	IssueSummary,
 	Notification,
 	NotificationKind,
@@ -847,6 +848,26 @@ export interface IssueRow {
 
 const ISSUE = `select i.*, a."username" as "author", c."username" as "closedBy" from "issue" i
 	left join "user" a on a."id" = i."authorId" left join "user" c on c."id" = i."closedById"`;
+
+/**
+ * Open issues or pull requests for someone's home page: everything in repositories they can push to
+ * (owner, organization, team or collaborator), and what they opened anywhere they can still read.
+ */
+export async function listDashboard(database: D1Database, userId: string, pulls: boolean, limit = 20): Promise<DashboardItem[]> {
+	const { results } = await database
+		.prepare(
+			`select * from (
+				select i.*, a."username" as "author", r."owner" || '/' || r."name" as "repo", r."visibility" as "repoVisibility", ${accessLevel("r", "?1")} as "level"
+				from "issue" i join "repo" r on r."id" = i."repoId" left join "user" a on a."id" = i."authorId"
+				where i."state" = 'open' and i."isPull" = ?2
+			) x
+			where x."level" >= 2 or (x."authorId" = ?1 and (x."repoVisibility" = 'public' or x."level" > 0))
+			order by x."updatedAt" desc limit ?3`,
+		)
+		.bind(userId, pulls ? 1 : 0, limit)
+		.all<IssueRow & { repo: string }>();
+	return results.map((row) => ({ ...toIssueSummary(row), repo: row.repo }));
+}
 
 export function toIssueSummary(row: IssueRow): IssueSummary {
 	return {
