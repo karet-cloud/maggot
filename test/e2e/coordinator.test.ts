@@ -1120,6 +1120,55 @@ test("pull requests: from a branch and from a fork, reviewed line by line, squas
 	assert.deepEqual(mergeDetail.diff.files.map((f) => f.path), ["CONTRIBUTING.md"]);
 	const list = (await (await as(null)(`${repo}/pulls?state=all`)).json()) as { pulls: { number: number; pullState: string }[]; open: number };
 	assert.deepEqual(list.pulls.map((p) => p.pullState).sort(), ["merged", "merged", "open"]);
+
+	// From a fork of the fork, named as on GitHub (owner:branch). The network lists what each caller can read.
+	const cy = await newUser("prc");
+	const cyFork = await as(cy)(`/repos/${bob.username}/prs/forks`, { method: "POST", body: JSON.stringify({}) });
+	assert.equal(cyFork.status, 201, await cyFork.clone().text());
+	const cyDir = join(root, "prs-fork-of-fork");
+	await exec("git", ["clone", "-q", url(cy, `${cy.username}/prs`), cyDir]);
+	await writeFile(join(cyDir, "CONDUCT.md"), "Be patient.\n");
+	await git(cyDir, "add", "-A");
+	await git(cyDir, "commit", "-q", "-m", "Add a code of conduct");
+	await git(cyDir, "push", "-q", "origin", "HEAD:conduct");
+	const network = async (who: { token: string } | null) => ((await (await as(who)(`${repo}/network`)).json()) as { repos: { fullName: string }[] }).repos.map((r) => r.fullName);
+	// This repository first, then the newest.
+	const everyone = [`${ada.username}/prs`, `${cy.username}/prs`, `${bob.username}/prs`];
+	assert.deepEqual(await network(null), everyone);
+	const preview = await as(null)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`);
+	assert.equal(preview.status, 200, await preview.clone().text());
+	assert.deepEqual(((await preview.json()) as { comparison: { diff: { files: { path: string }[] } } }).comparison.diff.files.map((f) => f.path), ["CONDUCT.md"]);
+	const fromCy = await as(cy)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "Conduct", base: "master", head: `${cy.username}:conduct` }) });
+	assert.equal(fromCy.status, 201, await fromCy.clone().text());
+	const cyPull = ((await fromCy.json()) as { pull: { number: number; headRepo: string; head: string } }).pull;
+	assert.deepEqual([cyPull.headRepo, cyPull.head], [`${cy.username}/prs`, "conduct"]);
+	// A repository outside the network can't be the head.
+	assert.equal((await as(bob)("/repos", { method: "POST", body: JSON.stringify({ name: "elsewhere", visibility: "public", readme: true }) })).status, 201);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=master&headRepo=${bob.username}/elsewhere`)).status, 400);
+	// Gone private, cy's fork drops out of everyone else's network, and owner:branch finds nothing for them.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) })).status, 200);
+	assert.deepEqual(await network(null), [everyone[0], everyone[2]]);
+	assert.deepEqual(await network(cy), everyone);
+	assert.equal((await as(bob)(`${repo}/pulls/compare?base=master&head=${cy.username}:conduct`)).status, 404);
+	assert.equal((await as(bob)(`${repo}/pulls/${cyPull.number}/files`)).status, 403);
+	const listed = (await (await as(bob)(`${repo}/pulls`)).json()) as { pulls: { number: number; headRepo: string; head: string }[] };
+	const hiddenPull = listed.pulls.find((p) => p.number === cyPull.number);
+	assert.deepEqual([hiddenPull?.headRepo, hiddenPull?.head], ["(private fork)", ""], "nor is it named to them");
+	assert.equal(((await (await as(cy)(`${repo}/pulls/${cyPull.number}`)).json()) as { pull: { headRepo: string } }).pull.headRepo, `${cy.username}/prs`);
+	// task:<id> is an agent fork, never an owner; and an owner with two repositories in the network is ambiguous.
+	const taskHead = await as(ada)(`${repo}/pulls/compare?base=master&head=task:t123`);
+	assert.equal(((await taskHead.json()) as { error: { code: string } }).error.code, "INVALID_INPUT");
+	assert.equal((await as(ada)(`${repo}/forks`, { method: "POST", body: JSON.stringify({ name: "prs-copy" }) })).status, 201);
+	const ambiguous = await as(ada)(`${repo}/pulls/compare?base=master&head=${ada.username}:master`);
+	assert.equal(ambiguous.status, 400);
+	assert.equal(((await ambiguous.json()) as { error: { code: string } }).error.code, "AMBIGUOUS_HEAD");
+	assert.equal((await as(ada)(`${repo}/pulls/compare?base=master&head=master&headRepo=${ada.username}/prs-copy`)).status, 200);
+	// Public again: ada merges into her master with write on it alone, none on cy's fork.
+	assert.equal((await as(cy)(`/repos/${cy.username}/prs`, { method: "PATCH", body: JSON.stringify({ visibility: "public" }) })).status, 200);
+	const viaForkOfFork = await as(ada)(`${repo}/pulls/${cyPull.number}/merge`, { method: "POST", body: JSON.stringify({ method: "merge" }) });
+	assert.equal(viaForkOfFork.status, 200, await viaForkOfFork.clone().text());
+	const { tree } = (await (await as(null)(`${repo}/tree`)).json()) as { tree: { entries: { name: string }[] } };
+	assert.ok(tree.entries.some((e) => e.name === "CONDUCT.md"), "merged into the base repository's branch");
 });
 
 test("organizations, teams and collaborators: invitations, read for members, write and admin by grant, reviews that count", async () => {
@@ -1458,6 +1507,133 @@ test("Actions: runs from pushes, pull requests and by hand; fork approval; admin
 	assert.deepEqual((await json<{ artifacts: unknown[] }>(as(null)(`${actions}/runs/${pushed.number}/artifacts`))).artifacts, []);
 	await json(as(ada)(`${actions}/caches/${cacheId}`, { method: "DELETE" }));
 	assert.equal((await ci(`/caches?keys=k1&version=${version}`)).status, 204);
+});
+
+test("Actions private fork access: approval, reruns, dispatch, logs, artifacts and event redaction", async () => {
+	const ada = await newUser("privatecia");
+	const bob = await newUser("privatecib");
+	const as = (who: { token: string } | null) => (path: string, init: RequestInit = {}) =>
+		fetch(`${api}/api${path}`, { ...init, headers: { "content-type": "application/json", ...(who ? { authorization: `Bearer ${who.token}` } : {}), ...init.headers } });
+	const json = async <T>(res: Promise<Response>, status = 200): Promise<T> => {
+		const r = await res;
+		assert.equal(r.status, status, await r.clone().text());
+		return await r.json() as T;
+	};
+	type Run = { number: number; status: string; branch: string; workflow: string; path: string; error: string | null; jobs: { id: string }[] };
+	type Event = { seq: number; type: string; data: { pull?: { number: number; head: string; headRepo: string }; run?: Run } };
+	const created = await json<{ project: { name: string } }>(as(ada)("/repos", { method: "POST", body: JSON.stringify({ name: "privateci", visibility: "public", readme: true }) }), 201);
+	const repo = `/repos/${ada.username}/privateci`;
+	const fork = `/repos/${bob.username}/privateci`;
+	const actions = `${repo}/actions`;
+	await json(as(bob)(`${repo}/forks`, { method: "POST", body: "{}" }), 201);
+	const path = ".maggot/workflows/secret.yml";
+	await json(as(bob)(`${fork}/contents`, { method: "POST", body: JSON.stringify({
+		branch: "master", newBranch: "secret-branch", message: "Private workflow",
+		files: [{ path, content: "name: Secret workflow\non:\n  pull_request:\njobs:\n  secret:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo private-code\n" }],
+	}) }), 201);
+	const pull = (await json<{ pull: { number: number } }>(as(bob)(`${repo}/pulls`, { method: "POST", body: JSON.stringify({ title: "A change", base: "master", head: "secret-branch", headRepo: `${bob.username}/privateci` }) }), 201)).pull;
+	let waiting = await until(async () => (await json<{ runs: Run[] }>(as(bob)(`${actions}/runs?pull=${pull.number}`))).runs[0]);
+	assert.equal(waiting.status, "waiting");
+	await until(async () => (await json<{ events: Event[] }>(as(ada)(`${repo}/events`))).events.find((e) => e.type === "pull.opened"));
+	// History and runs made while public must become private too.
+	await json(as(bob)(fork, { method: "PATCH", body: JSON.stringify({ visibility: "private" }) }));
+	assert.equal((await as(ada)(fork)).status, 404, "the base owner has no head access");
+	for (const suffix of ["approve", "rerun", "cancel"]) {
+		const denied = await as(ada)(`${actions}/runs/${waiting.number}/${suffix}`, { method: "POST" });
+		assert.equal(denied.status, 403);
+		assert.equal((await denied.json() as { error: { code: string } }).error.code, "HEAD_PRIVATE");
+	}
+	assert.equal((await as(ada)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" })).status, 403, "dispatching PR checks needs head access");
+	assert.equal((await as(ada)(`${actions}/dispatch`, { method: "POST", body: JSON.stringify({ path, ref: `${bob.username}:secret-branch` }) })).status, 404, "workflow_dispatch only resolves base branches");
+	const hiddenRun = (await json<{ runs: Run[] }>(as(ada)(`${actions}/runs?pull=${pull.number}`))).runs[0];
+	assert.deepEqual([hiddenRun.branch, hiddenRun.workflow, hiddenRun.path, hiddenRun.error], ["", "(private fork)", "", null]);
+	for (const query of ["", "?after=0"]) {
+		const hiddenEvent = (await json<{ events: Event[] }>(as(ada)(`${repo}/events${query}`))).events.find((e) => e.type === "pull.opened")!;
+		assert.deepEqual([hiddenEvent.data.pull?.headRepo, hiddenEvent.data.pull?.head], ["(private fork)", ""]);
+		assert.ok(!JSON.stringify(hiddenEvent).includes("_headRepo"), "internal provenance isn't exposed");
+		const ownerEvent = (await json<{ events: Event[] }>(as(bob)(`${repo}/events${query}`))).events.find((e) => e.type === "pull.opened")!;
+		assert.deepEqual([ownerEvent.data.pull?.headRepo, ownerEvent.data.pull?.head], [`${bob.username}/privateci`, "secret-branch"]);
+	}
+
+	// Give the head owner write on the base; both permissions are necessary to approve and dispatch.
+	await json(as(ada)(`${repo}/collaborators/${bob.username}`, { method: "PUT", body: JSON.stringify({ permission: "write" }) }));
+	const invite = (await json<{ invitations: { kind: string; id: string }[] }>(as(bob)("/invitations"))).invitations[0];
+	await json(as(bob)(`/invitations/${invite.kind}/${invite.id}/accept`, { method: "POST" }));
+	assert.equal((await as(bob)(`${repo}/pulls/${pull.number}/checks`, { method: "POST" })).status, 200);
+	// Reopening as a base editor must not implicitly approve code they can't view.
+	await json(as(ada)(`${repo}/issues/${pull.number}`, { method: "PATCH", body: JSON.stringify({ state: "closed" }) }));
+	await until(async () => (await json<Run>(as(bob)(`${actions}/runs/${waiting.number}`))).status === "completed" ? true : undefined);
+	await json(as(ada)(`${repo}/issues/${pull.number}`, { method: "PATCH", body: JSON.stringify({ state: "open" }) }));
+	const previous = waiting.number;
+	waiting = await until(async () => (await json<{ runs: Run[] }>(as(bob)(`${actions}/runs?pull=${pull.number}`))).runs.find((r) => r.number !== previous));
+	assert.equal(waiting.status, "waiting", "base write access alone doesn't auto-approve a private head");
+
+	const received: { event: string; pull?: { head: string; headRepo: string }; run?: Run }[] = [];
+	const receiver = createHttpServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => body += chunk);
+		req.on("end", () => { received.push(JSON.parse(body)); res.writeHead(200).end("ok"); });
+	});
+	await new Promise<void>((ok) => receiver.listen(0, "127.0.0.1", ok));
+	const live = new WebSocket(`${api.replace("http:", "ws:")}/api${repo}/live`);
+	const messages: Event[] = [];
+	live.addEventListener("message", (event) => {
+		if (event.data !== "ci") messages.push(JSON.parse(String(event.data)));
+	});
+	try {
+		await new Promise<void>((ok, fail) => { live.addEventListener("open", () => ok(), { once: true }); live.addEventListener("error", fail, { once: true }); });
+		await json(as(ada)(`${repo}/hooks`, { method: "POST", body: JSON.stringify({ url: `http://127.0.0.1:${(receiver.address() as { port: number }).port}/hook`, secret: "private-test", events: ["pull_request", "workflow_run"] }) }), 201);
+		await json(as(bob)(`${repo}/pulls/${pull.number}/reviews`, { method: "POST", body: JSON.stringify({ state: "commented", body: "Ready" }) }), 201);
+		await json<Run>(as(bob)(`${actions}/runs/${waiting.number}/approve`, { method: "POST" }));
+		const completed = await until(async () => {
+			const run = await json<Run>(as(bob)(`${actions}/runs/${waiting.number}`));
+			return run.status === "completed" ? run : undefined;
+		});
+		const job = completed.jobs[0].id;
+		const { mintJobToken } = await import("../../src/ci/token.ts");
+		const jobToken = await mintJobToken("dev", { repo: created.project.name, run: waiting.number, job, read: [], write: `refs/pull/${pull.number}`, expires: Date.now() + 60_000 });
+		const ci = (url: string, init: RequestInit) => fetch(`${api}/api/ci${url}`, { ...init, headers: { authorization: `Bearer ${jobToken}` } });
+		const artifact = await ci("/artifacts", { method: "POST", body: new URLSearchParams({ name: "private-code", size: "12" }) });
+		assert.equal(artifact.status, 201, await artifact.clone().text());
+		const artifactId = (await artifact.text()).trim();
+		assert.equal((await ci(`/artifacts/${artifactId}/parts/1`, { method: "PUT", body: "private-code" })).status, 200);
+		assert.equal((await ci(`/artifacts/${artifactId}/commit`, { method: "POST" })).status, 200);
+		for (const suffix of ["", `/jobs/${job}/logs`, "/artifacts", `/artifacts/${artifactId}/download`]) {
+			for (const who of [ada, null]) assert.equal((await as(who)(`${actions}/runs/${waiting.number}${suffix}`)).status, 403, `private run ${suffix}`);
+			assert.equal((await as(bob)(`${actions}/runs/${waiting.number}${suffix}`)).status, 200, `head owner can read ${suffix}`);
+		}
+		assert.equal(await (await as(bob)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).text(), "private-code");
+		const rerun = await json<Run>(as(bob)(`${actions}/runs/${waiting.number}/rerun`, { method: "POST" }), 201);
+		assert.equal((await as(ada)(`${actions}/runs/${rerun.number}`)).status, 403, "reruns retain head provenance");
+		const pullHook = await until(async () => received.find((e) => e.event === "pull_request"));
+		assert.deepEqual([pullHook.pull?.headRepo, pullHook.pull?.head], ["(private fork)", ""]);
+		const runHook = await until(async () => received.find((e) => e.event === "workflow_run"));
+		assert.deepEqual([runHook.run?.workflow, runHook.run?.path, runHook.run?.branch], ["(private fork)", "", ""]);
+		const livePull = await until(async () => messages.find((e) => e.type === "pull.reviewed"));
+		assert.deepEqual([livePull.data.pull?.headRepo, livePull.data.pull?.head], ["(private fork)", ""]);
+		const liveRun = await until(async () => messages.find((e) => e.type === "ci.completed"));
+		assert.equal(liveRun.data.run?.branch, "");
+		const feed = (await json<{ events: Event[] }>(as(ada)(`${repo}/events`))).events.find((e) => e.data.run?.number === waiting.number)!;
+		assert.deepEqual([feed.data.run?.workflow, feed.data.run?.path, feed.data.run?.branch], ["(private fork)", "", ""]);
+		const ownerFeed = (await json<{ events: Event[] }>(as(bob)(`${repo}/events`))).events.find((e) => e.data.run?.number === waiting.number)!;
+		assert.equal(ownerFeed.data.run?.branch, "secret-branch");
+		assert.ok(!JSON.stringify(received).includes("_headRepo"));
+
+		// View access on the head is enough, and is rechecked rather than frozen at run creation.
+		await json(as(bob)(`${fork}/collaborators/${ada.username}`, { method: "PUT", body: JSON.stringify({ permission: "read" }) }));
+		const readInvite = (await json<{ invitations: { kind: string; id: string }[] }>(as(ada)("/invitations"))).invitations[0];
+		await json(as(ada)(`/invitations/${readInvite.kind}/${readInvite.id}/accept`, { method: "POST" }));
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/jobs/${job}/logs`)).status, 200);
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 200);
+		await json<Run>(as(ada)(`${actions}/runs/${waiting.number}/rerun`, { method: "POST" }), 201);
+		await json(as(bob)(`${fork}/collaborators/${ada.username}`, { method: "DELETE" }));
+		assert.equal((await as(ada)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 403);
+		await json(as(bob)(fork, { method: "DELETE" }));
+		assert.equal((await as(bob)(`${actions}/runs/${waiting.number}/artifacts/${artifactId}/download`)).status, 403, "deleted heads fail closed");
+	} finally {
+		live.close();
+		await new Promise<void>((ok, fail) => receiver.close((err) => err ? fail(err) : ok()));
+	}
 });
 
 test("wikis: pages from the web and over git, conflicting edits refused, readers read, archived and turned-off wikis", async () => {

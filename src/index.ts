@@ -13,6 +13,8 @@ import {
 	findRepo,
 	getListing,
 	insertRepo,
+	listNetwork,
+	ownerInNetwork,
 	listRepos,
 	listTokens,
 	addRepoBytes,
@@ -45,6 +47,7 @@ import {
 	addReview,
 	approvedAt,
 	getPull,
+	hiddenHeads,
 	listPulls,
 	listReviews,
 	markPullMerged,
@@ -59,8 +62,10 @@ import {
 	notifyUser,
 	revokeToken,
 	setRepoBytes,
+	sameNetwork,
 	setStar,
 	toRepoInfo,
+	unreadableRepos,
 	updateRepo,
 	type RepoListing,
 	type RepoRow,
@@ -1001,6 +1006,19 @@ repo.get("/forks", async (c) => {
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
 });
 
+// The fork network the caller can see (this repository, what it was forked from, and forks of any of them):
+// where a pull request into this repository can come from. This repository first, then the newest;
+// `?q=` searches owner/name, and `?owner=` lists what `owner:branch` can mean.
+repo.get("/network", async (c) => {
+	const p = c.var.principal;
+	const owner = c.req.query("owner");
+	const everything = p.kind === "admin";
+	const rows = owner
+		? await ownerInNetwork(db(c.env), userRepo(c).id, owner, viewerId(p), everything)
+		: await listNetwork(db(c.env), userRepo(c).id, viewerId(p), { limit: intParam(c.req.query("limit"), 100, 500), query: c.req.query("q")?.trim().slice(0, 200) || undefined, everything });
+	return c.json({ repos: rows.filter((r) => canRead(p, r)).map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });
+});
+
 // Forks into the caller's account; the name defaults to the source's.
 repo.post("/forks", async (c) => {
 	const source = userRepo(c);
@@ -1126,7 +1144,7 @@ repo.get("/events", async (c) => {
 	const limit = intParam(c.req.query("limit"), 100, 1000);
 	const after = c.req.query("after");
 	// Without `after`, returns the newest `limit` events (for a feed); with it, pages forward from `after`.
-	const events = after === undefined ? await project(c).recentEvents(limit) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit);
+	const events = after === undefined ? await project(c).recentEvents(limit, pullViewer(c.var.principal)) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit, pullViewer(c.var.principal));
 	return c.json({ events });
 });
 
@@ -1777,18 +1795,36 @@ repo.delete("/issues/:number/comments/:id", async (c) => {
 // ── Pull requests and code review ────────────────────────────────────────────
 
 /**
- * Where a pull request's changes come from: a branch of this repository, or of `headRepo`
- * ("owner/name"), which has to be a fork of it that the caller can read.
+ * Where a pull request's changes come from: a branch of this repository, or of `headRepo` ("owner/name"),
+ * which has to be in its fork network (forked from it, or from what it was forked from, at any depth) and
+ * readable by the caller. `head` may also say `owner:branch`, as on GitHub: that owner's one repository in the
+ * network (the caller has to pass `headRepo` if they have more). `task:<id>` is never an owner: agent forks aren't heads.
  */
-async function pullHead(c: Context<App>, headRepo: unknown): Promise<RepoRow | null> {
+async function pullHead(c: Context<App>, headRepo: unknown, head: unknown): Promise<{ fork: RepoRow | null; branch: string }> {
 	const row = userRepo(c);
-	if (headRepo === undefined || headRepo === null || headRepo === "" || headRepo === `${row.owner}/${row.name}`) return null;
-	if (typeof headRepo !== "string" || !headRepo.includes("/")) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
-	const [owner, name] = headRepo.split("/");
-	const fork = await findRepo(db(c.env), owner, name, viewerId(c.var.principal));
-	if (!fork || !canRead(c.var.principal, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
-	if (fork.forkOf !== row.id) throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't a fork of ${row.owner}/${row.name}`);
-	return fork;
+	const p = c.var.principal;
+	const colon = typeof head === "string" && !head.startsWith("task:") ? head.indexOf(":") : -1;
+	const owner = colon >= 0 ? (head as string).slice(0, colon).toLowerCase() : null;
+	const branch = pullBranch(colon >= 0 ? (head as string).slice(colon + 1) : head, "head");
+	if (headRepo === undefined || headRepo === null || headRepo === "") {
+		if (owner === null) return { fork: null, branch };
+		const theirs = (await ownerInNetwork(db(c.env), row.id, owner, viewerId(p), p.kind === "admin")).filter((r) => canRead(p, r));
+		if (theirs.length === 0) throw new HttpError(404, "NOT_FOUND", `${owner} has no fork of ${row.owner}/${row.name} that you can see`);
+		if (theirs.length > 1) {
+			throw new HttpError(400, "AMBIGUOUS_HEAD", `${owner} has ${theirs.length} repositories in this fork network, so ${owner}:${branch} is ambiguous: pass headRepo (owner/name)`);
+		}
+		return { fork: theirs[0].id === row.id ? null : theirs[0], branch };
+	}
+	if (typeof headRepo !== "string" || !/^[^/]+\/[^/]+$/.test(headRepo)) throw new HttpError(400, "INVALID_INPUT", "headRepo is owner/name");
+	const [forkOwner, name] = headRepo.split("/");
+	if (owner !== null && owner !== forkOwner.toLowerCase()) throw new HttpError(400, "INVALID_INPUT", `head names ${owner} but headRepo is ${headRepo}`);
+	const fork = await findRepo(db(c.env), forkOwner, name, viewerId(p));
+	if (!fork || !canRead(p, fork)) throw new HttpError(404, "NOT_FOUND", `${headRepo} not found`);
+	if (fork.id === row.id) return { fork: null, branch };
+	if (!(await sameNetwork(db(c.env), row, fork))) {
+		throw new HttpError(400, "INVALID_INPUT", `${headRepo} isn't in the fork network of ${row.owner}/${row.name}`);
+	}
+	return { fork, branch };
 }
 
 function pullBranch(name: unknown, what: string): string {
@@ -1846,11 +1882,20 @@ function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.
 					}),
 				),
 			);
+			// Keep the original for authorized feed readers; the coordinator redacts broadcasts and webhooks.
+			const fork = pull.headRepoId !== pull.repoId;
 			await project(c).recordPullEvent(type, {
-				pull: { number: pull.number, title: pull.title, base: pull.baseBranch, head: pull.headBranch, url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}` },
+				pull: {
+					number: pull.number,
+					title: pull.title,
+					base: pull.baseBranch,
+					head: pull.headBranch,
+					headRepo: !fork ? null : `${pull.headOwner}/${pull.headName}`,
+					url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}`,
+				},
 				sender: actor.username,
 				...extra,
-			});
+			}, fork ? pull.headRepoId ?? undefined : null);
 		})().catch((err) => console.error("announcing pull request activity failed", err)),
 	);
 }
@@ -1877,16 +1922,19 @@ function pullTrigger(c: Context<App>, row: RepoRow, pull: PullRow, head: string)
 
 /**
  * Starts a pull request's pull_request workflows for its head commit, in the background. They wait for
- * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here.
+ * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here,
+ * and can read the fork: approving runs a private fork's code where its logs and artifacts are kept.
  * If this doesn't get through, the pull request's checks show them missing, for a writer to start.
  */
 function startPullChecks(c: Context<App>, row: RepoRow, pull: PullRow, head: string, action: "opened" | "reopened") {
 	const trigger = pullTrigger(c, row, pull, head);
 	if (!trigger) return;
+	const p = c.var.principal;
 	c.executionCtx.waitUntil(
-		project(c)
-			.ciPull({ ...trigger, action, approved: canWrite(c.var.principal, row) })
-			.catch((err) => console.error("starting pull request Actions failed", err)),
+		(async () => {
+			const readsHead = pull.headRepoId === row.id || (await unreadableRepos(db(c.env), [pull.headRepoId as string], pullViewer(p))).size === 0;
+			await project(c).ciPull({ ...trigger, action, approved: canWrite(p, row) && readsHead });
+		})().catch((err) => console.error("starting pull request Actions failed", err)),
 	);
 }
 
@@ -1912,10 +1960,13 @@ function reopenedPull(c: Context<App>, row: RepoRow, number: number) {
 	);
 }
 
+/** Whose eyes pull requests are shown to: private forks they can't read stay unnamed. */
+const pullViewer = (p: Principal) => ({ viewerId: viewerId(p), everything: p.kind === "admin" });
+
 repo.get("/pulls", async (c) => {
 	const state = c.req.query("state");
 	return c.json(
-		await listPulls(db(c.env), userRepo(c).id, {
+		await listPulls(db(c.env), userRepo(c).id, pullViewer(c.var.principal), {
 			state: state === "closed" || state === "all" ? state : "open",
 			query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 			limit: intParam(c.req.query("limit"), 50, 200),
@@ -1923,12 +1974,11 @@ repo.get("/pulls", async (c) => {
 	);
 });
 
-// What a pull request from `head` (of `headRepo`) into `base` would bring, before opening it.
+// What a pull request from `head` (of `headRepo`, or `owner:branch`) into `base` would bring, before opening it.
 repo.get("/pulls/compare", async (c) => {
 	userRepo(c);
 	const base = pullBranch(c.req.query("base"), "base");
-	const head = pullBranch(c.req.query("head"), "head");
-	const fork = await pullHead(c, c.req.query("headRepo"));
+	const { fork, branch: head } = await pullHead(c, c.req.query("headRepo"), c.req.query("head"));
 	return c.json({ comparison: await project(c).pullCompare(base, fork?.id ?? null, head) });
 });
 
@@ -1938,8 +1988,7 @@ repo.post("/pulls", async (c) => {
 	const input = await body<{ title?: string; body?: string; base?: string; head?: string; headRepo?: string }>(c);
 	const text = issueText(input, true);
 	const base = pullBranch(input.base, "base");
-	const head = pullBranch(input.head, "head");
-	const fork = await pullHead(c, input.headRepo);
+	const { fork, branch: head } = await pullHead(c, input.headRepo, input.head);
 	if (!fork && base === head) throw new HttpError(400, "INVALID_INPUT", "The head and base branches are the same");
 	const comparison = await project(c).pullCompare(base, fork?.id ?? null, head);
 	if (comparison.commits.length === 0) throw new HttpError(422, "NOTHING_TO_COMPARE", `${head} has nothing that ${base} doesn't`);
@@ -1947,7 +1996,7 @@ repo.post("/pulls", async (c) => {
 		.prepare(`select i."number" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and p."headRepoId" is ? and p."headBranch" = ? and p."baseBranch" = ? and i."state" = 'open'`)
 		.bind(row.id, fork?.id ?? row.id, head, base)
 		.first<{ number: number }>();
-	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${head}`);
+	if (open) throw new HttpError(409, "ALREADY_EXISTS", `Pull request #${open.number} is already open for ${fork ? `${fork.owner}:${head}` : head}`);
 	const user = await canPost(c);
 	const issue = await createIssue(db(c.env), row.id, user.id, text.title as string, text.body ?? "", [], { headRepoId: fork?.id ?? row.id, headBranch: head, baseBranch: base });
 	const pull = (await getPull(db(c.env), row.id, issue.number)) as PullRow;
@@ -1962,13 +2011,14 @@ repo.get("/pulls/:number", async (c) => {
 	const p = c.var.principal;
 	const owner = canWrite(p, row);
 	const me = viewerId(p);
-	const [{ comments, earlier }, review, required] = await Promise.all([
+	const [{ comments, earlier }, review, required, hidden] = await Promise.all([
 		listComments(db(c.env), pull.id, { id: me, owner }),
 		listReviews(db(c.env), pull.id),
 		mergeRequirements(c, pull.baseBranch),
+		hiddenHeads(db(c.env), [pull], pullViewer(p)),
 	]);
 	return c.json({
-		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required),
+		pull: toPull(pull, { edit: owner || (me !== null && me === pull.authorId), label: owner, merge: owner && !row.archivedAt }, required, hidden),
 		comments,
 		earlier,
 		reviews: review.reviews,

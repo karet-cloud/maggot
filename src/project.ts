@@ -29,7 +29,7 @@ import {
 	type WebhookDelivery,
 	type WebhookEvent,
 } from "./api.ts";
-import { closeIssuesByCommits, db as databaseOf, notify, notifyUser } from "./db.ts";
+import { closeIssuesByCommits, db as databaseOf, notify, notifyUser, unreadableRepos, type PullViewer } from "./db.ts";
 import { errorCode, HttpError, toHttpError } from "./errors.ts";
 import { diffTrees, mapLimit, topoOrder, walkToMainline, type ObjectReader } from "./git/diff.ts";
 import { commitChanges, NoChanges, PathError, TooLarge, type FileChange } from "./git/commit.ts";
@@ -42,7 +42,7 @@ import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
-import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
+import { CiRuns, privateRun, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
 import type { JobGrant } from "./ci/token.ts";
 import type { CiJob } from "./ci/job.ts";
 import type { CiArtifact, CiCache, CiRun, CiRunList, CiRunSummary, CiSettings, CiWorkflow, CiLogChunk, PullChecks, WikiIndex, WikiPage } from "./api.ts";
@@ -249,7 +249,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			repository: () => this.repository(),
 			// Its own Worker's class, so a loopback namespace rather than a binding (a container can't be attached to a Durable Object bound by Worker name).
 			job: (id) => (ctx.exports.CiJob as unknown as DurableObjectNamespace<CiJob>).getByName(id),
-			emit: (data) => this.emit("ci.completed", null, data),
+			emit: (data, headRepo) => this.ctx.waitUntil(this.emitForkEvent("ci.completed", data, headRepo)),
 			changed: () => {
 				for (const ws of this.ctx.getWebSockets()) {
 					try {
@@ -843,9 +843,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	}
 
 	/** Records a pull request event for the feed and webhooks. */
-	async recordPullEvent(type: "pull.opened" | "pull.reviewed" | "pull.merged", data: Record<string, unknown>): Promise<void> {
+	async recordPullEvent(type: "pull.opened" | "pull.reviewed" | "pull.merged", data: Record<string, unknown>, headRepo: string | null | undefined): Promise<void> {
 		this.meta();
-		this.emit(type, null, data);
+		await this.emitForkEvent(type, data, headRepo);
 	}
 
 	/** A commit and its diff against its first parent. `ref` picks the repo, as in readFile. */
@@ -1257,9 +1257,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	}
 
 	/** The newest `limit` events, oldest first. */
-	async recentEvents(limit = 100): Promise<ProjectEvent[]> {
+	async recentEvents(limit = 100, viewer: PullViewer = { viewerId: null }): Promise<ProjectEvent[]> {
 		this.meta();
-		return this.sql
+		const events = this.sql
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events ORDER BY seq DESC LIMIT ?",
 				Math.max(1, Math.min(limit, 1000)),
@@ -1267,11 +1267,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			.toArray()
 			.reverse()
 			.map(toEvent);
+		return this.readableEvents(events, viewer);
 	}
 
-	async events(after = 0, limit = 100): Promise<ProjectEvent[]> {
+	async events(after = 0, limit = 100, viewer: PullViewer = { viewerId: null }): Promise<ProjectEvent[]> {
 		this.meta();
-		return this.sql
+		const events = this.sql
 			.exec<{ seq: number; ts: string; type: EventType; task_id: string | null; data: string }>(
 				"SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
 				after,
@@ -1279,6 +1280,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			)
 			.toArray()
 			.map(toEvent);
+		return this.readableEvents(events, viewer);
 	}
 
 	// ── Live events ──────────────────────────────────────────────────────────
@@ -1919,6 +1921,12 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.ci.getRun(number);
 	}
 
+	/** The other repository (by id) each of these runs took its code from: a fork's, for its pull requests. */
+	async ciRunHeads(numbers: number[]): Promise<Record<number, string>> {
+		this.meta();
+		return this.ci.runHeads(numbers);
+	}
+
 	async ciLogs(number: number, job: string, after?: number): Promise<{ logs: CiLogChunk[]; next: number | null }> {
 		this.meta();
 		return this.ci.logs(number, job, after);
@@ -2243,7 +2251,53 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		).one().n;
 	}
 
-	private emit(type: EventType, taskId: string | null, data: Record<string, unknown>) {
+	/** Current head access also applies to history recorded while a fork was public. */
+	private async readableEvents(events: ProjectEvent[], viewer: PullViewer): Promise<ProjectEvent[]> {
+		const pulls = [...new Set(events.filter((e) => e.type.startsWith("pull.")).map((e) => (e.data.pull as { number: number }).number))];
+		const pullHeads = new Map<number, string | null>();
+		for (let offset = 0; offset < pulls.length; offset += 90) {
+			const batch = pulls.slice(offset, offset + 90);
+			const { results } = await databaseOf(this.env).prepare(
+				`select i."number", p."headRepoId" from "pull" p join "issue" i on i."id" = p."issueId" where p."repoId" = ? and i."number" in (${batch.map(() => "?").join(",")})`,
+			).bind(this.meta().name, ...batch).all<{ number: number; headRepoId: string | null }>();
+			for (const p of results) pullHeads.set(p.number, p.headRepoId);
+		}
+		const runHeads = this.ci.runHeads(events.filter((e) => e.type === "ci.completed").map((e) => (e.data.run as CiRunSummary).number));
+		const heads = events.map((e): string | null | undefined => {
+			if (e.type.startsWith("pull.")) {
+				const number = (e.data.pull as { number: number }).number;
+				// null in D1 means a deleted fork, not a same-repository head.
+				if (pullHeads.has(number)) return pullHeads.get(number) ?? undefined;
+				return e.data._headRepo as string | null | undefined;
+			}
+			if (e.type === "ci.completed") {
+				return "_headRepo" in e.data ? e.data._headRepo as string | null : runHeads[(e.data.run as CiRunSummary).number];
+			}
+			return null;
+		});
+		const hidden = await unreadableRepos(databaseOf(this.env), heads.filter((h): h is string => typeof h === "string" && h !== this.meta().name), viewer);
+		return events.map((e, i) => {
+			const { _headRepo, ...data } = e.data;
+			// Missing historical provenance is hidden conservatively; a deleted fork has no readers.
+			const head = heads[i];
+			const unknownFork = head === undefined && (e.type.startsWith("pull.") || e.type === "ci.completed" && (data.run as CiRunSummary).fromFork);
+			const secret = unknownFork || typeof head === "string" && hidden.has(head);
+			return { ...e, data: secret ? this.privateEventData(e.type, data) : data };
+		});
+	}
+
+	private privateEventData(type: EventType, data: Record<string, unknown>): Record<string, unknown> {
+		if (type === "ci.completed") return { ...data, run: privateRun(data.run as CiRunSummary) };
+		return { ...data, pull: { ...data.pull as Record<string, unknown>, head: "", headRepo: "(private fork)" } };
+	}
+
+	/** Store provenance internally; shared live messages and webhooks have no head-repository viewer. */
+	private async emitForkEvent(type: EventType, data: Record<string, unknown>, headRepo: string | null | undefined): Promise<void> {
+		const hidden = headRepo === undefined || (headRepo !== null && await unreadableRepos(databaseOf(this.env), [headRepo], { viewerId: null }).then((s) => s.size > 0, () => true));
+		this.emit(type, null, { ...data, _headRepo: headRepo }, hidden ? this.privateEventData(type, data) : data);
+	}
+
+	private emit(type: EventType, taskId: string | null, data: Record<string, unknown>, sharedData = data) {
 		const ts = new Date().toISOString();
 		const { seq } = this.sql
 			.exec<{ seq: number }>(
@@ -2254,7 +2308,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				JSON.stringify(data),
 			)
 			.one();
-		const message = JSON.stringify({ seq, ts, type, taskId, data } satisfies ProjectEvent);
+		const message = JSON.stringify({ seq, ts, type, taskId, data: sharedData } satisfies ProjectEvent);
 		for (const ws of this.ctx.getWebSockets()) {
 			try {
 				ws.send(message);
@@ -2262,7 +2316,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 				// Socket already closed; the runtime cleans it up.
 			}
 		}
-		if (this.hooks.enqueue(type, taskId, data, this.repository()) > 0) {
+		if (this.hooks.enqueue(type, taskId, sharedData, this.repository()) > 0) {
 			this.scheduleAlarm(Date.now()).catch((err) => console.error("scheduling webhook deliveries failed", err));
 		}
 		if (taskId && (type === "task.merged" || type === "task.failed" || type === "task.conflict")) {

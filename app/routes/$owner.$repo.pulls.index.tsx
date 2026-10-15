@@ -77,7 +77,7 @@ function Pulls() {
 									<p className="mt-0.5 text-[11px] text-faint">
 										#{pull.number} by {pull.author ?? "a deleted account"} <TimeAgo at={pull.createdAt} /> ·{" "}
 										<span className="font-mono">
-											{pull.headRepo ? `${pull.headRepo}:` : ""}
+											{pull.headRepo ? (pull.head ? `${pull.headRepo}:` : "a private fork") : ""}
 											{pull.head}
 										</span>{" "}
 										→ <span className="font-mono">{pull.base}</span>

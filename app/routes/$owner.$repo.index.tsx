@@ -1,6 +1,6 @@
 import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
+import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, GitPullRequest, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
 import { CodeMenu, RepoCommands } from "../components/repo-access.tsx";
@@ -133,6 +133,19 @@ function Code() {
 									Upload
 								</Link>
 							)}
+								{/* A fork's branch goes back to its source as a pull request into the source's default branch. */}
+								{info.data?.repo.forkOf && onBranch && (ref ?? info.data.defaultBranch) && (
+									<Link
+										to="/$owner/$repo/pulls/new"
+										params={{ owner: info.data.repo.forkOf.owner, repo: info.data.repo.forkOf.name }}
+										search={{ headRepo: project, head: ref ?? info.data.defaultBranch }}
+										title={`Open a pull request from this branch into ${info.data.repo.forkOf.owner}/${info.data.repo.forkOf.name}`}
+										className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+									>
+										<GitPullRequest className="size-3.5" />
+										Contribute
+									</Link>
+								)}
 						</>
 					)}
 					{/* Cloning doesn't need the tree, so the menu stays while it loads or fails. */}

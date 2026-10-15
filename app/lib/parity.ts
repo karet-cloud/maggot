@@ -67,7 +67,7 @@ export const PARITY: ParitySection[] = [
 	{
 		title: "Collaboration",
 		items: [
-			{ feature: "Pull requests", status: "done", comment: "From a branch or a fork, with conversation, commits and files tabs; merge commit or squash; conflicts named; \"fixes #n\" closes issues. Agents also land work through the merge queue." },
+			{ feature: "Pull requests", status: "done", comment: "From a branch, or across repositories from any fork in the network you can read (pick the repository and branch, or owner:branch in the compare URL; Contribute on a fork opens one into its source), with conversation, commits and files tabs; merge commit or squash; conflicts named; \"fixes #n\" closes issues. Agents also land work through the merge queue." },
 			{ feature: "Code review", status: "done", comment: "Line comments gathered into a review, then comment, approve or request changes. A branch rule can require an approval from someone who can merge. No suggested changes or threaded replies yet." },
 			{ feature: "Issues", status: "done", comment: "Markdown, comments, labels, close and reopen, search, notifications, webhooks, and \"fixes #n\" closing on the default branch. No assignees or milestones yet." },
 			{
