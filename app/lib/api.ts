@@ -78,12 +78,35 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 		headers: body === undefined ? undefined : { "content-type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
-	if (!res.ok) {
-		// Our API nests errors under `error`; Better Auth's /auth routes return { code, message } at the top.
-		const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string }; code?: string; message?: string } | null;
-		throw new ApiError(res.status, json?.error?.code ?? json?.code ?? "HTTP_ERROR", json?.error?.message ?? json?.message ?? res.statusText);
-	}
+	if (!res.ok) throw await responseError(res);
 	return (await res.json()) as T;
+}
+
+/**
+ * The error a failed response carries. Our API nests it under `error`; Better Auth's /auth routes put
+ * { code, message } at the top. Anything else (an HTML error page, an empty body) still gets a message:
+ * over HTTP/2 there's no status text to fall back on, and an empty message showed an empty error box.
+ */
+async function responseError(res: Response): Promise<ApiError> {
+	type Body = { error?: { code?: unknown; message?: unknown } | string; code?: unknown; message?: unknown } | null;
+	const text = await res.text().catch(() => "");
+	const json = ((): Body => {
+		try {
+			return JSON.parse(text) as Body;
+		} catch {
+			return null;
+		}
+	})();
+	const nested = typeof json?.error === "object" ? json.error : null;
+	const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
+	const code = str(nested?.code) ?? str(json?.code) ?? "HTTP_ERROR";
+	const message =
+		str(nested?.message) ??
+		str(json?.message) ??
+		str(json?.error) ??
+		str(res.statusText) ??
+		(res.status === 429 ? "Too many requests; try again in a minute" : `Something went wrong (HTTP ${res.status}); try again`);
+	return new ApiError(res.status, code, message);
 }
 
 /** `project` is a repository's full name, `owner/repo`. */
@@ -109,6 +132,7 @@ export interface RepoFilter {
 	starredBy?: string;
 	q?: string;
 	sort?: "created" | "stars";
+	visibility?: "public";
 }
 
 export interface CreateRepoInput {
@@ -150,7 +174,7 @@ export const api = {
 			defaultBranch: repo.defaultBranch,
 			repo,
 		})),
-	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean }) =>
+	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean; defaultBranch?: string }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
 	fileHistory: (project: string, path: string, ref?: string, from?: string) =>
@@ -308,6 +332,12 @@ export const api = {
 	wikiRawUrl: (project: string, path: string) => `/api${p(project)}/wiki/raw?${new URLSearchParams({ path })}`,
 	star: (project: string, starred: boolean) => call<{ starred: boolean; stars: number }>(starred ? "PUT" : "DELETE", `${p(project)}/star`),
 	forks: (project: string) => call<{ repos: RepoInfo[] }>("GET", `${p(project)}/forks`).then((r) => r.repos),
+	/**
+	 * This repository and the rest of its fork network that the caller can read: where pull requests into it can come from.
+	 * `q` searches owner/name (the list stops at 100); `owner` lists what `owner:branch` can mean.
+	 */
+	network: (project: string, filter: { q?: string; owner?: string } = {}) =>
+		call<{ repos: RepoInfo[] }>("GET", `${p(project)}/network?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`).then((r) => r.repos),
 	fork: (project: string, name: string) => call<{ repo: RepoInfo }>("POST", `${p(project)}/forks`, { name }).then((r) => r.repo),
 
 	tokens: () => call<{ tokens: TokenInfo[] }>("GET", "/tokens").then((r) => r.tokens),
@@ -334,10 +364,7 @@ export const api = {
 	file: async (project: string, path: string, ref?: string) => {
 		const q = ref ? `?${new URLSearchParams({ ref })}` : "";
 		const res = await fetch(`/api${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
-		if (!res.ok) {
-			const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
-			throw new ApiError(res.status, json?.error?.code ?? "HTTP_ERROR", json?.error?.message ?? res.statusText);
-		}
+		if (!res.ok) throw await responseError(res);
 		return res.text();
 	},
 	commit: (project: string, hash: string, ref?: string) =>
@@ -366,6 +393,7 @@ export const keys = {
 	config: ["config"] as const,
 	repos: (filter: string | RepoFilter = "") => ["repos", filter] as const,
 	forks: (project: string) => ["project", project, "forks"] as const,
+	network: (project: string, filter: { q?: string; owner?: string } = {}) => ["project", project, "network", filter.q ?? "", filter.owner ?? ""] as const,
 	hooks: (project: string) => ["project", project, "hooks"] as const,
 	deliveries: (project: string, id: string) => ["project", project, "hooks", id] as const,
 	search: (project: string, q: string) => ["project", project, "search", q] as const,

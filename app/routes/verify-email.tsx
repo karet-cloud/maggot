@@ -2,7 +2,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CheckCircle2, CircleAlert, MailWarning } from "lucide-react";
 import { useEffect } from "react";
-import { api, keys } from "../lib/api.ts";
+import { keys } from "../lib/api.ts";
+import { viewerQuery } from "../lib/queries.ts";
 import { Spinner } from "../components/ui.tsx";
 
 // Where the link in a verification email lands, after the server has checked it.
@@ -26,7 +27,7 @@ function VerifyEmail() {
 		void queryClient.invalidateQueries({ queryKey: keys.me });
 	}, [queryClient]);
 	// Landing here doesn't prove anything by itself: only the account says whether it's verified.
-	const me = useQuery({ queryKey: keys.me, queryFn: api.me, staleTime: 0 });
+	const me = useQuery({ ...viewerQuery, staleTime: 0 });
 	if (!error && me.isPending) return <Spinner className="mx-auto mt-24" />;
 	const verified = me.data?.emailVerified ?? false;
 	return (
@@ -34,7 +35,7 @@ function VerifyEmail() {
 			{error ? (
 				<>
 					<CircleAlert className="mx-auto size-8 text-rose-300" />
-					<h1 className="mt-3 text-lg font-semibold">Couldn't verify your email</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">Couldn't verify your email</h1>
 					<p className="mt-2 text-sm text-dim">
 						{REASONS[error] ?? "Something went wrong."} Sign in and use “Resend the email” at the top of the page to get a new link.
 					</p>
@@ -42,7 +43,7 @@ function VerifyEmail() {
 			) : !verified ? (
 				<>
 					<MailWarning className="mx-auto size-8 text-amber-300" />
-					<h1 className="mt-3 text-lg font-semibold">{me.data ? "Your email isn't verified yet" : "Sign in to continue"}</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">{me.data ? "Your email isn't verified yet" : "Sign in to continue"}</h1>
 					<p className="mt-2 text-sm text-dim">
 						{me.data
 							? "Open the link in the email we sent you. If it's gone, use “Resend the email” at the top of the page."
@@ -52,7 +53,7 @@ function VerifyEmail() {
 			) : (
 				<>
 					<CheckCircle2 className="mx-auto size-8 text-emerald-300" />
-					<h1 className="mt-3 text-lg font-semibold">Email verified</h1>
+					<h1 className="mt-3 text-2xl font-semibold tracking-tight">Email verified</h1>
 					<p className="mt-2 text-sm text-dim">You can create repositories and push to them now.</p>
 				</>
 			)}

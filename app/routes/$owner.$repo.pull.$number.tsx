@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Check, CircleAlert, FileDiff, GitCommitHorizontal, GitMerge, MessageSquare, X } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
@@ -7,15 +7,28 @@ import { DiffView, lineKey, type DiffNotes } from "../components/diff.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { PullChecksBox, usePullChecks } from "../components/actions.tsx";
+import { listPatches, openCountPatch, pendingComment, stateChange } from "../components/issues.tsx";
 import { Decision, PullStateBadge } from "../components/pulls.tsx";
 import { Button, cx, Empty, ErrorNote, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type IssueComment, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
+import { api, ApiError, keys, repoParams, type IssueComment, type IssueState, type MergeMethod, type Pull, type Review, type ReviewComment, type ReviewState } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { tab?: "commits" | "files" };
 
+const pullQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pull(project, number), queryFn: () => api.pull(project, number) });
+const pullFilesQuery = (project: string, number: number) => queryOptions({ queryKey: keys.pullFiles(project, number), queryFn: () => api.pullFiles(project, number) });
+
 export const Route = createFileRoute("/$owner/$repo/pull/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "commits" || s.tab === "files" ? { tab: s.tab } : {}),
+	loaderDeps: ({ search }) => ({ tab: search.tab }),
+	// The full diff is costly to work out, so a hover fetches it only for links to the Files tab.
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		const number = Number(params.number);
+		return Number.isInteger(number) ? preload(context.queryClient, pullQuery(project, number), deps.tab === "files" && pullFilesQuery(project, number)) : undefined;
+	},
 	component: PullPage,
 });
 
@@ -24,8 +37,8 @@ function PullPage() {
 	const project = `${owner}/${repo}`;
 	const number = Number(raw);
 	const { tab } = Route.useSearch();
-	const data = useQuery({ queryKey: keys.pull(project, number), queryFn: () => api.pull(project, number), enabled: Number.isInteger(number) });
-	const files = useQuery({ queryKey: keys.pullFiles(project, number), queryFn: () => api.pullFiles(project, number), enabled: Number.isInteger(number) });
+	const data = useQuery({ ...pullQuery(project, number), enabled: Number.isInteger(number) });
+	const files = useQuery({ ...pullFilesQuery(project, number), enabled: Number.isInteger(number) });
 
 	if (data.isPending) return <Spinner />;
 	if (data.error) {
@@ -45,7 +58,7 @@ function PullPage() {
 	return (
 		<div className="space-y-4">
 			<header className="space-y-2">
-				<h1 className="text-xl font-semibold break-words">
+				<h1 className="text-2xl font-semibold tracking-tight break-words">
 					{pull.title} <span className="font-normal text-faint">#{pull.number}</span>
 				</h1>
 				<div className="flex flex-wrap items-center gap-2 text-sm text-dim">
@@ -58,7 +71,7 @@ function PullPage() {
 						into{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">{pull.base}</code> from{" "}
 						<code className="rounded bg-raised px-1.5 font-mono text-xs text-fg">
-							{pull.headRepo ? `${pull.headRepo}:` : ""}
+							{pull.headRepo ? (pull.head ? `${pull.headRepo}:` : "a private fork") : ""}
 							{pull.head}
 						</code>
 					</span>
@@ -110,17 +123,38 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 		void queryClient.invalidateQueries({ queryKey: keys.pulls(project) });
 		void queryClient.invalidateQueries({ queryKey: keys.project(project) });
 	};
-	const comment = useMutation({
-		mutationFn: async (toggle: boolean) => {
-			const state = toggle ? (pull.state === "open" ? "closed" : "open") : undefined;
-			if (reply.trim()) await api.comment(project, pull.number, reply, state);
+	// One request either way, as on issues.
+	const comment = useOptimistic({
+		mutationFn: async ({ body, state }: { body: string; state?: IssueState }) => {
+			if (body.trim()) await api.comment(project, pull.number, body, state);
 			else if (state) await api.updateIssue(project, pull.number, { state });
 		},
-		onSuccess: () => {
-			setReply("");
-			refresh();
+		apply: ({ body, state }) => {
+			const by = viewer.data?.username ?? null;
+			const posted = body.trim() ? pendingComment(body, by) : null;
+			const change = state ? { ...stateChange(state, by), pullState: state } : {};
+			return [
+				...openCountPatch(project, "openPulls", state),
+				patch<PullData>(
+					keys.pull(project, pull.number),
+					(old) => ({
+						...old,
+						pull: { ...old.pull, ...change, comments: old.pull.comments + (posted ? 1 : 0) },
+						comments: posted ? [...old.comments, posted] : old.comments,
+					}),
+					true,
+				),
+				...listPatches(keys.pulls(project), "pulls", pull.number, (row) => ({ ...change, comments: row.comments + (posted ? 1 : 0) })),
+			];
 		},
+		// The draft comes back unless another has been started since.
+		onError: (_error, { body }) => setReply((r) => r || body),
+		action: "update the pull request",
 	});
+	const send = (toggle: boolean) => {
+		comment.mutate({ body: reply, state: toggle ? (pull.state === "open" ? "closed" : "open") : undefined });
+		setReply("");
+	};
 	const timeline = useMemo(() => {
 		const items: { at: string; node: ReactNode }[] = [
 			...data.comments.map((c) => ({ at: c.createdAt, node: <CommentCard key={`c${c.id}`} project={project} comment={c} /> })),
@@ -142,14 +176,13 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 			{viewer.data && pull.pullState !== "merged" && (
 				<div className="space-y-2">
 					<MarkdownEditor value={reply} onChange={setReply} project={project} label="Comment" placeholder="Leave a comment" rows={4} />
-					<ErrorNote error={comment.error} />
 					<div className="flex justify-end gap-2">
 						{pull.canEdit && (
-							<Button busy={comment.isPending && comment.variables === true} onClick={() => comment.mutate(true)} disabled={needsVerification && Boolean(reply.trim())}>
+							<Button onClick={() => send(true)} disabled={needsVerification && Boolean(reply.trim())}>
 								{pull.state === "open" ? "Close pull request" : "Reopen pull request"}
 							</Button>
 						)}
-						<Button variant="primary" busy={comment.isPending && comment.variables === false} disabled={!reply.trim() || needsVerification} onClick={() => comment.mutate(false)}>
+						<Button variant="primary" disabled={!reply.trim() || needsVerification} onClick={() => send(false)}>
 							Comment
 						</Button>
 					</div>
@@ -162,7 +195,7 @@ function Conversation({ project, data }: { project: string; data: PullData }) {
 function MergeBox({ project, pull, onDone }: { project: string; pull: Pull; onDone: () => void }) {
 	const [method, setMethod] = useState<MergeMethod>("merge");
 	// The head shown in Files changed is the one that merges; if the branch moved since, the merge stops.
-	const files = useQuery({ queryKey: keys.pullFiles(project, pull.number), queryFn: () => api.pullFiles(project, pull.number), enabled: pull.pullState === "open" });
+	const files = useQuery({ ...pullFilesQuery(project, pull.number), enabled: pull.pullState === "open" });
 	const merge = useMutation({ mutationFn: () => api.mergePull(project, pull.number, method, files.data?.head), onSuccess: onDone });
 	// The server's own judgement of the checks (what a merge would get), so the two can't disagree.
 	const checks = usePullChecks(project, pull.number, pull.pullState === "open");

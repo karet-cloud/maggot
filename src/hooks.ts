@@ -366,8 +366,8 @@ function payloadsFor(type: EventType, taskId: string | null, data: Record<string
 			},
 		];
 	}
-	if (type === "release.published") {
-		return [{ event: "release", payload: { event: "release", action: "published", release: data, repository: repo } }];
+	if (type === "release.published" || type === "release.edited" || type === "release.deleted") {
+		return [{ event: "release", payload: { event: "release", action: type.slice("release.".length), release: data, repository: repo } }];
 	}
 	if (type.startsWith("pull.")) {
 		return [{ event: "pull_request", payload: { event: "pull_request", action: type.slice("pull.".length), ...data, repository: repo } }];

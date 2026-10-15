@@ -1,19 +1,34 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { BookOpen, FilePlus2, History, PencilLine, Save, Trash2 } from "lucide-react";
 import { useState, type KeyboardEvent, type ReactNode } from "react";
 import { pageNameProblem, pageSlug, pageTitle } from "../../src/wiki-pages.ts";
 import { api, ApiError, keys, repoParams, type WikiIndex, type WikiPage } from "../lib/api.ts";
+import { projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification } from "../routes/__root.tsx";
 import { Markdown } from "./markdown.tsx";
-import { Button, CopyField, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
+import { Button, buttonClass, CopyField, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 const MAX_PAGE_BYTES = 1024 * 1024;
 
+export const wikiQuery = (project: string) => queryOptions({ queryKey: keys.wiki(project), queryFn: () => api.wiki(project) });
+export const wikiPageQuery = (project: string, slug: string) =>
+	queryOptions({
+		queryKey: keys.wikiPage(project, slug),
+		queryFn: () => api.wikiPage(project, slug),
+		retry: (n, err) => !(err instanceof ApiError && err.status === 404) && n < 2,
+	});
+
+/** For loaders: what every wiki screen needs; the index only while the wiki isn't known to be off. */
+export function wikiQueries(queryClient: QueryClient, project: string) {
+	const hasWiki = queryClient.getQueryData(projectQuery(project).queryKey)?.repo.hasWiki;
+	return [projectQuery(project), hasWiki !== false && wikiQuery(project)];
+}
+
 /** The repository and its wiki's pages, which every wiki screen needs. */
 export function useWiki(project: string) {
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
-	const index = useQuery({ queryKey: keys.wiki(project), queryFn: () => api.wiki(project), enabled: info.data?.repo.hasWiki !== false });
+	const info = useQuery(projectQuery(project));
+	const index = useQuery({ ...wikiQuery(project), enabled: info.data?.repo.hasWiki !== false });
 	const repo = info.data?.repo;
 	return {
 		info,
@@ -42,7 +57,7 @@ export function WikiGate({ project, children }: { project: string; children: (wi
 
 /** A wiki screen: the page (or form) beside the page list, the wiki's own sidebar and how to clone it. */
 export function WikiShell({ project, index, current, children }: { project: string; index: WikiIndex; current?: string; children: ReactNode }) {
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const slugs = index.pages.map((p) => p.slug);
 	return (
 		<div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_240px]">
@@ -117,11 +132,7 @@ const action = "flex items-center gap-1 rounded px-2 py-1 text-[11px] font-norma
 export function WikiPageView({ project, index, slug, canEdit }: { project: string; index: WikiIndex; slug: string; canEdit: boolean }) {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const page = useQuery({
-		queryKey: keys.wikiPage(project, slug),
-		queryFn: () => api.wikiPage(project, slug),
-		retry: (n, err) => !(err instanceof ApiError && err.status === 404) && n < 2,
-	});
+	const page = useQuery(wikiPageQuery(project, slug));
 	const remove = useMutation({
 		mutationFn: () => api.deleteWikiPage(project, page.data?.slug ?? slug, page.data?.head ?? null),
 		onSuccess: async () => {
@@ -204,7 +215,7 @@ export function WikiWelcome({ project, canEdit }: { project: string; canEdit: bo
 					to="/$owner/$repo/wiki/_new"
 					params={repoParams(project)}
 					search={{ title: "Home" }}
-					className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-400"
+					className={buttonClass("primary", "mt-3")}
 				>
 					<FilePlus2 className="size-4" />
 					Create the first page

@@ -4,6 +4,7 @@ import {
 	BookOpen,
 	CircleCheck,
 	CircleDot,
+	GitBranch,
 	GitBranchPlus,
 	GitCommitHorizontal,
 	GitMerge,
@@ -29,6 +30,7 @@ import { cx, TimeAgo } from "./ui.tsx";
 const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"project.created": { icon: <Sparkles className="size-3.5" />, tone: "text-accent" },
 	"repo.pushed": { icon: <Upload className="size-3.5" />, tone: "text-sky-300" },
+	"repo.default_branch": { icon: <GitBranch className="size-3.5" />, tone: "text-sky-300" },
 	"task.created": { icon: <CircleDot className="size-3.5" />, tone: "text-violet-300" },
 	"task.ready": { icon: <GitBranchPlus className="size-3.5" />, tone: "text-sky-300" },
 	"task.submitted": { icon: <Send className="size-3.5" />, tone: "text-amber-300" },
@@ -41,6 +43,8 @@ const ICON: Record<EventType, { icon: ReactNode; tone: string }> = {
 	"tag.created": { icon: <Tag className="size-3.5" />, tone: "text-sky-300" },
 	"tag.deleted": { icon: <Tag className="size-3.5" />, tone: "text-zinc-400" },
 	"release.published": { icon: <Package className="size-3.5" />, tone: "text-emerald-300" },
+	"release.edited": { icon: <Package className="size-3.5" />, tone: "text-dim" },
+	"release.deleted": { icon: <Package className="size-3.5" />, tone: "text-faint" },
 	"issue.opened": { icon: <CircleDot className="size-3.5" />, tone: "text-emerald-300" },
 	"issue.closed": { icon: <CircleCheck className="size-3.5" />, tone: "text-violet-300" },
 	"issue.reopened": { icon: <CircleDot className="size-3.5" />, tone: "text-emerald-300" },
@@ -69,6 +73,8 @@ export function describe(e: ProjectEvent): string {
 			if (!d.from) return d.to ? `Pushed ${String(d.branch)} at ${shortOid(d.to as string)}` : "Pushed";
 			return `Pushed ${String(d.branch)} ${shortOid(d.from as string)} → ${shortOid(d.to as string)}`;
 		}
+		case "repo.default_branch":
+			return `Default branch changed from ${String(d.from)} to ${String(d.to)}`;
 		case "task.created":
 			return `${(d.agent as string | null) ?? "Someone"} started a task`;
 		case "task.ready": {
@@ -95,6 +101,10 @@ export function describe(e: ProjectEvent): string {
 			return `Deleted tag ${String(d.tag)}`;
 		case "release.published":
 			return `Released ${String(d.name ?? d.tag)}`;
+		case "release.edited":
+			return `Edited release ${String(d.name ?? d.tag)}`;
+		case "release.deleted":
+			return `Deleted release ${String(d.name ?? d.tag)}`;
 		case "issue.opened":
 		case "issue.closed":
 		case "issue.reopened":

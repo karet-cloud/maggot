@@ -21,6 +21,7 @@
     "test/project-merges.test.ts",
     "test/ci-runs.test.ts",
     "test/ci-steps.test.ts",
+    "test/network.test.ts",
     "test/sql.ts",
     "test/schema.test.ts"
   ]

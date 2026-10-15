@@ -1,27 +1,45 @@
-import { useQuery } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import { createFileRoute, Link, notFound } from "@tanstack/react-router";
 import { BookMarked, Building2, Star, Users, UsersRound } from "lucide-react";
-import { OrgHeader, People, Teams } from "../components/org.tsx";
+import { OrgHeader, orgQuery, People, Teams } from "../components/org.tsx";
 import type { ReactNode } from "react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Spinner } from "../components/ui.tsx";
+import { routeName } from "../../src/names.ts";
 import { api, keys, type RepoFilter } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 import { useViewer } from "./__root.tsx";
 
+type Tab = "stars" | "people" | "teams";
+
 export const Route = createFileRoute("/$owner/")({
-	validateSearch: (search: Record<string, unknown>): { tab?: "stars" | "people" | "teams" } =>
+	// A page's own first segment with no page of its own (/orgs, say) isn't a profile: no account can have that name.
+	beforeLoad: ({ params }) => {
+		if (routeName(params.owner)) throw notFound();
+	},
+	validateSearch: (search: Record<string, unknown>): { tab?: Tab } =>
 		search.tab === "stars" || search.tab === "people" || search.tab === "teams" ? { tab: search.tab } : {},
+	loaderDeps: ({ search }) => ({ tab: search.tab }),
+	loader: ({ context, params, deps }) =>
+		preload(context.queryClient, orgQuery(params.owner), deps.tab !== "people" && deps.tab !== "teams" && reposQuery(params.owner, deps.tab)),
 	component: Profile,
 });
+
+const reposQuery = (owner: string, tab?: Tab) => {
+	const filter: RepoFilter = tab === "stars" ? { starredBy: owner } : { owner };
+	return queryOptions({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+};
 
 function Profile() {
 	const { owner } = Route.useParams();
 	const { tab } = Route.useSearch();
 	const viewer = useViewer();
-	const filter: RepoFilter = tab === "stars" ? { starredBy: owner } : { owner };
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), enabled: tab !== "people" && tab !== "teams" });
+	const repos = useQuery({
+		...reposQuery(owner, tab),
+		enabled: tab !== "people" && tab !== "teams",
+	});
 	// The same URLs serve people and organizations; an organization answers this.
-	const org = useQuery({ queryKey: keys.org(owner), queryFn: () => api.org(owner), retry: false });
+	const org = useQuery(orgQuery(owner));
 	const self = viewer.data?.username === owner;
 	if (org.data) {
 		const o = org.data;
@@ -51,7 +69,7 @@ function Profile() {
 			<div className="flex items-center gap-3">
 				<div className="flex size-12 items-center justify-center rounded-full bg-accent/15 font-mono text-lg text-accent">{owner.slice(0, 2)}</div>
 				<div>
-					<h1 className="font-mono text-xl font-semibold">{owner}</h1>
+					<h1 className="font-mono text-2xl font-semibold tracking-tight">{owner}</h1>
 					<p className="text-xs text-dim">{tab === "stars" ? (self ? "Repositories you starred" : "Repositories they starred") : self ? "Your repositories, public and private" : "Public repositories"}</p>
 				</div>
 				{self && (
@@ -81,7 +99,7 @@ function Profile() {
 	);
 }
 
-function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: "stars" | "people" | "teams"; active: boolean; icon: ReactNode; label: string }) {
+function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: Tab; active: boolean; icon: ReactNode; label: string }) {
 	return (
 		<Link
 			to="/$owner"
