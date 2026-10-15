@@ -15,7 +15,7 @@ export interface ParitySection {
 	items: ParityItem[];
 }
 
-export const PARITY_UPDATED = "2026-10-14";
+export const PARITY_UPDATED = "2026-10-15";
 
 export const PARITY: ParitySection[] = [
 	{
@@ -121,6 +121,7 @@ export const PARITY: ParitySection[] = [
 			{ feature: "Email verification", status: "done", comment: "Required to create repositories or push whenever the server can send email." },
 			{ feature: "Password reset and change", status: "done", comment: "Emails need a sending domain; without one, an admin can issue the link." },
 			{ feature: "Personal access tokens", status: "partial", comment: "Full access to your account. No scopes or expiry yet." },
+			{ feature: "Light and dark themes", status: "done", comment: "Follows the system until you pick one in the top bar; the choice applies to every page." },
 			{ feature: "Two-factor authentication", status: "missing", comment: "Better Auth has a plugin for it." },
 			{ feature: "Sign in with GitHub or Google", status: "missing", comment: "" },
 			{ feature: "SSH keys", status: "done", comment: "Ed25519, ECDSA and RSA (SHA-2 signatures) keys, with fingerprints and last-used times." },

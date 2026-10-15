@@ -64,7 +64,7 @@ function ProjectLayout() {
 					<div className="flex flex-wrap items-start justify-between gap-4">
 						<div className="min-w-0">
 							<div className="flex items-center gap-3">
-								<h1 className="min-w-0 break-all font-mono text-xl font-semibold tracking-tight">{project}</h1>
+								<h1 className="min-w-0 break-all font-mono text-2xl font-semibold tracking-tight">{project}</h1>
 								{p && <VisibilityBadge visibility={p.repo.visibility} />}
 								{archived && <ArchivedBadge />}
 								<LiveDot status={live.status} />

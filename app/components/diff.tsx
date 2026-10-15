@@ -256,7 +256,7 @@ function AddNote({ notes, path, row }: { notes?: DiffNotes; path: string; row: R
 		<button
 			type="button"
 			onClick={() => notes.onAdd?.(path, at.side, at.line)}
-			className="absolute top-0 left-0 hidden size-5 items-center justify-center rounded bg-accent text-[13px] leading-none text-white group-hover:flex"
+			className="absolute top-0 left-0 hidden size-5 items-center justify-center rounded bg-accent text-[13px] leading-none text-on-accent group-hover:flex"
 			aria-label="Comment on this line"
 		>
 			+

@@ -46,7 +46,7 @@ function Notifications() {
 	return (
 		<main className="mx-auto max-w-[900px] space-y-4 px-5 py-8">
 			<div className="flex flex-wrap items-center gap-3">
-				<h1 className="text-lg font-semibold">Notifications</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">Notifications</h1>
 				<nav className="flex overflow-hidden rounded-md border border-line-strong text-xs">
 					<Link to="/notifications" search={{}} className={cx("px-2.5 py-1", !all ? "bg-raised text-fg" : "text-faint hover:text-fg")}>
 						Unread

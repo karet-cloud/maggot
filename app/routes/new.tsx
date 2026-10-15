@@ -56,7 +56,7 @@ function NewRepo() {
 	const full = usage.repos >= usage.maxRepos;
 	return (
 		<main className="mx-auto max-w-2xl px-5 py-8">
-			<h1 className="text-lg font-semibold">Create a repository</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Create a repository</h1>
 			<p className="mt-1 text-sm text-dim">Push an existing project to it with git, start from a README, or import a public repository.</p>
 			<p className="mt-2 text-xs text-faint">
 				You have {usage.repos} of {usage.maxRepos} repositories, using {formatBytes(usage.bytes)} of {formatBytes(usage.maxBytes)}.
