@@ -1,18 +1,27 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowLeft, ChevronRight, CircleStop, Cpu, GitBranch, RotateCw, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CiIcon, ciLabel, ciState, Elapsed, isActive, RunArtifacts, type CiState } from "../components/actions.tsx";
+import { CiIcon, ciLabel, ciState, Elapsed, isActive, RunArtifacts, runArtifactsQuery, type CiState } from "../components/actions.tsx";
 import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type CiJob, type CiLogChunk } from "../lib/api.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 import { trigger } from "./$owner.$repo.actions.index.tsx";
 
 type Search = { job?: string };
 
 export const Route = createFileRoute("/$owner/$repo/actions/runs/$number")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ job: typeof s.job === "string" && s.job ? s.job : undefined }),
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		const number = Number(params.number);
+		const valid = Number.isInteger(number);
+		return preload(context.queryClient, projectQuery(project), valid && runQuery(project, number), valid && runArtifactsQuery(project, number));
+	},
 	component: RunPage,
 });
+
+const runQuery = (project: string, number: number) => queryOptions({ queryKey: keys.ciRun(project, number), queryFn: () => api.ciRun(project, number) });
 
 function RunPage() {
 	const { owner, repo, number: raw } = Route.useParams();
@@ -22,10 +31,9 @@ function RunPage() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const picked = useRef<{ run: number; job: string } | null>(null);
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const run = useQuery({
-		queryKey: keys.ciRun(project, number),
-		queryFn: () => api.ciRun(project, number),
+		...runQuery(project, number),
 		enabled: Number.isInteger(number),
 		refetchInterval: (q) => (q.state.data && isActive(q.state.data) ? 3000 : false),
 	});
@@ -75,7 +83,7 @@ function RunPage() {
 			<Panel>
 				<div className="flex flex-wrap items-start justify-between gap-3 p-4">
 					<div className="min-w-0 space-y-1">
-						<h1 className="flex items-center gap-2 text-lg font-semibold">
+						<h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
 							<CiIcon state={state} className="size-5" />
 							{r.workflow} <span className="font-normal text-faint">#{r.number}</span>
 						</h1>

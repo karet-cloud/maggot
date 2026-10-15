@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitPullRequest } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -8,9 +8,13 @@ import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { BranchSelect, HeadPicker, usePullHead } from "../components/refs.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { base?: string; head?: string; headRepo?: string };
+
+const previewQuery = (project: string, base: string, head: string, headRepo?: string) =>
+	queryOptions({ queryKey: [...keys.pulls(project), "preview", base, headRepo ?? "", head], queryFn: () => api.pullPreview(project, base, head, headRepo) });
 
 // Open a pull request from a branch here, or from a branch of a repository in the fork network: `head=owner:branch` as on GitHub, or `headRepo` = owner/name.
 export const Route = createFileRoute("/$owner/$repo/pulls/new")({
@@ -19,6 +23,15 @@ export const Route = createFileRoute("/$owner/$repo/pulls/new")({
 		head: typeof s.head === "string" && s.head ? s.head : undefined,
 		headRepo: typeof s.headRepo === "string" && s.headRepo ? s.headRepo : undefined,
 	}),
+	loaderDeps: ({ search }) => search,
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// Without a base in the URL the preview is against the default branch, known once the project is cached.
+		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
+		// `owner:branch` names another repository, which the page looks up before previewing.
+		const local = deps.head && !deps.head.includes(":");
+		return preload(context.queryClient, projectQuery(project), base && local ? previewQuery(project, base, deps.head as string, deps.headRepo) : null);
+	},
 	component: NewPull,
 });
 
@@ -30,18 +43,14 @@ function NewPull() {
 	const queryClient = useQueryClient();
 	const viewer = useViewer();
 	const needsVerification = useNeedsVerification();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const base = search.base ?? info.data?.defaultBranch;
 	// The changes come from a branch here or of a repository in the fork network (`owner:branch` or `headRepo`).
 	const resolved = usePullHead(project, search);
 	const head = resolved.branch;
 	const headProject = resolved.repo ?? project;
 	const ready = Boolean(base && head && resolved.repo);
-	const preview = useQuery({
-		queryKey: [...keys.pulls(project), "preview", base ?? "", resolved.fork ?? "", head ?? ""],
-		queryFn: () => api.pullPreview(project, base as string, head as string, resolved.fork),
-		enabled: ready,
-	});
+	const preview = useQuery({ ...previewQuery(project, base ?? "", head ?? "", resolved.fork), enabled: ready });
 	const [title, setTitle] = useState("");
 	const [body, setBody] = useState("");
 	// The first commit's subject makes a good default title, as on GitHub.

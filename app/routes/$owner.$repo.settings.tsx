@@ -1,32 +1,74 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Archive, ArchiveRestore, ArrowRightLeft, BookOpen, PencilLine, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowRightLeft, BookOpen, GitBranch, PencilLine, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
-import { Webhooks } from "../components/webhooks.tsx";
-import { BranchProtection } from "../components/branch-protection.tsx";
-import { ActionsSettings } from "../components/actions.tsx";
-import { Collaborators } from "../components/collaborators.tsx";
+import { hooksQuery, Webhooks } from "../components/webhooks.tsx";
+import { BranchProtection, branchRulesQuery } from "../components/branch-protection.tsx";
+import { ActionsSettings, ciSettingsQuery } from "../components/actions.tsx";
+import { Collaborators, collaboratorsQuery } from "../components/collaborators.tsx";
 import { Button, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type RepoInfo, type Visibility } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
-export const Route = createFileRoute("/$owner/$repo/settings")({ component: RepoSettings });
+export const Route = createFileRoute("/$owner/$repo/settings")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// Everything below is for admins; once the repository is cached, only fetched for them.
+		const repo = context.queryClient.getQueryData(projectQuery(project).queryKey)?.repo;
+		const admin = repo?.canAdmin !== false;
+		const active = admin && !repo?.archivedAt;
+		return preload(
+			context.queryClient,
+			projectQuery(project),
+			active && collaboratorsQuery(project),
+			active && branchRulesQuery(project),
+			admin && ciSettingsQuery(project),
+			admin && hooksQuery(project),
+			repo?.isOwner && transferQuery(project),
+		);
+	},
+	component: RepoSettings,
+});
+
+const transferQuery = (project: string) => queryOptions({ queryKey: keys.transfer(project), queryFn: () => api.transfer(project) });
 
 function RepoSettings() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
-	const [description, setDescription] = useState("");
-	useEffect(() => setDescription(info.data?.repo.description ?? ""), [info.data?.repo.description]);
+	const info = useQuery(projectQuery(project));
+	// What's being typed, else the saved description; a failed save gives the typed text back.
+	const [draft, setDraft] = useState<string | null>(null);
+	const description = draft ?? info.data?.repo.description ?? "";
 	const refresh = () => {
 		void queryClient.invalidateQueries({ queryKey: keys.project(project) });
 		void queryClient.invalidateQueries({ queryKey: ["repos"] });
 	};
+	// Visibility and archiving wait for the server; the description and features show at once.
 	const update = useMutation({
-		mutationFn: (patch: { visibility?: Visibility; description?: string | null; archived?: boolean; hasWiki?: boolean }) => api.updateRepo(project, patch),
+		mutationFn: (patch: { visibility?: Visibility; archived?: boolean }) => api.updateRepo(project, patch),
 		onSuccess: refresh,
+	});
+	const edit = useOptimistic({
+		mutationFn: (change: { description?: string | null; hasWiki?: boolean }) => api.updateRepo(project, change),
+		apply: (change) => {
+			const name = info.data?.repo.fullName;
+			return [
+				patch<Awaited<ReturnType<typeof api.project>>>(
+					keys.project(project),
+					(old) => ({ ...old, ...(change.description !== undefined && { description: change.description }), repo: { ...old.repo, ...change } }),
+					true,
+				),
+				patch<RepoInfo[]>(["repos"], (old) => old.map((r) => (r.fullName === name ? { ...r, ...change } : r))),
+			];
+		},
+		onError: (_error, change) => {
+			if (change.description !== undefined) setDraft(change.description ?? "");
+		},
+		action: "save the settings",
 	});
 	const remove = useMutation({
 		mutationFn: () => api.deleteRepo(project),
@@ -51,17 +93,19 @@ function RepoSettings() {
 			<Panel title="General">
 				<div className="divide-y divide-line">
 					<Rename project={project} repo={current} disabled={archived} />
+					<DefaultBranch project={project} repo={current} disabled={archived} />
 					<form
 						onSubmit={(e) => {
 							e.preventDefault();
-							update.mutate({ description: description.trim() || null });
+							edit.mutate({ description: description.trim() || null });
+							setDraft(null);
 						}}
 						className="space-y-3 p-4"
 					>
 						<Field label="Description">
-							<Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Optional" disabled={archived} />
+							<Input value={description} onChange={(e) => setDraft(e.target.value)} placeholder="Optional" disabled={archived} />
 						</Field>
-						<Button type="submit" busy={update.isPending && update.variables?.description !== undefined} disabled={archived}>
+						<Button type="submit" disabled={archived}>
 							Save
 						</Button>
 					</form>
@@ -87,8 +131,8 @@ function RepoSettings() {
 					<input
 						type="checkbox"
 						checked={current.hasWiki}
-						disabled={archived || update.isPending}
-						onChange={(e) => update.mutate({ hasWiki: e.target.checked })}
+						disabled={archived}
+						onChange={(e) => edit.mutate({ hasWiki: e.target.checked })}
 						className="mt-0.5 accent-accent"
 					/>
 					<span>
@@ -186,9 +230,62 @@ function Rename({ project, repo, disabled }: { project: string; repo: RepoInfo; 
 	);
 }
 
+function DefaultBranch({ project, repo, disabled }: { project: string; repo: RepoInfo; disabled: boolean }) {
+	const queryClient = useQueryClient();
+	const [branch, setBranch] = useState(repo.defaultBranch);
+	useEffect(() => setBranch(repo.defaultBranch), [repo.defaultBranch]);
+	const branches = useQuery({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false) });
+	const change = useMutation({
+		mutationFn: () => api.updateRepo(project, { defaultBranch: branch }),
+		onSuccess: (updated) => {
+			queryClient.setQueryData(keys.project(project), (old: Awaited<ReturnType<typeof api.project>> | undefined) => (old ? { ...old, repo: updated } : old));
+			// Everything read at the default branch (code, commits, pull request bases) now reads another one.
+			void queryClient.invalidateQueries({ queryKey: ["project", project] });
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+		},
+	});
+	const listed = branches.data?.branches.map((b) => b.name).filter((name) => !name.startsWith("maggot-incoming/")) ?? [];
+	// An older import or fork can name a default branch that doesn't exist; it stays listed so another can be picked.
+	const missing = branches.data !== undefined && !listed.includes(repo.defaultBranch);
+	const names = listed.includes(repo.defaultBranch) ? listed : [repo.defaultBranch, ...listed];
+	return (
+		<form
+			onSubmit={(e) => {
+				e.preventDefault();
+				if (confirm(`Make ${branch} the default branch of ${project}? New pull requests, the code page and clones will use it.`)) change.mutate();
+			}}
+			className="space-y-3 p-4"
+		>
+			<Field label="Default branch" hint="The branch the code page shows, new pull requests target, agent tasks merge into and a clone checks out.">
+				<div className="flex gap-2">
+					<select
+						value={branch}
+						onChange={(e) => setBranch(e.target.value)}
+						disabled={disabled || branches.isPending}
+						aria-label="Default branch"
+						className="min-w-0 flex-1 rounded-md border border-line-strong bg-bg px-2.5 font-mono text-sm text-fg"
+					>
+						{names.map((name) => (
+							<option key={name} value={name}>
+								{name}
+								{missing && name === repo.defaultBranch ? " (doesn't exist)" : ""}
+							</option>
+						))}
+					</select>
+					<Button type="submit" busy={change.isPending} disabled={disabled || branch === repo.defaultBranch} className="shrink-0">
+						<GitBranch className="size-4" />
+						Switch
+					</Button>
+				</div>
+			</Field>
+			<ErrorNote error={change.error ?? branches.error} />
+		</form>
+	);
+}
+
 function Transfer({ project }: { project: string }) {
 	const queryClient = useQueryClient();
-	const pending = useQuery({ queryKey: keys.transfer(project), queryFn: () => api.transfer(project) });
+	const pending = useQuery(transferQuery(project));
 	const [to, setTo] = useState("");
 	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.transfer(project) });
 	const offer = useMutation({

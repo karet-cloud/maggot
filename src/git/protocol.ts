@@ -54,6 +54,121 @@ export async function listRefs(remote: RemoteAccess, incoming = false): Promise<
 }
 
 /**
+ * The branch a public remote's HEAD points at, from the symref its smart HTTP advertisement carries
+ * (`symref=HEAD:refs/heads/master`), or undefined when it can't be told.
+ */
+export async function remoteHead(url: string): Promise<string | undefined> {
+	return (await probeRemote(url))?.head;
+}
+
+/** The most of an advertisement read to find its first ref line, which carries HEAD's symref. */
+export const PROBE_LIMIT = 64 * 1024;
+
+/**
+ * Whether `url` serves Git's smart HTTP protocol to anyone (null if not), and the branch its HEAD names.
+ * The remote is untrusted: at most PROBE_LIMIT bytes are buffered and inspected before cancelling
+ * the stream (a delivered chunk may be larger). A malformed prefix is treated as no Git repository.
+ */
+export async function probeRemote(url: string): Promise<{ head?: string } | null> {
+	try {
+		const res = await fetch(`${url.replace(/\/+$/, "")}/info/refs?service=git-upload-pack`, {
+			headers: { "user-agent": "git/2.45.0" },
+			signal: AbortSignal.timeout(10_000),
+		});
+		if (!res.ok || !res.body || !res.headers.get("content-type")?.startsWith("application/x-git-upload-pack-advertisement")) {
+			void res.body?.cancel().catch(() => {});
+			return null;
+		}
+		// HEAD's line comes first; a repository with many tags advertises megabytes after it.
+		const reader = res.body.getReader();
+		const scanner = new AdvertisementScanner();
+		let first: string | null | undefined;
+		try {
+			while (first === undefined) {
+				const { done, value } = await reader.read();
+				first = done ? scanner.end() : scanner.push(value);
+			}
+		} finally {
+			void reader.cancel().catch(() => {});
+		}
+		if (first === null) return null;
+		const capabilities = first.split("\0")[1] ?? "";
+		return { head: /(?:^| )symref=HEAD:refs\/heads\/(\S+)/.exec(capabilities)?.[1] };
+	} catch {
+		return null;
+	}
+}
+
+const SERVICE_LINE = "# service=git-upload-pack";
+const MAX_PKT = 65520;
+
+/**
+ * Reads a v0 smart HTTP advertisement (`# service=…`, a flush, then ref lines) a chunk at a time, up to
+ * its first ref line. Each byte is copied and parsed once. `push` and `end` answer the first ref line, or
+ * null for anything malformed or too long, or undefined while more is needed; an empty `""` stands for
+ * an advertisement that ended without refs.
+ */
+class AdvertisementScanner {
+	private readonly buffer = new Uint8Array(PROBE_LIMIT);
+	private length = 0;
+	/** Where the next packet starts. */
+	private at = 0;
+	private state: "start" | "flush" | "refs" | "end" = "start";
+	private readonly decoder = new TextDecoder();
+
+	push(chunk: Uint8Array): string | null | undefined {
+		if (this.length + chunk.length > PROBE_LIMIT) {
+			// Whatever fits may still hold the line; past it there's nothing more to wait for.
+			const fits = chunk.subarray(0, PROBE_LIMIT - this.length);
+			this.buffer.set(fits, this.length);
+			this.length += fits.length;
+			return this.scan() ?? null;
+		}
+		this.buffer.set(chunk, this.length);
+		this.length += chunk.length;
+		const found = this.scan();
+		return found === undefined && this.length === PROBE_LIMIT ? null : found;
+	}
+
+	/** An empty advertisement still needs its terminating flush packet. */
+	end(): string | null {
+		const found = this.scan();
+		if (found !== undefined) return found;
+		return this.at === this.length && this.state === "end" ? "" : null;
+	}
+
+	private scan(): string | null | undefined {
+		if (this.state === "end" && this.at !== this.length) return null;
+		while (this.length - this.at >= 4) {
+			const hex = this.decoder.decode(this.buffer.subarray(this.at, this.at + 4));
+			if (!/^[0-9a-f]{4}$/.test(hex)) return null;
+			const size = Number.parseInt(hex, 16);
+			if (size === 0) {
+				if (this.state === "flush") this.state = "refs";
+				else if (this.state === "refs") this.state = "end";
+				else return null;
+				this.at += 4;
+				if (this.state === "end") return this.at === this.length ? undefined : null;
+				continue;
+			}
+			// Delimiter and response-end packets are protocol v2's; 3 and 4 hold no data.
+			if (size <= 4 || size > MAX_PKT) return null;
+			if (this.at + size > this.length) return undefined;
+			const line = this.decoder.decode(this.buffer.subarray(this.at + 4, this.at + size));
+			this.at += size;
+			if (this.state === "flush") return null;
+			if (this.state === "start" && line.replace(/\n$/, "") === SERVICE_LINE) {
+				this.state = "flush";
+				continue;
+			}
+			// Some servers leave the header out; either way this is the first ref: `<oid> <ref>[\0caps]`.
+			return /^(?:[0-9a-f]{40}|[0-9a-f]{64}) [^\0\s]+(?:\0|\n|$)/.test(line) ? line : null;
+		}
+		return undefined;
+	}
+}
+
+/**
  * How big a repository is, measured as the pack a full clone downloads: every branch and tag. Stops
  * reading once it passes `limit`, and returns `limit + 1` then.
  */

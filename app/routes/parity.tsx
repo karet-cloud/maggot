@@ -51,7 +51,7 @@ function Parity() {
 	return (
 		<main className="mx-auto max-w-[900px] space-y-6 px-5 py-8">
 			<header className="space-y-3">
-				<h1 className="text-xl font-semibold tracking-tight">GitHub feature parity</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">GitHub feature parity</h1>
 				<p className="text-sm text-dim">
 					Everything GitHub does, and how far maggot has got with each. It's updated alongside the code. Last updated {PARITY_UPDATED}.
 				</p>

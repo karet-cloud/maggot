@@ -2,11 +2,16 @@ import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Empty, ErrorNote, Spinner } from "../components/ui.tsx";
-import { WikiEditor, WikiGate, WikiShell } from "../components/wiki.tsx";
+import { WikiEditor, WikiGate, wikiQueries, WikiShell } from "../components/wiki.tsx";
 import { api, type WikiIndex } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 
 // Edits (or renames) a page. Page names can't start with "_", so "_edit" never shadows one.
-export const Route = createFileRoute("/$owner/$repo/wiki/_edit/$page")({ component: EditWikiPage });
+export const Route = createFileRoute("/$owner/$repo/wiki/_edit/$page")({
+	// Not the page itself: each edit reads it fresh, under its own key.
+	loader: ({ context, params }) => preload(context.queryClient, ...wikiQueries(context.queryClient, `${params.owner}/${params.repo}`)),
+	component: EditWikiPage,
+});
 
 function EditWikiPage() {
 	const { owner, repo, page } = Route.useParams();

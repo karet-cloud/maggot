@@ -1,10 +1,11 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Search as SearchIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { RepoList } from "../components/repos.tsx";
 import { cx, ErrorNote, Input, Spinner } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 
 type Search = { q?: string; sort?: "stars" };
 
@@ -14,16 +15,22 @@ export const Route = createFileRoute("/search")({
 		q: typeof s.q === "string" && s.q ? s.q : undefined,
 		sort: s.sort === "stars" ? "stars" : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ q: search.q, sort: search.sort }),
+	loader: ({ context, deps }) => preload(context.queryClient, deps.q !== undefined && reposQuery(deps.q, deps.sort)),
 	component: SearchPage,
 });
+
+const reposQuery = (q: string, sort: Search["sort"]) => {
+	const filter = { q, sort: sort ?? ("created" as const) };
+	return queryOptions({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+};
 
 function SearchPage() {
 	const { q = "", sort } = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
 	const [text, setText] = useState(q);
 	useEffect(() => setText(q), [q]);
-	const filter = { q, sort: sort ?? ("created" as const) };
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), enabled: q.length > 0 });
+	const repos = useQuery({ ...reposQuery(q, sort), enabled: q.length > 0, placeholderData: keepPreviousData });
 	return (
 		<main className="mx-auto max-w-[1100px] space-y-4 px-5 py-8">
 			<form
@@ -64,7 +71,7 @@ function SearchPage() {
 			)}
 			{!q && <p className="text-sm text-dim">Search public repositories (and your own private ones) by owner, name or description. To search code, open a repository and use its code search.</p>}
 			{q && (repos.isPending ? <Spinner /> : <ErrorNote error={repos.error} />)}
-			{repos.data && <RepoList repos={repos.data} showOwner empty={{ title: "No repositories match", body: "Try a shorter or different word." }} />}
+			{q && repos.data && <RepoList repos={repos.data} showOwner empty={{ title: "No repositories match", body: "Try a shorter or different word." }} />}
 		</main>
 	);
 }

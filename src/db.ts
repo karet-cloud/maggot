@@ -379,7 +379,8 @@ export async function setRepoBytes(database: D1Database, id: string, bytes: numb
 	await database.prepare(`update "repo" set "bytes" = ? where "id" = ?`).bind(bytes, id).run();
 }
 
-export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean }): Promise<void> {
+export async function updateRepo(database: D1Database, id: string, patch: { visibility?: Visibility; description?: string | null; hasWiki?: boolean; defaultBranch?: string }): Promise<void> {
+	if (patch.defaultBranch !== undefined) await database.prepare(`update "repo" set "defaultBranch" = ? where "id" = ?`).bind(patch.defaultBranch, id).run();
 	if (patch.hasWiki !== undefined) await database.prepare(`update "repo" set "hasWiki" = ? where "id" = ?`).bind(patch.hasWiki ? 1 : 0, id).run();
 	if (patch.visibility !== undefined) await database.prepare(`update "repo" set "visibility" = ? where "id" = ?`).bind(patch.visibility, id).run();
 	if (patch.description !== undefined) await database.prepare(`update "repo" set "description" = ? where "id" = ?`).bind(patch.description, id).run();
@@ -419,6 +420,8 @@ export interface ListOptions {
 	/** Matches owner, name or description (case-insensitive substring). */
 	query?: string;
 	sort?: "created" | "stars";
+	/** Only public repositories, whatever the viewer can also see. */
+	publicOnly?: boolean;
 	limit?: number;
 }
 
@@ -443,7 +446,7 @@ export async function listRepos(database: D1Database, opts: ListOptions): Promis
 		where.push(`(r."owner" || '/' || r."name" || ' ' || coalesce(r."description", '')) like ? escape '\\'`);
 		args.push(`%${opts.query.toLowerCase().replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`);
 	}
-	where.push(`(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
+	where.push(opts.publicOnly ? `r."visibility" = 'public'` : `(r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`);
 	const order = opts.starredBy ? `mine."createdAt" desc` : opts.sort === "stars" ? `"stars" desc, r."createdAt" desc` : `r."createdAt" desc`;
 	const listing = LISTING.replace(`left join "repo" p`, `${join} left join "repo" p`);
 	const { results } = await database

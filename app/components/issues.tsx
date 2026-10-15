@@ -1,5 +1,7 @@
+import type { QueryKey } from "@tanstack/react-query";
 import { CircleCheck, CircleDot } from "lucide-react";
-import type { IssueState } from "../lib/api.ts";
+import { keys, type api, type IssueComment, type IssueState, type IssueSummary, type PullSummary } from "../lib/api.ts";
+import { patch, type Patch } from "../lib/optimistic.ts";
 import { cx } from "./ui.tsx";
 
 export function IssueStateIcon({ state, className }: { state: IssueState; className?: string }) {
@@ -40,4 +42,47 @@ export function Label({ name, onClick, active }: { name: string; onClick?: () =>
 			{name}
 		</span>
 	);
+}
+
+/** A comment shown while it posts; the refetch replaces it. */
+export function pendingComment(body: string, author: string | null): IssueComment {
+	const now = new Date().toISOString();
+	return { id: `optimistic-${Date.now()}`, author, body, createdAt: now, updatedAt: now, canEdit: false };
+}
+
+/** What closing or reopening sets on an issue or pull request. */
+export function stateChange(state: IssueState, by: string | null) {
+	const closed = state === "closed";
+	return { state, closedAt: closed ? new Date().toISOString() : null, closedBy: closed ? by : null };
+}
+
+/** Moves the repository tab's open count when an issue or pull request closes or reopens. */
+export function openCountPatch(project: string, field: "openIssues" | "openPulls", state: IssueState | undefined): Patch[] {
+	if (!state) return [];
+	const delta = state === "open" ? 1 : -1;
+	return [
+		patch<Awaited<ReturnType<typeof api.project>>>(keys.project(project), (old) => ({ ...old, repo: { ...old.repo, [field]: Math.max(0, old.repo[field] + delta) } }), true),
+	];
+}
+
+/**
+ * Edits one issue's or pull request's row in every cached list under `listKey` (keyed by the state
+ * filter first), moving it between the open and closed counts and out of lists of the other state.
+ */
+export function listPatches(listKey: QueryKey, field: "issues" | "pulls", number: number, edit: (row: IssueSummary) => Partial<PullSummary>): Patch[] {
+	const update = (filter: IssueState | "all") =>
+		patch<Record<string, any>>([...listKey, filter], (old) => {
+			const rows = old[field] as IssueSummary[] | undefined;
+			const row = rows?.find((r) => r.number === number);
+			if (!rows || !row) return old;
+			const next = { ...row, ...edit(row) };
+			const moved = next.state === row.state ? 0 : next.state === "open" ? 1 : -1;
+			return {
+				...old,
+				open: old.open + moved,
+				closed: old.closed - moved,
+				[field]: filter !== "all" && next.state !== filter ? rows.filter((r) => r !== row) : rows.map((r) => (r === row ? next : r)),
+			};
+		});
+	return [update("open"), update("closed"), update("all")];
 }
