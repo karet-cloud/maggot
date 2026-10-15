@@ -33,6 +33,9 @@ export default defineConfig(({ mode }) => {
 			compatibilityFlags: ["nodejs_compat"],
 			entrypoint,
 			observability: { enabled: true },
+			// Run near D1 (ENAM) and the coordinators rather than near each visitor: a page render makes a
+			// dozen sequential queries, so one long hop for the finished page beats a long hop per query.
+			...(offline ? {} : { placement: { mode: "smart" as const } }),
 			exports: {
 				ProjectCoordinator: exports.durableObject({ storage: "sqlite" }),
 				Registry: exports.durableObject({ storage: "sqlite" }),
