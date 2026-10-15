@@ -55,13 +55,14 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 - **Who can sign up**: anyone, until `MAGGOT_POLICY.maxAccounts` (100) accounts exist. After that the
   sign-up page becomes a waitlist (`POST /api/waitlist {"email", "note"}`), and getting in takes an invite
   code, which works past the limit. `GET /api/admin/waitlist[?pending]` lists who's waiting;
-  `POST /api/admin/waitlist/:id/invite` mints them a one-use code (emailed when email is set up, and
+  `POST /api/admin/waitlist/:id/invite` mints them a one-use code (once per entry) (emailed when email is set up, and
   returned as a `/signup?invite=…` link either way). `POST /api/admin/invites {"note", "uses", "days"}`
   mints codes by hand, `GET /api/admin/invites` lists them with the accounts made from each, and
   `DELETE /api/admin/invites/:id` revokes one. `signUps: "invite"` needs a code from the first account,
   and `"closed"` turns sign-up and the waitlist off. On top of that, at most `signUpsPerDay` (20) accounts
   are made instance-wide per day and `signUpsPerHour` (3) per address, counting only sign-ups that made
-  an account. All of these need the admin key, which also skips every sign-up limit.
+  an account (each sign-up holds its place while it runs, so parallel ones can't share the last). The
+  admin endpoints need the admin key, which also skips every sign-up limit.
 - **Bot check**: sign-up and the waitlist run Cloudflare Turnstile's invisible widget when the deploy sets
   `MAGGOT_TURNSTILE_SITE_KEY` (a variable in CI) and the `TURNSTILE_SECRET_KEY` secret; the server checks
   each token with siteverify. Without them (local development, tests) there's no check.
@@ -333,7 +334,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/config` | | `{ emailDelivery, verificationRequired, signUps: "open" \| "invite" \| "waitlist" \| "closed", turnstileSiteKey }` |
 | POST | `/admin/password-reset` | `{ username }` or `{ email }` | `{ url }`: a reset link to hand over (admin key) |
 | POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
-| POST | `/waitlist` | `{ email, note?, turnstileToken? }` | 202 whether or not the address was already on it |
+| POST | `/waitlist` | `{ email, note?, turnstileToken? }` | 202 whether or not the address was already on it; 409 while sign-up is open |
 | GET | `/admin/waitlist` | `?pending` for those not yet invited | `{ waitlist }` with the `account` each invite made (admin key) |
 | POST | `/admin/waitlist/:id/invite` | `{ days? (14) }` | `{ code, url, emailed, invite }`: a one-use invite (admin key) |
 | DELETE | `/admin/waitlist/:id` | | removes the entry (admin key) |

@@ -2051,6 +2051,8 @@ test("once open sign-up is full, people join the waitlist and get in with an inv
 	assert.ok(url.endsWith(`/signup?invite=${code}`));
 	assert.equal(emailed, false);
 	assert.equal(((await (await admin("GET", "/waitlist?pending")).json()) as { waitlist: { id: string }[] }).waitlist.some((w) => w.id === waiting[0].id), false);
+	// A second invite would leave the first working too, so it's refused.
+	assert.equal((await admin("POST", `/waitlist/${waiting[0].id}/invite`, {})).status, 409);
 
 	// A sign-up that fails (here, an invalid email) gives its use back; the code gets past the limit once.
 	assert.equal((await signUp(first, code, "not-an-email")).status, 400);

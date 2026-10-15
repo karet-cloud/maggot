@@ -19,6 +19,8 @@ function SignUpPage() {
 	const config = useQuery(configQuery);
 	// Someone who says they have a code gets the sign-up form even when only invites get in.
 	const [haveCode, setHaveCode] = useState(Boolean(invite));
+	// Set when open sign-up filled up while this person was filling in the form.
+	const [filledUp, setFilledUp] = useState<string | null>(null);
 	if (!config.data) {
 		return (
 			<main className="flex justify-center px-5 py-24">
@@ -35,9 +37,20 @@ function SignUpPage() {
 		);
 	}
 	if (signUps === "open" || haveCode) {
-		return <SignUp invite={invite} needsCode={signUps !== "open"} siteKey={turnstileSiteKey} onWaitlist={() => setHaveCode(false)} />;
+		return (
+			<SignUp
+				invite={invite}
+				needsCode={signUps !== "open"}
+				siteKey={turnstileSiteKey}
+				onWaitlist={() => setHaveCode(false)}
+				onFull={(email) => {
+					setFilledUp(email);
+					setHaveCode(false);
+				}}
+			/>
+		);
 	}
-	return <Waitlist full={signUps === "waitlist"} siteKey={turnstileSiteKey} onHaveCode={() => setHaveCode(true)} />;
+	return <Waitlist full={signUps === "waitlist"} filledUp={filledUp} siteKey={turnstileSiteKey} onHaveCode={() => setHaveCode(true)} />;
 }
 
 function Notice({ title, children }: { title: string; children: ReactNode }) {
@@ -50,7 +63,19 @@ function Notice({ title, children }: { title: string; children: ReactNode }) {
 	);
 }
 
-function SignUp({ invite, needsCode, siteKey, onWaitlist }: { invite?: string; needsCode: boolean; siteKey: string | null; onWaitlist: () => void }) {
+function SignUp({
+	invite,
+	needsCode,
+	siteKey,
+	onWaitlist,
+	onFull,
+}: {
+	invite?: string;
+	needsCode: boolean;
+	siteKey: string | null;
+	onWaitlist: () => void;
+	onFull: (email: string) => void;
+}) {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const turnstile = useTurnstile(siteKey, "sign-up");
@@ -74,7 +99,10 @@ function SignUp({ invite, needsCode, siteKey, onWaitlist }: { invite?: string; n
 		},
 		onError: (err) => {
 			// The last open account went to someone else meanwhile: offer the waitlist.
-			if (err instanceof ApiError && err.code === "SIGN_UPS_FULL") void queryClient.invalidateQueries({ queryKey: keys.config });
+			if (err instanceof ApiError && err.code === "SIGN_UPS_FULL") {
+				onFull(form.email.trim());
+				void queryClient.invalidateQueries({ queryKey: keys.config });
+			}
 		},
 	});
 	return (
@@ -128,9 +156,9 @@ function SignUp({ invite, needsCode, siteKey, onWaitlist }: { invite?: string; n
 	);
 }
 
-function Waitlist({ full, siteKey, onHaveCode }: { full: boolean; siteKey: string | null; onHaveCode: () => void }) {
+function Waitlist({ full, filledUp, siteKey, onHaveCode }: { full: boolean; filledUp: string | null; siteKey: string | null; onHaveCode: () => void }) {
 	const turnstile = useTurnstile(siteKey, "waitlist");
-	const [email, setEmail] = useState("");
+	const [email, setEmail] = useState(filledUp ?? "");
 	const [note, setNote] = useState("");
 	const join = useMutation({ mutationFn: async () => api.joinWaitlist({ email: email.trim(), note: note.trim(), turnstileToken: await turnstile.token() }) });
 	if (join.isSuccess) {
@@ -144,7 +172,9 @@ function Waitlist({ full, siteKey, onHaveCode }: { full: boolean; siteKey: strin
 		<AuthForm
 			title="Join the waitlist"
 			subtitle={
-				full
+				filledUp !== null
+					? "Sign-ups filled up just now, so your account wasn't made. Leave your email and we'll send an invite when there's room."
+					: full
 					? "maggot has all the accounts it can take for now. Leave your email and we'll send an invite when there's room."
 					: "maggot is invite-only for now. Leave your email and we'll send you an invite."
 			}

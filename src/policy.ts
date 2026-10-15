@@ -131,10 +131,21 @@ export async function checkLimit(env: Env, subject: string, rules: Rule[], messa
 	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
 }
 
-/** Counts a call against `rules` for `subject` that already went ahead, whether or not there was room. */
-export async function countLimit(env: Env, subject: string, rules: Rule[]): Promise<void> {
+/** Gives back what `limit` counted for a call that then didn't go ahead (a sign-up that made no account). */
+export async function refundLimit(env: Env, subject: string, rules: Rule[]): Promise<void> {
 	if (rules.length === 0) return;
-	await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).take(rules);
+	await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).give(rules);
+}
+
+/**
+ * Holds one of `max` places for a while, given `current` already taken: the in-flight half of a limit
+ * whose settled half lives elsewhere (accounts in D1). Returns null when there's no room; release the
+ * hold once the outcome is settled either way. Holds expire on their own, so a crash can't leak one.
+ */
+export async function hold(env: Env, subject: string, current: number, max: number): Promise<{ release: () => Promise<void> } | null> {
+	const limiter = (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject);
+	const id = await limiter.hold(current, max, 2 * 60_000);
+	return id ? { release: () => limiter.release(id) } : null;
 }
 
 /**
@@ -188,6 +199,31 @@ export class Limiter extends DurableObject<Env> {
 
 	private createTable() {
 		this.sql.exec("CREATE TABLE IF NOT EXISTS hits (bucket TEXT PRIMARY KEY, window_end INTEGER NOT NULL, count INTEGER NOT NULL)");
+		this.sql.exec("CREATE TABLE IF NOT EXISTS holds (id TEXT PRIMARY KEY, expires INTEGER NOT NULL)");
+	}
+
+	/** Takes back one count from each rule's current window (see refundLimit). */
+	async give(rules: Rule[]): Promise<void> {
+		for (const { rule, end } of this.windows(rules, Date.now())) {
+			this.sql.exec("UPDATE hits SET count = count - 1 WHERE bucket = ? AND window_end = ? AND count > 0", rule.name, end);
+		}
+	}
+
+	/** A place among `max`, `current` of them settled elsewhere, or null when they're all taken (see hold). */
+	async hold(current: number, max: number, ttlMs: number): Promise<string | null> {
+		const now = Date.now();
+		this.sql.exec("DELETE FROM holds WHERE expires <= ?", now);
+		const held = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM holds").one().n;
+		if (current + held >= max) return null;
+		const id = crypto.randomUUID();
+		this.sql.exec("INSERT INTO holds (id, expires) VALUES (?, ?)", id, now + ttlMs);
+		const alarm = await this.ctx.storage.getAlarm();
+		if (alarm === null || alarm < now + ttlMs) await this.ctx.storage.setAlarm(now + ttlMs);
+		return id;
+	}
+
+	async release(id: string): Promise<void> {
+		this.sql.exec("DELETE FROM holds WHERE id = ?", id);
 	}
 
 	/** Whether `rules` have room left, without counting this call. */
@@ -232,7 +268,8 @@ export class Limiter extends DurableObject<Env> {
 
 	async alarm(): Promise<void> {
 		this.sql.exec("DELETE FROM hits WHERE window_end <= ?", Date.now());
-		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(window_end) AS end FROM hits").one().end;
+		this.sql.exec("DELETE FROM holds WHERE expires <= ?", Date.now());
+		const left = this.sql.exec<{ end: number | null }>("SELECT MAX(m) AS end FROM (SELECT MAX(window_end) AS m FROM hits UNION ALL SELECT MAX(expires) FROM holds)").one().end;
 		// Expired rows are gone; an empty table costs nothing. (Dropping all storage and recreating the
 		// table raced requests arriving meanwhile.)
 		if (left !== null) await this.ctx.storage.setAlarm(left);

@@ -74,9 +74,9 @@ const APP_SCHEMA = [
 	// People a repository's admins invited to it, with read, write or admin access.
 	`create table if not exists "repo_collaborator" ("repoId" text not null references "repo" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("repoId", "userId"))`,
 	`create index if not exists "repo_collaborator_user_idx" on "repo_collaborator" ("userId")`,
-	// Sign-up invite codes an admin issued (see MAGGOT_POLICY.signUps). Only the code's hash is kept.
 	// People waiting for an account while sign-ups are full or invite-only; an admin invites them from here.
 	`create table if not exists "waitlist" ("id" text not null primary key, "email" text not null unique collate nocase, "note" text not null, "createdAt" text not null, "invitedAt" text, "inviteId" text)`,
+	// Sign-up invite codes an admin issued (see MAGGOT_POLICY.signUps). Only the code's hash is kept.
 	`create table if not exists "invite" ("id" text not null primary key, "hash" text not null unique, "prefix" text not null, "note" text not null, "uses" integer not null, "used" integer not null default 0, "expiresAt" text not null, "createdAt" text not null)`,
 ];
 
@@ -832,9 +832,9 @@ export async function releaseInvite(database: D1Database, id: string): Promise<v
 	await database.prepare(`update "invite" set "used" = "used" - 1 where "id" = ? and "used" > 0`).bind(id).run();
 }
 
-/** Whether an account (not an organization) with this username exists. */
-export async function userExists(database: D1Database, username: string): Promise<boolean> {
-	return Boolean(await database.prepare(`select 1 as "x" from "user" where "username" = ?`).bind(username).first());
+/** Whether an account with this username and email address exists. */
+export async function userExists(database: D1Database, username: string, email: string): Promise<boolean> {
+	return Boolean(await database.prepare(`select 1 as "x" from "user" where "username" = ? and lower("email") = ?`).bind(username, email).first());
 }
 
 /** People's accounts (not organizations), which `maxAccounts` is checked against. */
