@@ -252,18 +252,6 @@ Tooling is the new [`cf` CLI](https://github.com/cloudflare/cf) (beta). The Work
 [`cloudflare.config.ts`](cloudflare.config.ts) and built with `@cloudflare/vite-plugin`. Deploying
 requires a Workers Paid plan, since Artifacts is in open beta there.
 
-```sh
-npx cf auth login
-export CLOUDFLARE_ACCOUNT_ID=<account with Artifacts access>   # needed if your login has several accounts
-
-# First deploy: a new Worker's secrets have to ship with it.
-mkdir -p .secrets && echo "MAGGOT_API_KEY=$(openssl rand -hex 24)" > .secrets/prod.env   # gitignored
-npx cf deploy --secrets-file .secrets/prod.env
-
-# Later deploys keep the secret.
-npm run deploy
-```
-
 CI deploys on its own: `.github/workflows/ci.yml` runs the typecheck and both test suites on every
 pull request, and on every push to `master` runs them again and then `cf deploy` to https://maggot.karet.cloud. The custom domain is declared in
 `cloudflare.config.ts`, and CI checks it before seeding the demo. It
@@ -275,6 +263,18 @@ without a previous version to inherit it from. The temporary secret file is remo
 step exits. Set the key once and keep it stable: changing it also changes the derived session
 secret and SSH host key.
 
+For a brand-new self-hosted deployment only, generate the initial key outside the repo and store
+it in GitHub before running CI. Existing deployments must reuse their current key.
+
+```sh
+(
+  key_file=$(mktemp)
+  trap 'rm -f "$key_file"' EXIT
+  openssl rand -hex 24 > "$key_file"
+  gh secret set MAGGOT_API_KEY --env production < "$key_file"
+)
+```
+
 To store the key from an existing deployment without printing it, use a file outside the repo:
 
 ```sh
@@ -284,8 +284,10 @@ The first deploy creates the `maggot` D1 database; tables are created by the Wor
 there's no migration step. Better Auth's secret is derived from `MAGGOT_API_KEY` unless a
 `BETTER_AUTH_SECRET` secret is set.
 
-Point the CLI at it with `MAGGOT_URL=https://maggot.karet.cloud` and `MAGGOT_API_KEY` from
-`.secrets/prod.env`. The "maggot" Artifacts namespace is created on first use. A brand-new
+Point the CLI at it with `MAGGOT_URL=https://maggot.karet.cloud` and the same `MAGGOT_API_KEY`
+configured in the GitHub `production` environment. GitHub secrets cannot be read back; CLI access
+requires an authorized copy of that key, kept outside the repo. The "maggot" Artifacts namespace
+is created on first use. A brand-new
 `workers.dev` route can return error 1042 for a few seconds after the first deploy.
 
 `cloudflare.config.ts` is a function of the Vite mode: `offline` (used by `npm run dev`) binds the
