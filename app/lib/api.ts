@@ -109,6 +109,7 @@ export interface RepoFilter {
 	starredBy?: string;
 	q?: string;
 	sort?: "created" | "stars";
+	visibility?: "public";
 }
 
 export interface CreateRepoInput {

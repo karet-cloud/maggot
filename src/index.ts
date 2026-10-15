@@ -595,6 +595,7 @@ app.get("/api/repos", async (c) => {
 		starredBy: starrer?.id,
 		query: c.req.query("q")?.trim().slice(0, 100) || undefined,
 		sort: c.req.query("sort") === "stars" ? "stars" : "created",
+		publicOnly: c.req.query("visibility") === "public",
 		limit: intParam(c.req.query("limit"), 100, 500),
 	});
 	return c.json({ repos: rows.map((r) => toRepoInfo(r, origin(c), canWrite(p, r), viewerId(p), canAdmin(p, r))) });

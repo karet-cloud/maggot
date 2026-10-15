@@ -41,6 +41,9 @@ export function Landing() {
 					maggot
 				</Link>
 				<nav className="muted hidden items-center gap-7 text-[14px] md:flex">
+					<Link to="/explore" className="hover-fg">
+						Explore
+					</Link>
 					<a href="#features" className="hover-fg">
 						Features
 					</a>
@@ -74,9 +77,9 @@ export function Landing() {
 					<Link to="/signup" className="btn flex items-center gap-2 rounded-md px-5 py-2.5 text-sm font-semibold">
 						Create a repository <ArrowRight className="size-4" />
 					</Link>
-					<a href="#features" className="ghost rounded-md px-5 py-2.5 text-sm">
-						See what's included
-					</a>
+					<Link to="/explore" className="ghost rounded-md px-5 py-2.5 text-sm">
+						Explore repositories
+					</Link>
 				</div>
 				<div className="mx-auto mt-16 max-w-[1000px]">
 					<p className="faint mb-3 text-[13px]">Browse a cached Linux kernel preview. Open files in the public mirror, or try the demo issue and review.</p>
@@ -178,7 +181,12 @@ export function Landing() {
 				<span className="font-semibold" style={{ color: "var(--fg)" }}>
 					maggot
 				</span>
-				<span>Git hosting on Cloudflare.</span>
+				<span className="flex flex-wrap items-center gap-5">
+					<Link to="/explore" className="hover-fg">
+						Explore
+					</Link>
+					<span>Git hosting on Cloudflare.</span>
+				</span>
 			</footer>
 		</div>
 	);

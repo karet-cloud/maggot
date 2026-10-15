@@ -92,7 +92,7 @@ function Footer() {
 					maggot
 				</Link>
 				<nav className="flex flex-wrap items-center gap-5">
-					<Link to="/search" className="hover:text-fg">
+					<Link to="/explore" className="hover:text-fg">
 						Explore
 					</Link>
 					<Link to="/parity" className="hover:text-fg">
@@ -236,6 +236,9 @@ function TopBar() {
 					</nav>
 				)}
 				<div className="ml-auto flex shrink-0 items-center gap-1">
+					<Link to="/explore" className="hidden rounded-md px-2.5 py-1.5 text-[13.5px] text-dim hover:text-fg sm:block">
+						Explore
+					</Link>
 					{me && (
 						<Link to="/parity" className="hidden rounded-md px-2.5 py-1.5 text-[13.5px] text-dim hover:text-fg lg:block">
 							GitHub parity

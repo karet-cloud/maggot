@@ -50,7 +50,12 @@ function Home() {
 			</Link>
 
 			<section className="space-y-3">
-				<h2 className="text-sm font-semibold text-dim">Explore public repositories</h2>
+				<div className="flex items-center justify-between gap-3">
+					<h2 className="text-sm font-semibold text-dim">Explore public repositories</h2>
+					<Link to="/explore" className="text-sm text-accent hover:underline">
+						See all →
+					</Link>
+				</div>
 				{explore.isPending ? <Spinner /> : <ErrorNote error={explore.error} />}
 				{explore.data && <RepoList repos={publicRepos} showOwner empty={{ title: "No public repositories yet" }} />}
 			</section>
