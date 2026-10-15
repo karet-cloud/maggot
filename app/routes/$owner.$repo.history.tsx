@@ -1,12 +1,13 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { infiniteQueryOptions, queryOptions, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitBranch, GitCommitHorizontal, Tag } from "lucide-react";
 import { useMemo } from "react";
 import { CommitList } from "../components/commits.tsx";
-import { BranchSelect } from "../components/refs.tsx";
+import { BranchSelect, branchNamesQuery, tagNamesQuery } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type GraphCommit } from "../lib/api.ts";
 import { layoutGraph, type GraphRow } from "../lib/graph-layout.ts";
+import { browserOnly, preload } from "../lib/queries.ts";
 
 type Search = { ref?: string; view?: "graph"; path?: string };
 
@@ -16,8 +17,30 @@ export const Route = createFileRoute("/$owner/$repo/history")({
 		view: s.view === "graph" ? "graph" : undefined,
 		path: typeof s.path === "string" && s.path ? s.path : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ ref: search.ref, view: search.view, path: search.path }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		if (deps.view === "graph") return preload(context.queryClient, graphQuery(project));
+		return preload(
+			context.queryClient,
+			// A file's history walks the log for it: the browser fetches it.
+			deps.path ? browserOnly(false, fileHistoryQuery(project, deps.path, deps.ref)) : logQuery(project, deps.ref),
+			branchNamesQuery(project),
+			tagNamesQuery(project),
+		);
+	},
 	component: HistoryPage,
 });
+
+const logQuery = (project: string, ref?: string) => queryOptions({ queryKey: keys.log(project, ref), queryFn: () => api.log(project, ref, 100) });
+const fileHistoryQuery = (project: string, path: string, ref?: string) =>
+	infiniteQueryOptions({
+		queryKey: keys.fileHistory(project, path, ref),
+		queryFn: ({ pageParam }) => api.fileHistory(project, path, ref, pageParam),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last) => last.next ?? undefined,
+	});
+const graphQuery = (project: string) => queryOptions({ queryKey: keys.graph(project), queryFn: () => api.graph(project, 200) });
 
 function HistoryPage() {
 	const { owner, repo } = Route.useParams();
@@ -51,7 +74,7 @@ function HistoryPage() {
 }
 
 function Commits({ project, refName }: { project: string; refName?: string }) {
-	const log = useQuery({ queryKey: keys.log(project, refName), queryFn: () => api.log(project, refName, 100) });
+	const log = useQuery(logQuery(project, refName));
 	if (log.isPending) return <Spinner />;
 	if (log.error) return <ErrorNote error={log.error} />;
 	if (log.data.length === 0) return <Empty icon={<GitCommitHorizontal className="size-6" />} title="No commits yet" />;
@@ -64,12 +87,7 @@ function Commits({ project, refName }: { project: string; refName?: string }) {
 
 /** The commits that changed one file, a page at a time. */
 function FileCommits({ project, refName, path }: { project: string; refName?: string; path: string }) {
-	const pages = useInfiniteQuery({
-		queryKey: keys.fileHistory(project, path, refName),
-		queryFn: ({ pageParam }) => api.fileHistory(project, path, refName, pageParam),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.next ?? undefined,
-	});
+	const pages = useInfiniteQuery(fileHistoryQuery(project, path, refName));
 	if (pages.isPending) return <Spinner />;
 	if (pages.error) return <ErrorNote error={pages.error} />;
 	const commits = pages.data.pages.flatMap((p) => p.commits);
@@ -104,12 +122,13 @@ function FileCommits({ project, refName, path }: { project: string; refName?: st
 
 const ROW = 36;
 const LANE = 14;
-const COLORS = ["#818cf8", "#34d399", "#f472b6", "#fbbf24", "#38bdf8", "#a78bfa", "#fb7185", "#4ade80", "#f97316", "#22d3ee"];
+// Lane colours come from styles.css, so each theme gets shades that read on its background.
+const COLORS = Array.from({ length: 10 }, (_, i) => `var(--lane-${i})`);
 const laneX = (i: number) => LANE / 2 + i * LANE + 4;
 const color = (i: number) => COLORS[i % COLORS.length];
 
 function GraphView({ project }: { project: string }) {
-	const graph = useQuery({ queryKey: keys.graph(project), queryFn: () => api.graph(project, 200) });
+	const graph = useQuery(graphQuery(project));
 	const layout = useMemo(() => (graph.data ? layoutGraph(graph.data.commits) : null), [graph.data]);
 	if (graph.isPending) return <Spinner />;
 	if (graph.error) return <ErrorNote error={graph.error} />;
@@ -147,9 +166,9 @@ function GraphCell({ row, width, merge }: { row: GraphRow; width: number; merge:
 	return (
 		<svg width={width} height={ROW} className="shrink-0" aria-hidden>
 			{lines.map((l, k) => (
-				<path key={k} d={l.d} stroke={color(l.lane)} strokeWidth={2} fill="none" />
+				<path key={k} d={l.d} style={{ stroke: color(l.lane) }} strokeWidth={2} fill="none" />
 			))}
-			<circle cx={x} cy={mid} r={merge ? 3.5 : 4} fill={merge ? "var(--color-bg, #0b0d10)" : color(row.col)} stroke={color(row.col)} strokeWidth={2} />
+			<circle cx={x} cy={mid} r={merge ? 3.5 : 4} style={{ fill: merge ? "var(--color-bg)" : color(row.col), stroke: color(row.col) }} strokeWidth={2} />
 		</svg>
 	);
 }

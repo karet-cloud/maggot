@@ -1,11 +1,14 @@
-import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { infiniteQueryOptions, keepPreviousData, queryOptions, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { BookOpen, Clock, GitBranch, Play, Workflow, X } from "lucide-react";
 import { useState } from "react";
 import { Caches, CiIcon, ciLabel, ciState, Elapsed, isActive, NoWorkflows } from "../components/actions.tsx";
+import { branchNamesQuery } from "../components/refs.tsx";
 import { Button, cx, ErrorNote, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type CiRunSummary } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 
 type Search = { sha?: string; pull?: number; help?: boolean };
 
@@ -15,19 +18,39 @@ export const Route = createFileRoute("/$owner/$repo/actions/")({
 		pull: typeof s.pull === "number" && Number.isInteger(s.pull) && s.pull > 0 ? s.pull : undefined,
 		help: s.help === true || undefined,
 	}),
+	loaderDeps: ({ search }) => ({ sha: search.sha, pull: search.pull }),
+	loader: async ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// The workflow list and branch picker depend on the repository, so they're warmed only once it's
+		// cached; a server render fetches the repository first.
+		const known = () => context.queryClient.getQueryData(projectQuery(project).queryKey);
+		const dependents = (info: ReturnType<typeof known>) => [
+			info?.defaultBranch ? workflowsQuery(project, info.defaultBranch) : null,
+			info?.repo.canWrite && !info.repo.archivedAt && branchNamesQuery(project),
+		];
+		const cached = known();
+		await preload(context.queryClient, projectQuery(project), runsQuery(project, deps.sha, deps.pull), ...dependents(cached));
+		if (isServer && !cached) await preload(context.queryClient, ...dependents(known()));
+	},
 	component: Actions,
 });
+
+const runsQuery = (project: string, sha: string | undefined, pull: number | undefined) =>
+	infiniteQueryOptions({
+		queryKey: [...keys.ciRuns(project), "list", sha ?? "", pull ?? 0],
+		queryFn: ({ pageParam }) => api.ciRuns(project, { sha, pull, before: pageParam }),
+		initialPageParam: undefined as number | undefined,
+		getNextPageParam: (last) => last.next ?? undefined,
+	});
+const workflowsQuery = (project: string, ref: string) => queryOptions({ queryKey: keys.ciWorkflows(project, ref), queryFn: () => api.ciWorkflows(project, ref) });
 
 function Actions() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const { sha, pull, help } = Route.useSearch();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const runs = useInfiniteQuery({
-		queryKey: [...keys.ciRuns(project), "list", sha ?? "", pull ?? 0],
-		queryFn: ({ pageParam }) => api.ciRuns(project, { sha, pull, before: pageParam }),
-		initialPageParam: undefined as number | undefined,
-		getNextPageParam: (last) => last.next ?? undefined,
+		...runsQuery(project, sha, pull),
 		placeholderData: keepPreviousData,
 		// The live connection reports runs starting and finishing; this catches what it misses. Polling would
 		// refetch every loaded page, so it stops once older ones are shown.
@@ -148,8 +171,8 @@ function Workflows({ project, defaultBranch, canRun }: { project: string; defaul
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const [ref, setRef] = useState(defaultBranch);
-	const branches = useQuery({ queryKey: [...keys.branches(project), "names"], queryFn: () => api.branches(project, false), enabled: canRun });
-	const workflows = useQuery({ queryKey: keys.ciWorkflows(project, ref), queryFn: () => api.ciWorkflows(project, ref), enabled: Boolean(ref) });
+	const branches = useQuery({ ...branchNamesQuery(project), enabled: canRun });
+	const workflows = useQuery({ ...workflowsQuery(project, ref), enabled: Boolean(ref) });
 	const dispatch = useMutation({
 		mutationFn: (path: string) => api.ciDispatch(project, path, ref),
 		onSuccess: (runs) => {

@@ -1,18 +1,26 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { KeyRound, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { SettingsNav } from "../components/settings-nav.tsx";
 import { Button, CopyField, Empty, ErrorNote, Input, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, keys } from "../lib/api.ts";
-import { useViewer } from "./__root.tsx";
+import { api, keys, type TokenInfo } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload } from "../lib/queries.ts";
+import { signedIn, useViewer } from "./__root.tsx";
 
-export const Route = createFileRoute("/settings/tokens")({ component: Tokens });
+export const Route = createFileRoute("/settings/tokens")({
+	loader: ({ context }) => preload(context.queryClient, signedIn(context.queryClient) && tokensQuery),
+	component: Tokens,
+});
+
+const tokensQuery = queryOptions({ queryKey: keys.tokens, queryFn: api.tokens });
 
 function Tokens() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
-	const tokens = useQuery({ queryKey: keys.tokens, queryFn: api.tokens, enabled: Boolean(viewer.data) });
+	// Asked alongside the viewer rather than after it (only skipped once we know nobody's signed in).
+	const tokens = useQuery({ ...tokensQuery, enabled: viewer.data !== null });
 	const [name, setName] = useState("");
 	const create = useMutation({
 		mutationFn: () => api.createToken(name.trim()),
@@ -21,9 +29,10 @@ function Tokens() {
 			void queryClient.invalidateQueries({ queryKey: keys.tokens });
 		},
 	});
-	const revoke = useMutation({
+	const revoke = useOptimistic({
 		mutationFn: (id: string) => api.revokeToken(id),
-		onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.tokens }),
+		apply: (id) => [patch<TokenInfo[]>(keys.tokens, (old) => old.filter((t) => t.id !== id))],
+		action: "revoke the token",
 	});
 
 	if (viewer.isPending) return <Spinner className="m-8" />;
@@ -39,7 +48,7 @@ function Tokens() {
 	}
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
-			<h1 className="text-lg font-semibold">Settings</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 			<SettingsNav />
 			<div>
 				<p className="text-sm text-dim">
@@ -100,7 +109,6 @@ function Tokens() {
 								<Button
 									variant="ghost"
 									className="px-2 text-xs hover:text-red-300"
-									busy={revoke.isPending && revoke.variables === t.id}
 									onClick={() => confirm(`Revoke "${t.name}"? Anything using it stops working.`) && revoke.mutate(t.id)}
 								>
 									<Trash2 className="size-3.5" />
@@ -114,7 +122,7 @@ function Tokens() {
 					</div>
 				)}
 				<div className="px-4 pb-3">
-					<ErrorNote error={tokens.error ?? revoke.error} />
+					<ErrorNote error={tokens.error} />
 				</div>
 			</Panel>
 		</main>

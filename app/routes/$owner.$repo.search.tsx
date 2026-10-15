@@ -1,15 +1,20 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { FileCode2, Search as SearchIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Empty, ErrorNote, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { browserOnly, preload } from "../lib/queries.ts";
 
 // Code search in the repository's default branch (indexed after each change to it).
 export const Route = createFileRoute("/$owner/$repo/search")({
 	validateSearch: (s: Record<string, unknown>): { q?: string } => ({ q: typeof s.q === "string" && s.q ? s.q : undefined }),
+	loaderDeps: ({ search }) => ({ q: search.q }),
+	loader: ({ context, params, deps }) => preload(context.queryClient, Boolean(deps.q) && browserOnly(false, searchQuery(`${params.owner}/${params.repo}`, deps.q as string))),
 	component: CodeSearchPage,
 });
+
+const searchQuery = (project: string, q: string) => queryOptions({ queryKey: keys.search(project, q), queryFn: () => api.searchCode(project, q) });
 
 function CodeSearchPage() {
 	const { owner, repo } = Route.useParams();
@@ -19,13 +24,14 @@ function CodeSearchPage() {
 	const [text, setText] = useState(q);
 	useEffect(() => setText(q), [q]);
 	const search = useQuery({
-		queryKey: keys.search(project, q),
-		queryFn: () => api.searchCode(project, q),
+		...searchQuery(project, q),
 		enabled: q.length > 0,
+		placeholderData: keepPreviousData,
 		// While the index catches up, look again.
 		refetchInterval: (query) => (query.state.data?.indexing ? 2000 : false),
 	});
-	const data = search.data;
+	// The last results stay up while the next search runs, but not once the box is cleared.
+	const data = q ? search.data : undefined;
 	return (
 		<div className="space-y-3">
 			<form

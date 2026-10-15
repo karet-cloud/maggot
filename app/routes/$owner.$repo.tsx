@@ -1,18 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Archive, BookOpen, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Radio, Search, Settings, Star, Terminal, Workflow } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { EventFeed } from "../components/events.tsx";
+import { Activity, Archive, BookOpen, Bot, CircleDot, FolderCode, GitBranch, GitFork, GitPullRequest, History, Package, Plus, Search, Settings, Star, Workflow } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NewTask } from "../components/new-task.tsx";
-import { CloneUrl, RepoCommands } from "../components/repo-access.tsx";
 import { ArchivedBadge, ForkedFrom, VisibilityBadge } from "../components/repos.tsx";
-import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type RepoInfo, type Task } from "../lib/api.ts";
+import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Spinner, TimeAgo } from "../components/ui.tsx";
+import { api, ApiError, keys, repoParams, type RepoInfo } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
-import { useProjectTasks } from "../lib/queries.ts";
-import { LiveContext, useProjectLive, type LiveStatus } from "../lib/live.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery, tasksQuery } from "../lib/queries.ts";
+import { eventsQuery, LiveContext, useProjectLive } from "../lib/live.ts";
 
-export const Route = createFileRoute("/$owner/$repo")({ component: ProjectLayout });
+export const Route = createFileRoute("/$owner/$repo")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, projectQuery(project), tasksQuery(project), eventsQuery(project));
+	},
+	component: ProjectLayout,
+});
 
 function ProjectLayout() {
 	const { owner, repo } = Route.useParams();
@@ -20,14 +25,10 @@ function ProjectLayout() {
 	const live = useProjectLive(project);
 	// Pushes through maggot's git URL emit events, but poll the head too (quickly while the repo is empty).
 	const info = useQuery({
-		queryKey: keys.project(project),
-		queryFn: () => api.project(project),
+		...projectQuery(project),
 		refetchInterval: (q) => (q.state.data && !q.state.data.head ? 3000 : 15_000),
 	});
-	const tasks = useProjectTasks(project);
-	const byId = useMemo(() => new Map<string, Task>((tasks.data ?? []).map((t) => [t.id, t])), [tasks.data]);
 	const [creating, setCreating] = useState(false);
-	const [connecting, setConnecting] = useState(false);
 	const [forking, setForking] = useState(false);
 	const p = info.data;
 	const navigate = useNavigate();
@@ -64,10 +65,9 @@ function ProjectLayout() {
 					<div className="flex flex-wrap items-start justify-between gap-4">
 						<div className="min-w-0">
 							<div className="flex items-center gap-3">
-								<h1 className="min-w-0 break-all font-mono text-xl font-semibold tracking-tight">{project}</h1>
+								<h1 className="min-w-0 break-all font-mono text-2xl font-semibold tracking-tight">{project}</h1>
 								{p && <VisibilityBadge visibility={p.repo.visibility} />}
 								{archived && <ArchivedBadge />}
-								<LiveDot status={live.status} />
 							</div>
 							{p?.repo.forkOf && (
 								<div className="mt-1 flex flex-wrap items-center gap-3">
@@ -105,10 +105,6 @@ function ProjectLayout() {
 									</Link>
 								</div>
 							)}
-							<Button onClick={() => setConnecting(true)}>
-								<Terminal className="size-4" />
-								Clone / push
-							</Button>
 							{canWrite && (
 								<Button
 									variant="primary"
@@ -122,34 +118,6 @@ function ProjectLayout() {
 							)}
 						</div>
 					</div>
-					{p && (
-						<div className="mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs text-dim">
-							<span>
-								<span className="text-faint">branch</span> <span className="font-mono text-fg">{p.defaultBranch}</span>
-							</span>
-							<span className="flex items-center gap-1.5">
-								<span className="text-faint">head</span> <Oid oid={p.head} />
-							</span>
-							<span>
-								<span className="text-faint">active</span>{" "}
-								<b className="font-medium text-fg">{p.stats.provisioning + p.stats.open + p.stats.queued + p.stats.merging}</b>
-							</span>
-							<span>
-								<span className="text-faint">queue</span> <b className="font-medium text-fg">{p.queueLength}</b>
-							</span>
-							<span>
-								<span className="text-faint">merged</span> <b className="font-medium text-emerald-300">{p.stats.merged}</b>
-							</span>
-							{p.stats.conflict + p.stats.failed > 0 && (
-								<span>
-									<span className="text-faint">attention</span> <b className="font-medium text-rose-300">{p.stats.conflict + p.stats.failed}</b>
-								</span>
-							)}
-							<div className="w-full min-w-0 max-w-md sm:ml-auto sm:w-auto sm:min-w-96">
-								<CloneUrl repo={p.repo} />
-							</div>
-						</div>
-					)}
 					{p?.repo.archivedAt && (
 						<p className="mt-4 flex items-center gap-2 rounded-md border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-sm text-amber-100">
 							<Archive className="size-4 shrink-0 text-amber-300" />
@@ -182,32 +150,17 @@ function ProjectLayout() {
 						<Tab to="/$owner/$repo/branches" project={project} icon={<GitBranch className="size-3.5" />} label="Branches" />
 						<Tab to="/$owner/$repo/releases" project={project} icon={<Package className="size-3.5" />} label="Releases" />
 						<Tab to="/$owner/$repo/agents" project={project} icon={<Bot className="size-3.5" />} label="Agents" />
+						<Tab to="/$owner/$repo/activity" project={project} icon={<Activity className="size-3.5" />} label="Activity" />
 						<Tab to="/$owner/$repo/search" project={project} icon={<Search className="size-3.5" />} label="Search code" />
 						{p?.repo.canAdmin && <Tab to="/$owner/$repo/settings" project={project} icon={<Settings className="size-3.5" />} label="Settings" />}
 					</nav>
 				</div>
 			</div>
 
-			<div className="mx-auto grid max-w-[1600px] gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_300px] 2xl:grid-cols-[minmax(0,1fr)_360px]">
-				<div className="min-w-0">
-					<Outlet />
-				</div>
-				<aside className="lg:sticky lg:top-17 lg:max-h-[calc(100vh-5.5rem)]">
-					<Panel
-						title="Activity"
-						actions={<span className="text-[11px] text-faint">{live.events.length} events</span>}
-						className="flex max-h-[inherit] flex-col overflow-hidden"
-					>
-						<div className="min-h-0 flex-1 overflow-y-auto">
-							<EventFeed events={live.events} tasks={byId} project={project} />
-						</div>
-					</Panel>
-				</aside>
+			<div className="mx-auto max-w-[1600px] px-5 py-5">
+				<Outlet />
 			</div>
 
-			<Modal open={connecting} onClose={() => setConnecting(false)} title={`Use ${project} with git`}>
-				{p && <RepoCommands repo={p.repo} empty={!p.head} />}
-			</Modal>
 			<Modal open={forking} onClose={() => setForking(false)} title={`Fork ${project}`}>
 				{p && <ForkDialog project={project} repo={p.repo} onClose={() => setForking(false)} />}
 			</Modal>
@@ -220,22 +173,22 @@ function ProjectLayout() {
 
 function StarButton({ project, repo }: { project: string; repo: RepoInfo }) {
 	const viewer = useViewer();
-	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const star = useMutation({
+	const star = useOptimistic({
 		mutationFn: (starred: boolean) => api.star(project, starred),
-		onSuccess: ({ starred, stars }) => {
-			queryClient.setQueryData(keys.project(project), (old: Awaited<ReturnType<typeof api.project>> | undefined) =>
-				old ? { ...old, repo: { ...old.repo, starred, stars } } : old,
-			);
-			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+		apply: (starred) => {
+			const toggle = (r: RepoInfo): RepoInfo => (r.fullName === repo.fullName && r.starred !== starred ? { ...r, starred, stars: r.stars + (starred ? 1 : -1) } : r);
+			return [
+				patch<Awaited<ReturnType<typeof api.project>>>(keys.project(project), (old) => ({ ...old, repo: toggle(old.repo) }), true),
+				patch<RepoInfo[]>(["repos"], (old) => old.map(toggle)),
+			];
 		},
+		action: "star the repository",
 	});
 	return (
 		<div className="flex items-center">
 			<Button
 				onClick={() => (viewer.data ? star.mutate(!repo.starred) : navigate({ to: "/login" }))}
-				busy={star.isPending}
 				className="rounded-r-none"
 				title={viewer.data ? (repo.starred ? "Unstar" : "Star this repository") : "Sign in to star"}
 			>
@@ -310,6 +263,7 @@ function ForkDialog({ project, repo, onClose }: { project: string; repo: RepoInf
 type TabTarget =
 	| "/$owner/$repo"
 	| "/$owner/$repo/agents"
+	| "/$owner/$repo/activity"
 	| "/$owner/$repo/actions"
 	| "/$owner/$repo/history"
 	| "/$owner/$repo/branches"
@@ -357,20 +311,5 @@ function Tab({
 			{label}
 			{count !== undefined && count > 0 && <span className="rounded-full bg-raised px-1.5 text-[11px] tabular-nums text-dim">{count}</span>}
 		</Link>
-	);
-}
-
-function LiveDot({ status }: { status: LiveStatus }) {
-	const label = { connecting: "Connecting", live: "Live", offline: "Reconnecting" }[status];
-	return (
-		<span
-			className={cx(
-				"flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset",
-				status === "live" ? "bg-emerald-400/10 text-emerald-300 ring-emerald-400/30" : "bg-zinc-500/10 text-dim ring-zinc-500/30",
-			)}
-		>
-			<Radio className={cx("size-3", status === "live" && "animate-pulse-dot")} />
-			{label}
-		</span>
 	);
 }

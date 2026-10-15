@@ -1,22 +1,30 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute, Link, useRouter } from "@tanstack/react-router";
 import { Check, Copy, KeySquare, Plus, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { SettingsNav } from "../components/settings-nav.tsx";
 import { Button, CopyField, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo, useCopy } from "../components/ui.tsx";
-import { api, keys } from "../lib/api.ts";
-import { useViewer } from "./__root.tsx";
+import { api, keys, type SshKey } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload } from "../lib/queries.ts";
+import { signedIn, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/settings/ssh")({
 	head: () => ({ meta: [{ title: "SSH keys · maggot" }] }),
+	loader: ({ context }) => preload(context.queryClient, infoQuery, signedIn(context.queryClient) && keysQuery),
 	component: SshKeys,
 });
+
+const infoQuery = queryOptions({ queryKey: keys.ssh, queryFn: api.ssh, staleTime: Number.POSITIVE_INFINITY });
+const keysQuery = queryOptions({ queryKey: keys.sshKeys, queryFn: api.sshKeys });
 
 function SshKeys() {
 	const viewer = useViewer();
 	const queryClient = useQueryClient();
-	const info = useQuery({ queryKey: keys.ssh, queryFn: api.ssh, staleTime: Number.POSITIVE_INFINITY });
-	const list = useQuery({ queryKey: keys.sshKeys, queryFn: api.sshKeys, enabled: Boolean(viewer.data) });
+	const info = useQuery(infoQuery);
+	// The page's own origin, which the server render knows too.
+	const { origin } = useRouter();
+	const list = useQuery({ ...keysQuery, enabled: Boolean(viewer.data) });
 	const [key, setKey] = useState("");
 	const [name, setName] = useState("");
 	const add = useMutation({
@@ -27,9 +35,10 @@ function SshKeys() {
 			void queryClient.invalidateQueries({ queryKey: keys.sshKeys });
 		},
 	});
-	const remove = useMutation({
+	const remove = useOptimistic({
 		mutationFn: (id: string) => api.deleteSshKey(id),
-		onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.sshKeys }),
+		apply: (id) => [patch<SshKey[]>(keys.sshKeys, (old) => old.filter((k) => k.id !== id))],
+		action: "remove the key",
 	});
 
 	if (viewer.isPending) return <Spinner className="m-8" />;
@@ -44,10 +53,9 @@ function SshKeys() {
 		);
 	}
 	const host = info.data?.host ?? "maggot";
-	const origin = typeof location === "undefined" ? "" : location.origin;
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
-			<h1 className="text-lg font-semibold">Settings</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 			<SettingsNav />
 			<p className="text-sm text-dim">
 				Clone and push with an SSH key instead of a token. maggot runs on Cloudflare Workers, which can't take connections on port 22, so{" "}
@@ -121,7 +129,6 @@ function SshKeys() {
 								<Button
 									variant="ghost"
 									className="px-2 text-xs hover:text-red-300"
-									busy={remove.isPending && remove.variables === k.id}
 									onClick={() => confirm(`Remove "${k.name}"? It won't be able to reach your repositories any more.`) && remove.mutate(k.id)}
 									title="Remove key"
 									aria-label={`Remove ${k.name}`}
@@ -137,7 +144,7 @@ function SshKeys() {
 					</div>
 				)}
 				<div className="px-4 pb-3">
-					<ErrorNote error={list.error ?? remove.error} />
+					<ErrorNote error={list.error} />
 				</div>
 			</Panel>
 

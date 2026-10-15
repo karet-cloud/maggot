@@ -1,24 +1,37 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { GitPullRequest } from "lucide-react";
 import { useEffect, useState } from "react";
 import { CommitList } from "../components/commits.tsx";
 import { DiffView } from "../components/diff.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
-import { BranchSelect } from "../components/refs.tsx";
+import { BranchSelect, HeadPicker, usePullHead } from "../components/refs.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { browserOnly, preload, projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
 type Search = { base?: string; head?: string; headRepo?: string };
 
-// Open a pull request from a branch here, or from a branch of a fork (`headRepo` = owner/name).
+const previewQuery = (project: string, base: string, head: string, headRepo?: string) =>
+	queryOptions({ queryKey: [...keys.pulls(project), "preview", base, headRepo ?? "", head], queryFn: () => api.pullPreview(project, base, head, headRepo) });
+
+// Open a pull request from a branch here, or from a branch of a repository in the fork network: `head=owner:branch` as on GitHub, or `headRepo` = owner/name.
 export const Route = createFileRoute("/$owner/$repo/pulls/new")({
 	validateSearch: (s: Record<string, unknown>): Search => ({
 		base: typeof s.base === "string" && s.base ? s.base : undefined,
 		head: typeof s.head === "string" && s.head ? s.head : undefined,
 		headRepo: typeof s.headRepo === "string" && s.headRepo ? s.headRepo : undefined,
 	}),
+	loaderDeps: ({ search }) => search,
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// Without a base in the URL the preview is against the default branch, known once the project is cached.
+		const base = deps.base ?? context.queryClient.getQueryData(projectQuery(project).queryKey)?.defaultBranch;
+		// `owner:branch` names another repository, which the page looks up before previewing.
+		const local = Boolean(deps.head && !deps.head.includes(":"));
+		return preload(context.queryClient, projectQuery(project), Boolean(base && local) && browserOnly(false, previewQuery(project, base as string, deps.head as string, deps.headRepo)));
+	},
 	component: NewPull,
 });
 
@@ -30,16 +43,14 @@ function NewPull() {
 	const queryClient = useQueryClient();
 	const viewer = useViewer();
 	const needsVerification = useNeedsVerification();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const base = search.base ?? info.data?.defaultBranch;
-	const head = search.head;
-	// A fork's branches come from the fork; its own picker lists them.
-	const headProject = search.headRepo ?? project;
-	const preview = useQuery({
-		queryKey: [...keys.pulls(project), "preview", base ?? "", search.headRepo ?? "", head ?? ""],
-		queryFn: () => api.pullPreview(project, base as string, head as string, search.headRepo),
-		enabled: Boolean(base && head),
-	});
+	// The changes come from a branch here or of a repository in the fork network (`owner:branch` or `headRepo`).
+	const resolved = usePullHead(project, search);
+	const head = resolved.branch;
+	const headProject = resolved.repo ?? project;
+	const ready = Boolean(base && head && resolved.repo);
+	const preview = useQuery({ ...previewQuery(project, base ?? "", head ?? "", resolved.fork), enabled: ready });
 	const [title, setTitle] = useState("");
 	const [body, setBody] = useState("");
 	// The first commit's subject makes a good default title, as on GitHub.
@@ -48,7 +59,7 @@ function NewPull() {
 		if (first && !title) setTitle(preview.data?.commits.length === 1 ? first : (head ?? "").replace(/[-_/]+/g, " "));
 	}, [first, head, preview.data?.commits.length, title]);
 	const create = useMutation({
-		mutationFn: () => api.createPull(project, { title: title.trim(), body, base: base as string, head: head as string, headRepo: search.headRepo }),
+		mutationFn: () => api.createPull(project, { title: title.trim(), body, base: base as string, head: head as string, headRepo: resolved.fork }),
 		onSuccess: (pull) => {
 			void queryClient.invalidateQueries({ queryKey: keys.pulls(project) });
 			void queryClient.invalidateQueries({ queryKey: keys.project(project) });
@@ -63,16 +74,19 @@ function NewPull() {
 				<span>into</span>
 				<BranchSelect project={project} value={base} onChange={(b) => void navigate({ search: { ...search, base: b } })} branchesOnly />
 				<span>from</span>
-				{search.headRepo && <span className="font-mono text-fg">{search.headRepo}:</span>}
-				<BranchSelect project={headProject} value={head} onChange={(h) => void navigate({ search: { ...search, head: h } })} placeholder="Pick a branch" branchesOnly />
+				<HeadPicker project={project} repo={resolved.repo} branch={head} onChange={(h) => void navigate({ search: { ...search, ...h } })} branchesOnly />
 			</div>
-			{!head && <Empty icon={<GitPullRequest className="size-6" />} title="Pick the branch with your changes" />}
-			{preview.isPending && head && <Spinner />}
-			<ErrorNote error={preview.error} />
+			{resolved.problem ? (
+				<Empty icon={<GitPullRequest className="size-6" />} title={resolved.problem === "ambiguous" ? `${resolved.owner} has more than one repository in this fork network; pick one` : `${resolved.owner} has no fork of ${project} that you can see`} />
+			) : (
+				!head && <Empty icon={<GitPullRequest className="size-6" />} title="Pick the branch with your changes" />
+			)}
+			{preview.isPending && ready && <Spinner />}
+			<ErrorNote error={resolved.error ?? preview.error} />
 			{preview.data &&
 				(preview.data.commits.length === 0 ? (
 					<Empty title="Nothing to merge">
-						{head} has nothing that {base} doesn't.
+						{resolved.fork ? `${resolved.fork.split("/")[0]}:${head}` : head} has nothing that {base} doesn't.
 					</Empty>
 				) : (
 					<>

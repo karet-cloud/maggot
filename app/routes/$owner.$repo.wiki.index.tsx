@@ -1,11 +1,26 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { HOME } from "../../src/wiki-pages.ts";
-import { WikiGate, WikiPageView, WikiShell, WikiWelcome } from "../components/wiki.tsx";
+import { WikiGate, WikiPageView, wikiPageQuery, wikiQueries, wikiQuery, WikiShell, WikiWelcome } from "../components/wiki.tsx";
 import { Panel } from "../components/ui.tsx";
 import { repoParams } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
+import { isServer } from "../lib/ssr.ts";
 
 // The wiki's landing page: Home, or the list of pages when there's no Home, or the welcome when there's nothing yet.
-export const Route = createFileRoute("/$owner/$repo/wiki/")({ component: WikiHome });
+export const Route = createFileRoute("/$owner/$repo/wiki/")({
+	loader: async ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// Home's exact name is known once the index is cached; a server render waits for the index to find it.
+		const home = () => context.queryClient.getQueryData(wikiQuery(project).queryKey)?.pages.find(isHome);
+		const cached = home();
+		await preload(context.queryClient, ...wikiQueries(context.queryClient, project), cached && wikiPageQuery(project, cached.slug));
+		const found = isServer && !cached && home();
+		if (found) await preload(context.queryClient, wikiPageQuery(project, found.slug));
+	},
+	component: WikiHome,
+});
+
+const isHome = (p: { slug: string }) => p.slug.toLowerCase() === HOME.toLowerCase();
 
 function WikiHome() {
 	const { owner, repo } = Route.useParams();
@@ -14,7 +29,7 @@ function WikiHome() {
 		<WikiGate project={project}>
 			{({ index: { data: index }, canEdit }) => {
 				if (index.pages.length === 0) return <WikiWelcome project={project} canEdit={canEdit} />;
-				const home = index.pages.find((p) => p.slug.toLowerCase() === HOME.toLowerCase());
+				const home = index.pages.find(isHome);
 				if (home) return <WikiPageView project={project} index={index} slug={home.slug} canEdit={canEdit} />;
 				return (
 					<WikiShell project={project} index={index}>

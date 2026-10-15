@@ -1,13 +1,19 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { BookLock, BookMarked } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Button, cx, ErrorNote, Field, Input, Spinner } from "../components/ui.tsx";
 import { api, keys, type Visibility } from "../lib/api.ts";
 import { formatBytes } from "../lib/format.ts";
-import { useNeedsVerification, useViewer } from "./__root.tsx";
+import { preload } from "../lib/queries.ts";
+import { signedIn, useNeedsVerification, useViewer } from "./__root.tsx";
 
-export const Route = createFileRoute("/new")({ component: NewRepo });
+export const Route = createFileRoute("/new")({
+	loader: ({ context }) => preload(context.queryClient, signedIn(context.queryClient) && myOrgsQuery),
+	component: NewRepo,
+});
+
+const myOrgsQuery = queryOptions({ queryKey: keys.myOrgs, queryFn: api.myOrgs });
 
 function NewRepo() {
 	const viewer = useViewer();
@@ -21,7 +27,7 @@ function NewRepo() {
 	const [importUrl, setImportUrl] = useState("");
 	const [readme, setReadme] = useState(false);
 	const [owner, setOwner] = useState("");
-	const orgs = useQuery({ queryKey: keys.myOrgs, queryFn: api.myOrgs, enabled: Boolean(viewer.data) });
+	const orgs = useQuery({ ...myOrgsQuery, enabled: Boolean(viewer.data) });
 	const create = useMutation({
 		mutationFn: () =>
 			api.createRepo({
@@ -56,7 +62,7 @@ function NewRepo() {
 	const full = usage.repos >= usage.maxRepos;
 	return (
 		<main className="mx-auto max-w-2xl px-5 py-8">
-			<h1 className="text-lg font-semibold">Create a repository</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Create a repository</h1>
 			<p className="mt-1 text-sm text-dim">Push an existing project to it with git, start from a README, or import a public repository.</p>
 			<p className="mt-2 text-xs text-faint">
 				You have {usage.repos} of {usage.maxRepos} repositories, using {formatBytes(usage.bytes)} of {formatBytes(usage.maxBytes)}.
@@ -125,8 +131,11 @@ function NewRepo() {
 						body="Only you can see, clone and push it."
 					/>
 				</fieldset>
-				<Field label="Import from (optional)" hint="A public Git URL, such as https://github.com/owner/repo.git. Its history and default branch come along.">
-					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo.git" type="url" />
+				<Field
+					label="Import from (optional)"
+					hint="Any public Git URL: GitHub, GitLab, Codeberg, a self-hosted server. Its history and default branch come along; a link to a branch (…/tree/dev) imports that branch."
+				>
+					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo" inputMode="url" autoComplete="off" spellCheck={false} />
 				</Field>
 				{!importing && (
 					<>

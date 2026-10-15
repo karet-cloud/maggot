@@ -337,7 +337,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/repos/:owner/:repo/pulls/:n`, `…/files` | | the pull request, comments, reviews and line comments; its commits and diff |
 | POST | `/repos/:owner/:repo/pulls/:n/reviews` | `{ state: "commented" \| "approved" \| "changes_requested", body?, commit?, comments: [{ path, line, side, body }] }` | a review |
 | POST | `/repos/:owner/:repo/pulls/:n/merge` | `{ method: "merge" \| "squash" }` | merges it (write access) → `{ pull, commit }`; 409 on conflicts |
-| GET / PUT / DELETE | `/repos/:owner/:repo/collaborators`, `…/:username` | `{ permission }` | collaborators (admins) |
+| GET / PUT / DELETE | `/repos/:owner/:repo/collaborators`, `…/:username` | `{ permission }` (default read) | collaborators (admins) |
 | GET / POST | `/orgs`, `/orgs/:org` | `{ name, displayName? }` | your organizations; create one; one organization (members and teams for members) |
 | POST / PATCH / DELETE | `/orgs/:org/members`, `…/:username` | `{ username, role }`, `{ role }` | invite, change role, remove or leave (owners; members can leave) |
 | POST / DELETE | `/orgs/:org/teams`, `…/:team`, `…/members/:username` (PUT), `…/repos/:repo` (PUT `{ permission }`) | | teams (owners) |

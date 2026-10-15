@@ -96,14 +96,22 @@ export interface CiHost {
 	/** This repository's id, also its storage name and its coordinator's name. */
 	repoId(): string;
 	repository(): RepositoryRef;
-	/** A run finished: for the feed and workflow_run webhooks. */
-	emit(data: Record<string, unknown>): void;
+	/** A run finished: for the feed and workflow_run webhooks. `headRepo` is where its code came from, when not here. */
+	emit(data: Record<string, unknown>, headRepo: string | null): void;
 	/** Runs were created or jobs started: open pages refresh (not recorded in the feed). */
 	changed(): void;
 	/** Asks for `tick` at (or before) `at`. */
 	wake(at: number): Promise<void>;
 	/** An archived repository starts nothing; what was running is cancelled when it's archived. */
 	archived(): boolean;
+}
+
+/**
+ * A run of a private fork's code (its pull request's workflows), as shown to people who can't read the
+ * fork, and in webhooks: that it ran, on what commit and how it ended, but not its branch or workflow.
+ */
+export function privateRun<T extends Pick<CiRunSummary, "workflow" | "path" | "branch">>(run: T): T {
+	return { ...run, workflow: "(private fork)", path: "", branch: "", ...("error" in run ? { error: null } : {}) };
 }
 
 /** What started a run, kept so a re-run starts the same way. */
@@ -1271,11 +1279,12 @@ export class CiRuns {
 		}
 	}
 
-	/** The feed and workflow_run webhooks hear that a run finished. */
+	/** The feed and workflow_run webhooks hear that a run finished (and whose code it ran, for the host to keep private forks private). */
 	private announce(run: RunRow) {
-		this.host.emit({
-			run: { number: run.number, workflow: run.workflow, path: run.path, event: run.event, branch: run.branch, sha: run.sha, pull: run.pull, conclusion: run.conclusion, fromFork: Boolean(run.from_fork) },
-		});
+		this.host.emit(
+			{ run: { number: run.number, workflow: run.workflow, path: run.path, event: run.event, branch: run.branch, sha: run.sha, pull: run.pull, conclusion: run.conclusion, fromFork: Boolean(run.from_fork) } },
+			this.runHeads([run.number])[run.number] ?? null,
+		);
 	}
 
 	private async wakeIfBusy() {
@@ -1464,6 +1473,20 @@ export class CiRuns {
 		const limit = Math.min(Math.max(filter.limit ?? 30, 1), 100);
 		const rows = this.sql.exec<SummaryRow>(`SELECT ${SUMMARY} FROM ci_runs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY number DESC LIMIT ?`, ...args, limit + 1).toArray();
 		return { runs: rows.slice(0, limit).map((r) => this.summary(r)), next: rows.length > limit ? rows[limit - 1].number : null };
+	}
+
+	/**
+	 * The repository each of these runs took its code (and workflow files) from, by storage name, for the
+	 * ones that ran another repository's: a fork's pull requests. Its readers alone see their insides.
+	 */
+	runHeads(numbers: number[]): Record<number, string> {
+		const heads: Record<number, string> = {};
+		for (const number of numbers) {
+			const row = this.sql.exec<{ trigger: string }>("SELECT trigger FROM ci_runs WHERE number = ?", number).toArray()[0];
+			const head = row ? (JSON.parse(row.trigger) as Trigger | null)?.headRepo : null;
+			if (head && head !== this.host.repoId()) heads[number] = head;
+		}
+		return heads;
 	}
 
 	getRun(number: number): CiRun {

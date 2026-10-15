@@ -296,6 +296,7 @@ test("forks: a fork's pull request waits for approval and never gets secrets; a 
 	const [waiting] = await h.ci.onPull({ ...pull, sha: SHA });
 	assert.equal(waiting.status, "waiting");
 	assert.equal(waiting.fromFork, true);
+	assert.deepEqual(h.ci.runHeads([waiting.number, 9999]), { [waiting.number]: FORK }, "the persisted trigger records the code repository");
 	assert.equal(h.starts.length, 0, "nothing runs before approval");
 	const checks = await h.ci.pullChecks({ number: 7, base: "main", headRepo: FORK, sha: SHA });
 	assert.equal(checks.state, "waiting");
@@ -315,6 +316,8 @@ test("forks: a fork's pull request waits for approval and never gets secrets; a 
 	assert.equal(h.ci.getRun(waiting.number).conclusion, "cancelled");
 	assert.deepEqual(h.cancels, [h.ci.getRun(waiting.number).jobs[0].id], "the running job was told to stop");
 	assert.equal(newer.status, "waiting");
+	const rerun = await h.ci.rerun(waiting.number, "alice");
+	assert.deepEqual(h.ci.runHeads([waiting.number, newer.number, rerun.number]), { [waiting.number]: FORK, [newer.number]: FORK, [rerun.number]: FORK }, "rerunning retains the head even after a newer commit");
 	// Someone who can merge opened it: no approval needed (still no secrets).
 	const h2 = harness({ [REPO]: {}, [FORK]: { [SHA]: { "build.yml": BUILD } } });
 	await withDepot(h2);

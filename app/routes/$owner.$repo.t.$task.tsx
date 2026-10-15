@@ -1,17 +1,33 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowLeft, Bot, FileCode2, Send, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { CommitList } from "../components/commits.tsx";
-import { DiffView } from "../components/diff.tsx";
+import { DiffView, type DiffSource } from "../components/diff.tsx";
 import { EventRow } from "../components/events.tsx";
 import { Connect } from "../components/new-task.tsx";
 import { Button, ErrorNote, Oid, Panel, Spinner, StatusBadge, TimeAgo } from "../components/ui.tsx";
-import { api, keys, type Task, repoParams } from "../lib/api.ts";
+import { api, diffs, keys, type Branches, type ComparisonMeta, type Task, repoParams } from "../lib/api.ts";
 import { duration } from "../lib/format.ts";
 import { useLive } from "../lib/live.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { browserOnly, diffQuery, preload, tasksQuery } from "../lib/queries.ts";
 
-export const Route = createFileRoute("/$owner/$repo/t/$task")({ component: TaskPage });
+export const Route = createFileRoute("/$owner/$repo/t/$task")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		// The changes only exist once there's a fork; go by whatever the cache already knows of the task.
+		const known = context.queryClient.getQueryData(taskQuery(project, params.task).queryKey) ?? context.queryClient.getQueryData(tasksQuery(project).queryKey)?.find((t) => t.id === params.task);
+		return preload(context.queryClient, taskQuery(project, params.task), known !== undefined && hasChanges(known) && browserOnly(false, taskChangesQuery(project, params.task)));
+	},
+	component: TaskPage,
+});
+
+const taskQuery = (project: string, id: string) => queryOptions({ queryKey: keys.task(project, id), queryFn: () => api.task(project, id) });
+const taskDiff = (project: string, id: string): DiffSource => ({ key: keys.taskChanges(project, id), path: diffs.taskChanges(project, id) });
+// Streamed: the commits (in the header) come at once, then each file as it's diffed.
+const taskChangesQuery = (project: string, id: string) => diffQuery<ComparisonMeta>(keys.taskChanges(project, id), diffs.taskChanges(project, id));
+const hasChanges = (t: Task) => t.status !== "provisioning" && (t.status !== "abandoned" || Boolean(t.mergedOid));
 
 const SUBMITTABLE: Task["status"][] = ["open", "conflict", "failed"];
 const ABANDONABLE: Task["status"][] = ["provisioning", "open", "queued", "conflict", "failed"];
@@ -20,23 +36,31 @@ function TaskPage() {
 	const { owner, repo, task: id } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const queryClient = useQueryClient();
-	const task = useQuery({ queryKey: keys.task(project, id), queryFn: () => api.task(project, id) });
+	const task = useQuery(taskQuery(project, id));
 	const { events } = useLive();
 	const onChange = (t: Task) => {
 		queryClient.setQueryData(keys.task(project, id), t);
 		void queryClient.invalidateQueries({ queryKey: keys.tasks(project) });
 	};
 	const submit = useMutation({ mutationFn: () => api.submit(project, id), onSuccess: onChange });
-	const abandon = useMutation({ mutationFn: () => api.abandon(project, id), onSuccess: onChange });
+	const abandon = useOptimistic({
+		mutationFn: () => api.abandon(project, id),
+		apply: () => [
+			patch<Task>(keys.task(project, id), (old) => ({ ...old, status: "abandoned" }), true),
+			patch<Task[]>(keys.tasks(project), (old) => old.map((t) => (t.id === id ? { ...t, status: "abandoned" } : t)), true),
+			patch<Branches>(keys.branches(project), (old) => ({ ...old, agents: old.agents.filter((a) => a.taskId !== id) })),
+		],
+		action: "abandon the task",
+	});
 	const status = task.data?.status;
-	const hasChanges = status !== undefined && status !== "provisioning" && (status !== "abandoned" || Boolean(task.data?.mergedOid));
+	const withChanges = task.data !== undefined && hasChanges(task.data);
 	const changes = useQuery({
-		queryKey: keys.taskChanges(project, id),
-		queryFn: () => api.taskChanges(project, id),
-		enabled: hasChanges,
+		...taskChangesQuery(project, id),
+		enabled: withChanges,
 		// Agents push without telling the coordinator; re-read while the fork is live.
 		refetchInterval: status === "open" || status === "conflict" ? 15_000 : false,
 	});
+	const comparison = changes.data?.meta ?? null;
 
 	if (task.isPending) return <Spinner />;
 	if (task.error) return <ErrorNote error={task.error} />;
@@ -81,7 +105,6 @@ function TaskPage() {
 					{ABANDONABLE.includes(t.status) && (
 						<Button
 							variant="danger"
-							busy={abandon.isPending}
 							onClick={() => confirm("Abandon this task and delete its fork?") && abandon.mutate()}
 						>
 							<Trash2 className="size-4" />
@@ -90,7 +113,7 @@ function TaskPage() {
 					)}
 				</div>
 			</div>
-			<ErrorNote error={submit.error ?? abandon.error} />
+			<ErrorNote error={submit.error} />
 
 			{t.status === "conflict" && t.conflict && (
 				<div className="rounded-lg border border-rose-400/30 bg-rose-400/5 p-4 text-sm">
@@ -150,27 +173,37 @@ function TaskPage() {
 					)}
 				</Panel>
 
-				<Panel title={`Commits${changes.data ? ` (${changes.data.commits.length}${changes.data.capped ? "+" : ""})` : ""}`}>
-					{!hasChanges ? (
+				<Panel title={`Commits${comparison ? ` (${comparison.commits.length}${comparison.capped ? "+" : ""})` : ""}`}>
+					{!withChanges ? (
 						<p className="px-4 py-6 text-center text-xs text-faint">{t.status === "provisioning" ? "Waiting for the fork." : "The fork was deleted."}</p>
 					) : changes.isPending ? (
 						<Spinner className="m-4" />
-					) : changes.error ? (
+					) : !comparison ? (
 						<div className="p-3">
 							<ErrorNote error={changes.error} />
 						</div>
-					) : changes.data.commits.length === 0 ? (
+					) : comparison.commits.length === 0 ? (
 						<p className="px-4 py-6 text-center text-xs text-faint">No commits yet. The agent's pushes show up here.</p>
 					) : (
 						<div className="max-h-80 overflow-y-auto">
-							<CommitList commits={changes.data.commits} project={project} refName={t.mergedOid ? undefined : `task:${id}`} />
+							<CommitList commits={comparison.commits} project={project} refName={t.mergedOid ? undefined : `task:${id}`} />
 						</div>
 					)}
 				</Panel>
 			</div>
 
-			{changes.data && <DiffView diff={changes.data.diff} project={project} viewRef={fileRef} title="Files changed" />}
-			{!changes.data && t.changedFiles.length > 0 && (
+			{comparison && changes.data && (
+				<DiffView
+					diff={changes.data}
+					source={taskDiff(project, id)}
+					project={project}
+					viewRef={fileRef}
+					title="Files changed"
+					error={changes.error}
+					onRetry={() => void changes.refetch()}
+				/>
+			)}
+			{!comparison && t.changedFiles.length > 0 && (
 				<Panel title={`Changed files${t.changedFiles.length ? ` (${t.changedFiles.length})` : ""}`}>
 					{t.changedFiles.length === 0 ? (
 						<p className="px-4 py-6 text-center text-xs text-faint">Known once the task is submitted.</p>

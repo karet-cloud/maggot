@@ -35,7 +35,8 @@ export const STATUS: Record<TaskStatus, { label: string; dot: string; text: stri
 	abandoned: { label: "Abandoned", dot: "bg-zinc-500", text: "text-zinc-400", ring: "ring-zinc-500/30 bg-zinc-500/10" },
 };
 
-export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+/** Never empty, so an error box always says something. */
+export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err ?? "")) || "Something went wrong; try again";
 
 export function formatBytes(n: number): string {
 	if (n < 1024) return `${n} B`;
