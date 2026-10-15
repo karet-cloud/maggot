@@ -64,7 +64,7 @@ function Issues() {
 					<Link
 						to="/$owner/$repo/issues/new"
 						params={repoParams(project)}
-						className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90"
+						className="flex items-center gap-1.5 rounded-md bg-btn px-3 py-1.5 text-sm font-semibold text-btn-fg transition-colors hover:bg-accent hover:text-on-accent"
 					>
 						<Plus className="size-4" />
 						New issue

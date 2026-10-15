@@ -39,7 +39,7 @@ function Tokens() {
 	}
 	return (
 		<main className="mx-auto max-w-3xl space-y-5 px-5 py-8">
-			<h1 className="text-lg font-semibold">Settings</h1>
+			<h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
 			<SettingsNav />
 			<div>
 				<p className="text-sm text-dim">

@@ -11,7 +11,7 @@ export function OrgHeader({ org }: { org: Org }) {
 				<Building2 className="size-6" />
 			</div>
 			<div>
-				<h1 className="text-xl font-semibold">{org.displayName}</h1>
+				<h1 className="text-2xl font-semibold tracking-tight">{org.displayName}</h1>
 				<p className="font-mono text-xs text-dim">
 					{org.name} · organization{org.role ? ` · you're ${org.role === "owner" ? "an owner" : "a member"}` : ""}
 				</p>

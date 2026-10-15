@@ -84,7 +84,7 @@ function IssuePage() {
 			<header className="space-y-2 border-b border-line pb-4">
 				{editingTitle === null ? (
 					<div className="flex flex-wrap items-start gap-3">
-						<h1 className="min-w-0 flex-1 text-xl font-semibold break-words">
+						<h1 className="min-w-0 flex-1 text-2xl font-semibold tracking-tight break-words">
 							{issue.title} <span className="font-normal text-faint">#{issue.number}</span>
 						</h1>
 						{issue.canEdit && !archived && (

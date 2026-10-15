@@ -3,18 +3,11 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
 import { Landing } from "../components/landing/page.tsx";
 import { RepoList } from "../components/repos.tsx";
-import { ErrorNote, Spinner } from "../components/ui.tsx";
+import { buttonClass, ErrorNote, Spinner } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
 import { useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/")({
-	head: () => ({
-		links: [
-			{ rel: "preconnect", href: "https://fonts.googleapis.com" },
-			{ rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
-			{ rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" },
-		],
-	}),
 	component: Home,
 });
 
@@ -38,8 +31,8 @@ function Home() {
 		<main className="mx-auto max-w-[1100px] space-y-8 px-5 py-8">
 			<section className="space-y-3">
 				<div className="flex items-center justify-between gap-3">
-					<h1 className="text-lg font-semibold">Your repositories</h1>
-					<Link to="/new" className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-indigo-400">
+					<h1 className="text-2xl font-semibold tracking-tight">Your repositories</h1>
+					<Link to="/new" className={buttonClass("primary")}>
 						<Plus className="size-4" />
 						New repository
 					</Link>

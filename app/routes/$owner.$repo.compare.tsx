@@ -73,7 +73,7 @@ function ComparePage() {
 								to="/$owner/$repo/pulls/new"
 								params={repoParams(project)}
 								search={{ base, head }}
-								className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90"
+								className="rounded-md bg-btn px-3 py-1.5 text-sm font-semibold text-btn-fg transition-colors hover:bg-accent hover:text-on-accent"
 							>
 								Open a pull request
 							</Link>

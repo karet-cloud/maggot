@@ -38,7 +38,7 @@ function NewOrg() {
 	}
 	return (
 		<main className="mx-auto max-w-xl px-5 py-8">
-			<h1 className="flex items-center gap-2 text-lg font-semibold">
+			<h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
 				<Building2 className="size-5 text-accent" />
 				Create an organization
 			</h1>

@@ -75,7 +75,7 @@ function RunPage() {
 			<Panel>
 				<div className="flex flex-wrap items-start justify-between gap-3 p-4">
 					<div className="min-w-0 space-y-1">
-						<h1 className="flex items-center gap-2 text-lg font-semibold">
+						<h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
 							<CiIcon state={state} className="size-5" />
 							{r.workflow} <span className="font-normal text-faint">#{r.number}</span>
 						</h1>
