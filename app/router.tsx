@@ -3,6 +3,7 @@ import { createRouter } from "@tanstack/react-router";
 import { setupRouterSsrQueryIntegration } from "@tanstack/react-router-ssr-query";
 import { ApiError, isTerminal } from "./lib/api.ts";
 import { isServer } from "./lib/ssr.ts";
+import { keepSendable, sendable } from "./lib/ssr-policy.ts";
 import { routeTree } from "./routeTree.gen";
 
 /** How long fetched data (and a lasting error) counts as fresh. */
@@ -32,17 +33,21 @@ export function getRouter() {
 	});
 	// What the server fetched goes into the page, so the browser starts with it instead of fetching it
 	// again, and lasting errors as ApiErrors (app/start.ts: nothing else about an error, such as a stack,
-	// leaves the server). preload drops what's pending or failed transiently; the browser fetches whatever
-	// wasn't sent, just as the server render showed it.
+	// leaves the server). Only settled queries go (lib/ssr-policy.ts); the rest leave the server's cache
+	// before it renders, so the browser fetches them, just as the server render showed them.
 	setupRouterSsrQueryIntegration({
 		router,
 		queryClient,
 		wrapQueryClient: false,
-		dehydrateOptions: {
-			shouldDehydrateQuery: (q) => q.state.status === "success" || (q.state.status === "error" && isTerminal(q.state.error)),
-			shouldRedactErrors: (err) => !(err instanceof ApiError),
-		},
+		dehydrateOptions: { shouldDehydrateQuery: sendable, shouldRedactErrors: (err) => !(err instanceof ApiError) },
 	});
+	if (isServer) {
+		const dehydrate = router.options.dehydrate;
+		router.options.dehydrate = () => {
+			keepSendable(queryClient);
+			return dehydrate?.() ?? {};
+		};
+	}
 	return router;
 }
 

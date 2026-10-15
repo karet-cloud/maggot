@@ -59,25 +59,12 @@ import type {
 	WikiIndex,
 	WikiPage,
 } from "../../src/api.ts";
+import { ApiError, isTerminal, tooBigToRender } from "./api-error.ts";
 import { apiFetch } from "./ssr.ts";
 
 export type * from "../../src/api.ts";
 
-export class ApiError extends Error {
-	readonly status: number;
-	readonly code: string;
-	constructor(status: number, code: string, message: string) {
-		super(message);
-		this.status = status;
-		this.code = code;
-	}
-}
-
-/** Whether asking again gets the same answer: a 4xx other than a timeout or a rate limit. */
-export const isTerminal = (err: unknown) => err instanceof ApiError && err.status >= 400 && err.status < 500 && err.status !== 408 && err.status !== 429;
-
-/** Content a server render leaves to the browser (too big to send with the page); transient, so it's never kept. */
-export const tooBigToRender = () => new ApiError(503, "TOO_BIG_TO_RENDER", "Loaded in the browser");
+export { ApiError, isTerminal, tooBigToRender };
 
 /** A response's text, or tooBigToRender past `max` bytes or for binary content; stops reading at the cap. */
 async function cappedText(res: Response, max: number): Promise<string> {
