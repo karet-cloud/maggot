@@ -58,9 +58,10 @@ function Code() {
 				<div className="space-y-4 p-4">
 					<p className="text-sm text-dim">
 						This repository is empty.{" "}
-						{info.data.repo.canWrite ? "Push your code to it with git:" : "Its owner hasn't pushed anything yet."}
+						{info.data.repo.canWrite ? "Push your code to it with git:" : "Its owner hasn't pushed anything yet. Clone it now and pull once they do:"}
 					</p>
-					{info.data.repo.canWrite && <RepoCommands repo={info.data.repo} empty />}
+					{/* Writers get push and setup commands; everyone else gets the clone URLs (there's nothing to download yet). */}
+					<RepoCommands repo={info.data.repo} empty />
 				</div>
 			</Panel>
 		);
@@ -71,45 +72,49 @@ function Code() {
 			<div className="flex flex-wrap items-center gap-3">
 				<BranchSelect project={project} value={ref} onChange={(next) => void navigate({ search: { ref: next } })} />
 				<Breadcrumbs project={project} refName={ref} path={path} />
-				{tree.data?.commit && (
-					<div className="ml-auto flex items-center gap-3">
-						<span className="flex items-center gap-1.5 text-xs text-faint">
-							at
-							<Link
-								to="/$owner/$repo/commit/$hash"
-								params={{ ...repoParams(project), hash: tree.data.commit }}
-								search={{ ref: ref?.startsWith("task:") ? ref : undefined }}
-								className="font-mono text-[12px] text-dim hover:text-accent"
-							>
-								{tree.data.commit.slice(0, 7)}
-							</Link>
-						</span>
-						<GoToFile project={project} refName={ref} commit={tree.data.commit} />
-						{writable && onBranch && (
-							<Link
-								to="/$owner/$repo/edit"
-								params={repoParams(project)}
-								search={{ ref, dir: path || undefined }}
-								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
-							>
-								<FilePlus2 className="size-3.5" />
-								Add file
-							</Link>
-						)}
-						{writable && onBranch && (
-							<Link
-								to="/$owner/$repo/upload"
-								params={repoParams(project)}
-								search={{ ref, dir: path || undefined }}
-								className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
-							>
-								<Upload className="size-3.5" />
-								Upload
-							</Link>
-						)}
-						{info.data && <CodeMenu repo={info.data.repo} refName={ref} empty={false} />}
-					</div>
-				)}
+				{/* Wraps right-aligned on narrow screens, so the Code menu's panel stays on screen. */}
+				<div className="flex w-full flex-wrap items-center justify-end gap-3 sm:ml-auto sm:w-auto">
+					{tree.data?.commit && (
+						<>
+							<span className="flex items-center gap-1.5 text-xs text-faint">
+								at
+								<Link
+									to="/$owner/$repo/commit/$hash"
+									params={{ ...repoParams(project), hash: tree.data.commit }}
+									search={{ ref: ref?.startsWith("task:") ? ref : undefined }}
+									className="font-mono text-[12px] text-dim hover:text-accent"
+								>
+									{tree.data.commit.slice(0, 7)}
+								</Link>
+							</span>
+							<GoToFile project={project} refName={ref} commit={tree.data.commit} />
+							{writable && onBranch && (
+								<Link
+									to="/$owner/$repo/edit"
+									params={repoParams(project)}
+									search={{ ref, dir: path || undefined }}
+									className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+								>
+									<FilePlus2 className="size-3.5" />
+									Add file
+								</Link>
+							)}
+							{writable && onBranch && (
+								<Link
+									to="/$owner/$repo/upload"
+									params={repoParams(project)}
+									search={{ ref, dir: path || undefined }}
+									className="flex items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint"
+								>
+									<Upload className="size-3.5" />
+									Upload
+								</Link>
+							)}
+						</>
+					)}
+					{/* Cloning doesn't need the tree, so the menu stays while it loads or fails. */}
+					{info.data && <CodeMenu repo={info.data.repo} refName={ref} />}
+				</div>
 			</div>
 
 			<div className="grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">

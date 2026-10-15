@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { BookMarked, GitFork, Search as SearchIcon, Star } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -29,8 +29,16 @@ function Explore() {
 	const navigate = useNavigate({ from: Route.fullPath });
 	const [text, setText] = useState(q);
 	useEffect(() => setText(q), [q]);
+	// Filters as you type, once typing pauses; the URL keeps the filter for sharing and Back.
+	useEffect(() => {
+		if (text.trim() === q) return;
+		const t = setTimeout(() => void navigate({ search: { q: text.trim() || undefined, sort }, replace: true }), 250);
+		return () => clearTimeout(t);
+	}, [text, q, sort, navigate]);
 	const filter = { q: q || undefined, sort: sort ?? ("stars" as const), visibility: "public" as const };
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+	// The last list stays up while the next one loads, instead of blanking to a spinner.
+	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), placeholderData: keepPreviousData });
+	const count = repos.data?.length ?? 0;
 	return (
 		<main className="mx-auto max-w-[1080px] px-5">
 			<section className="pt-16 pb-10 text-center">
@@ -57,14 +65,17 @@ function Explore() {
 			</section>
 
 			<div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
-				<p className="text-[13px] text-dim">
-					{repos.data ? `${repos.data.length}${repos.data.length === 100 ? "+" : ""} public repositories` : " "}
-					{q && (
+				<p className={cx("text-[13px] text-dim", repos.isPlaceholderData && "opacity-60")}>
+					{repos.data &&
+						// The server returns at most 100.
+						(count === 100 ? "Showing the first 100 public repositories" : `${count} public ${count === 1 ? "repository" : "repositories"}`)}
+					{repos.data && q && (
 						<>
 							{" "}
 							matching <span className="text-fg">“{q}”</span>
 						</>
 					)}
+					{count === 100 && "; filter to narrow them down"}
 				</p>
 				<div className="flex overflow-hidden rounded-md border border-line-strong text-[13px]">
 					{SORTS.map(([value, label]) => (
@@ -94,7 +105,7 @@ function Explore() {
 							)}
 						</Empty>
 					) : (
-						<ul className="grid gap-4 md:grid-cols-2">
+						<ul className={cx("grid gap-4 transition-opacity md:grid-cols-2", repos.isPlaceholderData && "opacity-60")}>
 							{repos.data.map((r) => (
 								<RepoCard key={r.fullName} repo={r} />
 							))}

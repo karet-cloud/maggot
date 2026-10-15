@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, Code2, Download, KeyRound, Terminal } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api, keys, type GitCredentials, type RepoInfo } from "../lib/api.ts";
 import { Button, buttonClass, CopyField, cx, ErrorNote, Modal } from "./ui.tsx";
 
@@ -122,7 +122,7 @@ function SshSection({ repo }: { repo: RepoInfo }) {
 const CLONE_KIND = "maggot.cloneKind";
 
 /** The repository's clone URL, HTTPS or SSH; the choice is remembered in this browser. */
-export function CloneUrl({ repo }: { repo: RepoInfo }) {
+function CloneUrl({ repo }: { repo: RepoInfo }) {
 	const [kind, setKind] = useState<"https" | "ssh">("https");
 	// Read after mounting, so the server-rendered page and the first client render agree.
 	useEffect(() => {
@@ -168,15 +168,21 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
  * Everything for getting the code out, in one menu: the clone URL (HTTPS or SSH), the full git
  * commands, and the tree at `refName` as a .zip or .tar.gz.
  */
-export function CodeMenu({ repo, refName, empty }: { repo: RepoInfo; refName?: string; empty: boolean }) {
+export function CodeMenu({ repo, refName }: { repo: RepoInfo; refName?: string }) {
 	const [open, setOpen] = useState(false);
 	const [commands, setCommands] = useState(false);
 	const ref = useRef<HTMLDivElement>(null);
-	// Closes on a click elsewhere or Escape, like a native menu.
+	const button = useRef<HTMLButtonElement>(null);
+	const panel = useId();
+	// Closes on a click elsewhere, Escape (back to the button) or tabbing out, like a native popover.
 	useEffect(() => {
 		if (!open) return;
 		const away = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-		const escape = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+		const escape = (e: KeyboardEvent) => {
+			if (e.key !== "Escape") return;
+			setOpen(false);
+			button.current?.focus();
+		};
 		document.addEventListener("pointerdown", away);
 		document.addEventListener("keydown", escape);
 		return () => {
@@ -185,14 +191,22 @@ export function CodeMenu({ repo, refName, empty }: { repo: RepoInfo; refName?: s
 		};
 	}, [open]);
 	return (
-		<div ref={ref} className="relative">
-			<button type="button" onClick={() => setOpen(!open)} aria-expanded={open} aria-haspopup="true" className={buttonClass("primary", "px-2.5 text-xs")}>
+		<div ref={ref} className="relative" onBlur={(e) => open && e.relatedTarget && !ref.current?.contains(e.relatedTarget) && setOpen(false)}>
+			<button
+				ref={button}
+				type="button"
+				onClick={() => setOpen(!open)}
+				aria-expanded={open}
+				aria-haspopup="dialog"
+				aria-controls={open ? panel : undefined}
+				className={buttonClass("primary", "px-2.5 text-xs")}
+			>
 				<Code2 className="size-3.5" />
 				Code
 				<ChevronDown className={cx("size-3.5 transition-transform", open && "rotate-180")} />
 			</button>
 			{open && (
-				<div className="absolute right-0 z-20 mt-1.5 w-[min(400px,calc(100vw-2.5rem))] rounded-xl border border-line bg-panel shadow-(--shadow-frame)">
+				<div id={panel} role="dialog" aria-label="Clone or download" className="absolute right-0 z-20 mt-1.5 w-[min(400px,calc(100vw-2.5rem))] rounded-xl border border-line bg-panel shadow-(--shadow-frame)">
 					<div className="space-y-2.5 p-4">
 						<p className="flex items-center gap-1.5 text-[13px] font-semibold">
 							<Terminal className="size-3.5 text-dim" />
@@ -226,7 +240,7 @@ export function CodeMenu({ repo, refName, empty }: { repo: RepoInfo; refName?: s
 				</div>
 			)}
 			<Modal open={commands} onClose={() => setCommands(false)} title={`Use ${repo.fullName} with git`}>
-				<RepoCommands repo={repo} empty={empty} />
+				<RepoCommands repo={repo} empty={false} />
 			</Modal>
 		</div>
 	);

@@ -52,7 +52,7 @@ function Home() {
 			<section className="space-y-3">
 				<div className="flex items-center justify-between gap-3">
 					<h2 className="text-sm font-semibold text-dim">Explore public repositories</h2>
-					<Link to="/explore" className="text-sm text-accent hover:underline">
+					<Link to="/explore" search={{ sort: "created" }} className="text-sm text-accent hover:underline">
 						See all →
 					</Link>
 				</div>
