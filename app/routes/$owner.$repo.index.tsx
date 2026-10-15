@@ -3,7 +3,7 @@ import { createFileRoute, Link, useNavigate, useRouterState } from "@tanstack/re
 import { Check, ChevronRight, Download, File, FileCode2, FilePlus2, FileText, Folder, FolderGit2, History, Link2, Pencil, Trash2, Upload, UserRoundSearch } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Markdown } from "../components/markdown.tsx";
-import { RepoCommands } from "../components/repo-access.tsx";
+import { CodeMenu, RepoCommands } from "../components/repo-access.tsx";
 import { BlameView } from "../components/blame.tsx";
 import { GoToFile } from "../components/file-finder.tsx";
 import { BranchSelect } from "../components/refs.tsx";
@@ -107,7 +107,7 @@ function Code() {
 								Upload
 							</Link>
 						)}
-						<ArchiveMenu project={project} refName={ref} />
+						{info.data && <CodeMenu repo={info.data.repo} refName={ref} empty={false} />}
 					</div>
 				)}
 			</div>
@@ -458,25 +458,6 @@ function IconLink({ href, label, icon, newTab }: { href: string; label: string; 
 			{icon}
 			{label}
 		</a>
-	);
-}
-
-/** Downloads the whole tree at the current ref. */
-function ArchiveMenu({ project, refName }: { project: string; refName?: string }) {
-	return (
-		<details className="relative">
-			<summary className="flex cursor-pointer list-none items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs text-fg hover:border-faint">
-				<Download className="size-3.5" />
-				Download
-			</summary>
-			<div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden rounded-md border border-line-strong bg-panel py-1 shadow-xl">
-				{(["zip", "tar.gz"] as const).map((format) => (
-					<a key={format} href={api.archiveUrl(project, format, refName)} className="block px-3 py-1.5 text-xs text-dim hover:bg-raised hover:text-fg">
-						Download .{format}
-					</a>
-				))}
-			</div>
-		</details>
 	);
 }
 
