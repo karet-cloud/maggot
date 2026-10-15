@@ -141,6 +141,7 @@ export interface CreateRepoInput {
 	visibility: Visibility;
 	defaultBranch?: string;
 	importUrl?: string;
+	importDepth?: number;
 	readme?: boolean;
 	/** An organization to create it in. */
 	owner?: string;

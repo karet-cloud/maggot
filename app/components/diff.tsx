@@ -78,6 +78,7 @@ export function DiffView({
 	notes,
 	error,
 	onRetry,
+	links = true,
 }: {
 	diff: Diff | StreamedDiff<unknown>;
 	source?: DiffSource;
@@ -87,6 +88,8 @@ export function DiffView({
 	notes?: DiffNotes;
 	error?: unknown;
 	onRetry?: () => void;
+	/** Off where the files can't be browsed (the landing page's demo). */
+	links?: boolean;
 }) {
 	const view = useMemo(() => ("list" in diff ? diff : completeDiff(diff)), [diff]);
 	const [layout, setLayout] = useLayout();
@@ -182,6 +185,7 @@ export function DiffView({
 					commented={commented.has(entry.path)}
 					load={source && view.trees ? { source, trees: view.trees } : undefined}
 					stalled={!streaming && !view.done}
+					links={links}
 				/>
 			))}
 		</div>
@@ -242,6 +246,7 @@ function FileSection({
 	commented,
 	load,
 	stalled,
+	links,
 }: {
 	entry: DiffEntry;
 	/** Undefined until it arrives. */
@@ -255,6 +260,7 @@ function FileSection({
 	load?: { source: DiffSource; trees: { from: string | null; to: string } };
 	/** The stream stopped; a file that hasn't arrived won't. */
 	stalled: boolean;
+	links: boolean;
 }) {
 	const section = useRef<HTMLElement>(null);
 	const near = useNearViewport(section);
@@ -319,7 +325,7 @@ function FileSection({
 				<span className="min-w-0 flex-1 truncate font-mono text-xs text-fg">{entry.path}</span>
 				{modeChange && <span className="font-mono text-[11px] text-faint">{modeChange}</span>}
 				{file && <Counts file={file} />}
-				{entry.status !== "deleted" && (
+				{links && entry.status !== "deleted" && (
 					<Link
 						to="/$owner/$repo"
 						params={repoParams(project)}
