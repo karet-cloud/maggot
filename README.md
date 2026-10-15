@@ -52,12 +52,19 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 
 - **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
   in D1). Usernames are the first part of every repository URL, so they can't be changed.
-- **Who can sign up**: `MAGGOT_POLICY.signUps` is `"invite"` by default, so a new account needs an invite
-  code: `POST /api/admin/invites {"note": "…", "uses": 1, "days": 14}` with the admin key returns the code
-  and a `/signup?invite=…` link that fills it in. `GET /api/admin/invites` lists codes with the accounts
-  made from each; `DELETE /api/admin/invites/:id` revokes one. `"open"` lets anyone sign up and `"closed"`
-  nobody. Either way, at most `signUpsPerDay` accounts (20) are created instance-wide per day and
-  `signUpsPerHour` (3) per address. Requests carrying the admin key skip all of this.
+- **Who can sign up**: anyone, until `MAGGOT_POLICY.maxAccounts` (100) accounts exist. After that the
+  sign-up page becomes a waitlist (`POST /api/waitlist {"email", "note"}`), and getting in takes an invite
+  code, which works past the limit. `GET /api/admin/waitlist[?pending]` lists who's waiting;
+  `POST /api/admin/waitlist/:id/invite` mints them a one-use code (emailed when email is set up, and
+  returned as a `/signup?invite=…` link either way). `POST /api/admin/invites {"note", "uses", "days"}`
+  mints codes by hand, `GET /api/admin/invites` lists them with the accounts made from each, and
+  `DELETE /api/admin/invites/:id` revokes one. `signUps: "invite"` needs a code from the first account,
+  and `"closed"` turns sign-up and the waitlist off. On top of that, at most `signUpsPerDay` (20) accounts
+  are made instance-wide per day and `signUpsPerHour` (3) per address, counting only sign-ups that made
+  an account. All of these need the admin key, which also skips every sign-up limit.
+- **Bot check**: sign-up and the waitlist run Cloudflare Turnstile's invisible widget when the deploy sets
+  `MAGGOT_TURNSTILE_SITE_KEY` (a variable in CI) and the `TURNSTILE_SECRET_KEY` secret; the server checks
+  each token with siteverify. Without them (local development, tests) there's no check.
 - **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
   works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
   Emails go out through Cloudflare Email Sending when the deploy sets `MAGGOT_EMAIL_FROM` (a sender on a
@@ -316,16 +323,20 @@ the owner); anything else needs the owner. A private repository someone can't re
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
-| POST | `/auth/sign-up/email` | `{ email, password, name, username, inviteCode? }` | Better Auth; sets the session cookie |
+| POST | `/auth/sign-up/email` | `{ email, password, name, username, inviteCode?, turnstileToken? }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-in/username` | `{ username, password }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-out` | | clears it |
 | POST | `/auth/request-password-reset` | `{ email, redirectTo: "/reset-password" }` | always the same answer; emails a one-hour link if the account exists |
 | POST | `/auth/reset-password` | `{ token, newPassword }` | sets the password, signs out every session |
 | POST | `/auth/change-password` | `{ currentPassword, newPassword, revokeOtherSessions? }` | signed in |
 | POST | `/auth/send-verification-email` | `{ email, callbackURL: "/verify-email" }` | resends the verification link |
-| GET | `/config` | | `{ emailDelivery, verificationRequired }` |
+| GET | `/config` | | `{ emailDelivery, verificationRequired, signUps: "open" \| "invite" \| "waitlist" \| "closed", turnstileSiteKey }` |
 | POST | `/admin/password-reset` | `{ username }` or `{ email }` | `{ url }`: a reset link to hand over (admin key) |
 | POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
+| POST | `/waitlist` | `{ email, note?, turnstileToken? }` | 202 whether or not the address was already on it |
+| GET | `/admin/waitlist` | `?pending` for those not yet invited | `{ waitlist }` with the `account` each invite made (admin key) |
+| POST | `/admin/waitlist/:id/invite` | `{ days? (14) }` | `{ code, url, emailed, invite }`: a one-use invite (admin key) |
+| DELETE | `/admin/waitlist/:id` | | removes the entry (admin key) |
 | POST | `/admin/invites` | `{ note?, uses? (1), days? (14) }` | `{ code, url, invite }`: a sign-up invite code, shown once (admin key) |
 | GET | `/admin/invites` | | `{ invites }`, each with `used`/`uses` and the `accounts` created with it (admin key) |
 | DELETE | `/admin/invites/:id` | | revokes an invite code (admin key) |

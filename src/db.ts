@@ -75,6 +75,8 @@ const APP_SCHEMA = [
 	`create table if not exists "repo_collaborator" ("repoId" text not null references "repo" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("repoId", "userId"))`,
 	`create index if not exists "repo_collaborator_user_idx" on "repo_collaborator" ("userId")`,
 	// Sign-up invite codes an admin issued (see MAGGOT_POLICY.signUps). Only the code's hash is kept.
+	// People waiting for an account while sign-ups are full or invite-only; an admin invites them from here.
+	`create table if not exists "waitlist" ("id" text not null primary key, "email" text not null unique collate nocase, "note" text not null, "createdAt" text not null, "invitedAt" text, "inviteId" text)`,
 	`create table if not exists "invite" ("id" text not null primary key, "hash" text not null unique, "prefix" text not null, "note" text not null, "uses" integer not null, "used" integer not null default 0, "expiresAt" text not null, "createdAt" text not null)`,
 ];
 
@@ -98,7 +100,7 @@ const COLUMNS = [
 ];
 
 /** Indexes on added columns, created once the columns exist. */
-const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`];
+const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`, `create index if not exists "user_inviteId_idx" on "user" ("inviteId")`];
 
 const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
 
@@ -830,9 +832,71 @@ export async function releaseInvite(database: D1Database, id: string): Promise<v
 	await database.prepare(`update "invite" set "used" = "used" - 1 where "id" = ? and "used" > 0`).bind(id).run();
 }
 
+/** Whether an account (not an organization) with this username exists. */
+export async function userExists(database: D1Database, username: string): Promise<boolean> {
+	return Boolean(await database.prepare(`select 1 as "x" from "user" where "username" = ?`).bind(username).first());
+}
+
+/** People's accounts (not organizations), which `maxAccounts` is checked against. */
+export async function countAccounts(database: D1Database): Promise<number> {
+	return (await database.prepare(`select count(*) as "n" from "user" where "kind" = 'user'`).first<{ n: number }>())?.n ?? 0;
+}
+
 /** Records which invite an account signed up with. */
 export async function recordInvite(database: D1Database, username: string, inviteId: string): Promise<void> {
 	await database.prepare(`update "user" set "inviteId" = ? where "username" = ? and "inviteId" is null`).bind(inviteId, username).run();
+}
+
+// ── Waitlist ─────────────────────────────────────────────────────────────────
+
+export const MAX_WAITLIST = 10_000;
+
+export interface WaitlistEntry {
+	id: string;
+	email: string;
+	note: string;
+	createdAt: string;
+	invitedAt: string | null;
+	/** The account made with the invite they were sent, once there is one. */
+	account: string | null;
+}
+
+/** Adds an address to the waitlist; one already on it is left as it was. */
+export async function joinWaitlist(database: D1Database, email: string, note: string): Promise<void> {
+	const result = await database
+		.prepare(
+			`insert into "waitlist" ("id", "email", "note", "createdAt")
+			 select ?, ?, ?, ? where (select count(*) from "waitlist") < ?
+			 on conflict ("email") do nothing`,
+		)
+		.bind(crypto.randomUUID(), email, note, new Date().toISOString(), MAX_WAITLIST)
+		.run();
+	if (result.meta.changes === 0 && !(await database.prepare(`select 1 as "x" from "waitlist" where "email" = ?`).bind(email).first())) {
+		throw new HttpError(503, "WAITLIST_FULL", "The waitlist is full for now; try again later");
+	}
+}
+
+export async function listWaitlist(database: D1Database, pending: boolean): Promise<WaitlistEntry[]> {
+	const { results } = await database
+		.prepare(
+			`select w."id", w."email", w."note", w."createdAt", w."invitedAt",
+			        (select u."username" from "user" u where u."inviteId" = w."inviteId" and w."inviteId" is not null limit 1) as "account"
+			 from "waitlist" w ${pending ? `where w."invitedAt" is null` : ""} order by w."createdAt" limit 1000`,
+		)
+		.all<WaitlistEntry>();
+	return results;
+}
+
+export async function getWaitlistEntry(database: D1Database, id: string): Promise<WaitlistEntry | null> {
+	return database.prepare(`select "id", "email", "note", "createdAt", "invitedAt", null as "account" from "waitlist" where "id" = ?`).bind(id).first<WaitlistEntry>();
+}
+
+export async function markWaitlistInvited(database: D1Database, id: string, inviteId: string): Promise<void> {
+	await database.prepare(`update "waitlist" set "invitedAt" = ?, "inviteId" = ? where "id" = ?`).bind(new Date().toISOString(), inviteId, id).run();
+}
+
+export async function removeFromWaitlist(database: D1Database, id: string): Promise<boolean> {
+	return (await database.prepare(`delete from "waitlist" where "id" = ?`).bind(id).run()).meta.changes > 0;
 }
 
 // ── SSH keys ─────────────────────────────────────────────────────────────────

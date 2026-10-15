@@ -7,10 +7,14 @@ import { emailConfigured } from "./mail.ts";
 
 export interface Policy {
 	/**
-	 * Who may create an account: anyone ("open"), only people with an invite code from an admin
-	 * ("invite"), or nobody ("closed"). Requests carrying the admin API key may always sign up.
+	 * Who may create an account: anyone until `maxAccounts` exist ("open"), only people with an invite
+	 * code from an admin ("invite"), or nobody ("closed"). Whoever can't sign up may join the waitlist
+	 * (except when closed), and an invite code works past `maxAccounts`. Requests carrying the admin API
+	 * key may always sign up.
 	 */
 	signUps: "open" | "invite" | "closed";
+	/** Accounts after which open sign-up stops and the sign-up page offers the waitlist instead. */
+	maxAccounts: number;
 	/** Accounts per IP address per hour. */
 	signUpsPerHour: number;
 	/** Accounts created per day across the whole instance, however they were invited. */
@@ -19,7 +23,7 @@ export interface Policy {
 	signInsPerIp: number;
 	/** Sign-in attempts per username or email per 15 minutes, from anywhere. */
 	signInsPerAccount: number;
-	/** Password reset and verification emails per IP address, and per address, per hour. */
+	/** Password reset and verification emails, and waitlist entries, per IP address (and per email address) per hour. */
 	emailsPerHour: number;
 	/** API requests per user (or per IP address when signed out) per minute. */
 	apiPerMinute: number;
@@ -49,7 +53,8 @@ export interface Policy {
 const MB = 1024 * 1024;
 
 export const DEFAULT_POLICY: Policy = {
-	signUps: "invite",
+	signUps: "open",
+	maxAccounts: 100,
 	signUpsPerHour: 3,
 	signUpsPerDay: 20,
 	signInsPerIp: 20,
@@ -82,8 +87,8 @@ export function policy(env: Env): Policy {
 		}
 		found = { ...DEFAULT_POLICY, ...overrides };
 		if (!["open", "invite", "closed"].includes(found.signUps)) {
-			console.error(`MAGGOT_POLICY.signUps must be "open", "invite" or "closed"; using "invite"`);
-			found.signUps = "invite";
+			console.error(`MAGGOT_POLICY.signUps must be "open", "invite" or "closed"; using "open"`);
+			found.signUps = "open";
 		}
 		parsed.set(raw, found);
 	}
@@ -117,6 +122,19 @@ export async function limit(env: Env, subject: string, rules: Rule[], message = 
 	const limiter = (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject);
 	const verdict = await limiter.take(rules);
 	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
+}
+
+/** Throws 429 like `limit` if any of `rules` is already full for `subject`, without counting this call. */
+export async function checkLimit(env: Env, subject: string, rules: Rule[], message = "Too many requests"): Promise<void> {
+	if (rules.length === 0) return;
+	const verdict = await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).peek(rules);
+	if (!verdict.ok) throw new RateLimited(`${message}; try again in ${formatWait(verdict.retryAfter)}.`, verdict.retryAfter);
+}
+
+/** Counts a call against `rules` for `subject` that already went ahead, whether or not there was room. */
+export async function countLimit(env: Env, subject: string, rules: Rule[]): Promise<void> {
+	if (rules.length === 0) return;
+	await (env.LIMITER as DurableObjectNamespace<Limiter>).getByName(subject).take(rules);
 }
 
 /**

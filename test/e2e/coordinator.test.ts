@@ -21,6 +21,8 @@ const POLICY = {
 	requireVerifiedEmail: true,
 	signUpsPerHour: 10_000,
 	signUpsPerDay: 10_000,
+	// Accounts made with the admin key count too, so open sign-up is full from the first one on.
+	maxAccounts: 1,
 	signInsPerIp: 10_000,
 	emailsPerHour: 10_000,
 	apiPerMinute: 100_000,
@@ -310,7 +312,7 @@ async function adminLink(kind: "password-reset" | "verify-email", username: stri
 /** Signs up a user (verifying their email unless asked not to) and returns its session cookie and a personal access token. */
 async function newUser(prefix: string, { verify = true } = {}): Promise<{ username: string; cookie: string; token: string }> {
 	const username = `${prefix}${run}`.toLowerCase().slice(0, 39);
-	// Sign-ups are invite-only by default; the admin key skips that (the invite test covers it).
+	// Open sign-up is full (POLICY.maxAccounts); the admin key skips that (the waitlist test covers it).
 	const signUp = await fetch(`${api}/api/auth/sign-up/email`, {
 		method: "POST",
 		headers: { "content-type": "application/json", origin: api, authorization: "Bearer dev" },
@@ -441,7 +443,8 @@ test("passwords can be reset with a one-time link, which signs out every session
 	const ask = (email: string) =>
 		fetch(`${api}/api/auth/request-password-reset`, { method: "POST", headers: json, body: JSON.stringify({ email, redirectTo: "/reset-password" }) }).then((r) => r.json());
 	assert.deepEqual(await ask(`${user.username}@test.invalid`), await ask("nobody@test.invalid"));
-	assert.deepEqual(await (await fetch(`${api}/api/config`)).json(), { emailDelivery: false, verificationRequired: true });
+	const config = (await (await fetch(`${api}/api/config`)).json()) as { emailDelivery: boolean; verificationRequired: boolean; turnstileSiteKey: string | null };
+	assert.deepEqual([config.emailDelivery, config.verificationRequired, config.turnstileSiteKey], [false, true, null]);
 
 	// Without email, the admin issues the link; users can't.
 	const issue = (auth: string) =>
@@ -2008,51 +2011,68 @@ test("shallow imports keep the requested history depth and reject invalid depths
 	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${full}/log`)).json.commits.length, 3);
 });
 
-test("sign-ups need an invite code, each code has a set number of uses, and the accounts are recorded on it", async () => {
-	// An address of its own, so the per-address sign-up limit is this test's alone.
+test("once open sign-up is full, people join the waitlist and get in with an invite that has a set number of uses", async () => {
+	await newUser("first");
+	// An address of its own, so the per-address limits are this test's alone.
 	const address = `203.0.113.${Math.floor(Math.random() * 250)}`;
-	const signUp = (username: string, inviteCode?: string) =>
+	const headers = { "content-type": "application/json", origin: api, "cf-connecting-ip": address };
+	const signUp = (username: string, inviteCode?: string, email = `${username}@test.invalid`) =>
 		fetch(`${api}/api/auth/sign-up/email`, {
 			method: "POST",
-			headers: { "content-type": "application/json", origin: api, "cf-connecting-ip": address },
-			body: JSON.stringify({ email: `${username}@test.invalid`, password: "correct-horse-battery", name: username, username, inviteCode }),
+			headers,
+			body: JSON.stringify({ email, password: "correct-horse-battery", name: username, username, inviteCode }),
 		});
 	const admin = (method: string, path: string, body?: unknown) =>
-		fetch(`${api}/api/admin/invites${path}`, {
-			method,
-			headers: { "content-type": "application/json", authorization: "Bearer dev" },
-			body: body === undefined ? undefined : JSON.stringify(body),
-		});
-	assert.equal(((await (await fetch(`${api}/api/config`)).json()) as { signUps: string }).signUps, "invite");
+		fetch(`${api}/api/admin${path}`, { method, headers: { "content-type": "application/json", authorization: "Bearer dev" }, body: body === undefined ? undefined : JSON.stringify(body) });
+	const errorCode = async (res: Response) => ((await res.json()) as { error?: { code: string }; code?: string }).error?.code;
+	assert.equal(((await (await fetch(`${api}/api/config`)).json()) as { signUps: string }).signUps, "waitlist");
 
 	const first = `invited${run}`.toLowerCase();
-	const missing = await signUp(first);
-	assert.equal(missing.status, 403);
-	assert.equal(((await missing.json()) as { error: { code: string } }).error.code, "INVITE_REQUIRED");
+	const full = await signUp(first);
+	assert.equal(full.status, 403);
+	assert.equal(await errorCode(full), "SIGN_UPS_FULL");
 	assert.equal((await signUp(first, "maggot_inv_0000")).status, 403);
 
-	const created = await admin("POST", "", { note: "e2e", uses: 1 });
-	assert.equal(created.status, 201);
-	const { code, url, invite } = (await created.json()) as { code: string; url: string; invite: { id: string } };
+	// Joining twice, in any case, is one entry; the answer doesn't say which.
+	const email = `waiting${run}@test.invalid`.toLowerCase();
+	const join = (body: unknown) => fetch(`${api}/api/waitlist`, { method: "POST", headers, body: JSON.stringify(body) });
+	assert.equal((await join({ email, note: "building agents" })).status, 202);
+	assert.equal((await join({ email: email.toUpperCase() })).status, 202);
+	assert.equal((await join({ email: "not-an-email" })).status, 400);
+	assert.equal((await join(null)).status, 400);
+	const waiting = ((await (await admin("GET", "/waitlist?pending")).json()) as { waitlist: { id: string; email: string; note: string }[] }).waitlist.filter((w) => w.email === email);
+	assert.equal(waiting.length, 1);
+	assert.equal(waiting[0].note, "building agents");
+	assert.equal((await fetch(`${api}/api/admin/waitlist`)).status, 401);
+
+	const invited = await admin("POST", `/waitlist/${waiting[0].id}/invite`, { days: 3 });
+	assert.equal(invited.status, 201);
+	const { code, url, emailed, invite } = (await invited.json()) as { code: string; url: string; emailed: boolean; invite: { id: string } };
 	assert.ok(url.endsWith(`/signup?invite=${code}`));
-	// Someone without the admin key can't mint or list invites.
-	assert.equal((await fetch(`${api}/api/admin/invites`)).status, 401);
+	assert.equal(emailed, false);
+	assert.equal(((await (await admin("GET", "/waitlist?pending")).json()) as { waitlist: { id: string }[] }).waitlist.some((w) => w.id === waiting[0].id), false);
 
-	// A sign-up that fails (here, an invalid email) gives its use back.
-	const bad = await fetch(`${api}/api/auth/sign-up/email`, {
-		method: "POST",
-		headers: { "content-type": "application/json", origin: api, "cf-connecting-ip": address },
-		body: JSON.stringify({ email: "not-an-email", password: "correct-horse-battery", name: "x", username: first, inviteCode: code }),
-	});
-	assert.equal(bad.status, 400);
-	assert.equal((await signUp(first, code)).status, 200);
-	assert.equal((await signUp(`${first}b`, code)).status, 403);
+	// A sign-up that fails (here, an invalid email) gives its use back; the code gets past the limit once.
+	assert.equal((await signUp(first, code, "not-an-email")).status, 400);
+	assert.equal((await signUp(first, ` ${code} `)).status, 200);
+	const reused = await signUp(`${first}b`, code);
+	assert.equal(reused.status, 403);
+	assert.equal(await errorCode(reused), "INVALID_INVITE");
 
-	const listed = ((await (await admin("GET", "")).json()) as { invites: { id: string; used: number; accounts: string[] }[] }).invites.find((i) => i.id === invite.id);
+	const listed = ((await (await admin("GET", "/invites")).json()) as { invites: { id: string; used: number; accounts: string[] }[] }).invites.find((i) => i.id === invite.id);
 	assert.equal(listed?.used, 1);
 	assert.deepEqual(listed?.accounts, [first]);
-	assert.equal((await admin("DELETE", `/${invite.id}`)).status, 200);
-	assert.equal((await admin("DELETE", `/${invite.id}`)).status, 404);
+	const entry = ((await (await admin("GET", "/waitlist")).json()) as { waitlist: { id: string; account: string | null }[] }).waitlist.find((w) => w.id === waiting[0].id);
+	assert.equal(entry?.account, first);
+
+	// Invites made by hand: fields are checked, and a revoked code stops working.
+	assert.equal((await admin("POST", "/invites", { uses: "2" })).status, 400);
+	assert.equal((await admin("POST", "/invites", { note: 123 })).status, 201);
+	const spare = (await (await admin("POST", "/invites", { uses: 2 })).json()) as { code: string; invite: { id: string } };
+	assert.equal((await admin("DELETE", `/invites/${spare.invite.id}`)).status, 200);
+	assert.equal((await admin("DELETE", `/invites/${spare.invite.id}`)).status, 404);
+	assert.equal((await signUp(`${first}c`, spare.code)).status, 403);
+	assert.equal((await admin("DELETE", `/waitlist/${waiting[0].id}`)).status, 200);
 });
 
 test("reserved names can't be taken through displayUsername, and re-adding a collaborator keeps their access", async () => {

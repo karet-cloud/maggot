@@ -131,6 +131,12 @@ export function safeEqual(a: string, b: string): boolean {
 	return crypto.subtle.timingSafeEqual(x, y);
 }
 
+/** Whether the request carries the admin API key as a bearer token (for routes that don't resolve a principal). */
+export function isAdminKey(env: Env, request: Request): boolean {
+	const header = request.headers.get("authorization") ?? "";
+	return header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), apiKey(env));
+}
+
 /**
  * Resolves the caller from, in order: a bearer token (`?key=` too, since browsers can't set headers on
  * WebSockets), HTTP Basic credentials whose password is a token (git), then the session cookie.
