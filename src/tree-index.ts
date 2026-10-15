@@ -14,15 +14,19 @@ export interface IndexLimits {
 	maxEntries: number;
 	/** Entries one step may write, however they're spread over directories. */
 	entriesPerStep: number;
-	/** Directories one step reads. */
+	/** Directories one step reads, at most. */
 	dirsPerStep: number;
+	/** Distinct tree entries read before yielding (one directory's pair may cross this). */
+	entriesReadPerStep: number;
+	/** Estimated bytes retained for tree entries per step, including strings and working maps. */
+	bytesReadPerStep: number;
 	/** Files one step reads; their contents are dropped after it. */
 	filesPerStep: number;
 	/** Files one update reads (for sizes and search, which holds as many); the rest keep no size and aren't searchable. */
 	maxReads: number;
 }
 
-const LIMITS: IndexLimits = { maxEntries: 300_000, entriesPerStep: 2_000, dirsPerStep: 64, filesPerStep: 32, maxReads: 20_000 };
+const LIMITS: IndexLimits = { maxEntries: 300_000, entriesPerStep: 2_000, dirsPerStep: 64, entriesReadPerStep: 20_000, bytesReadPerStep: 8 * 1024 * 1024, filesPerStep: 32, maxReads: 20_000 };
 const CONCURRENCY = 4;
 /** Failed steps in a row after which the index is dropped, to start over when next asked. */
 const MAX_FAILURES = 5;
@@ -47,7 +51,7 @@ interface State {
 	tree: string | null;
 	/** Rows in tree_entries. */
 	entries: number;
-	/** The commit whose tree had more than maxEntries entries: nothing is listed, and it isn't tried again. */
+	/** The commit whose tree exceeded an indexing limit: nothing is listed, and it isn't tried again. */
 	overflow: string | null;
 	update: Update | null;
 	/** Where to go next, if the branch moved during a walk. */
@@ -212,23 +216,55 @@ export class TreeIndex {
 		return false;
 	}
 
-	/** Reads a batch of changed directories and applies the difference between their old and new trees, up to entriesPerStep writes. */
+	/**
+	 * Read and apply one directory at a time, stopping before another read once writes or reads are
+	 * spent. Content-addressed trees are shared within the step. The cache has a byte cap as well as
+	 * an entry quota: long names must not let a small number of entries retain unlimited memory.
+	 * readTree is indivisible, so one incoming tree can temporarily exceed the cache cap; it is never
+	 * retained if it won't fit. A directory pair too large even for an empty step uses partial search
+	 * and the ordinary listing fallback, just like an index that exceeds maxEntries.
+	 */
 	private async walk(repo: ObjectReader) {
 		const items = this.sql.exec<WalkItem>("SELECT dir, before, after, cursor FROM tree_walk ORDER BY dir LIMIT ?", this.limits.dirsPerStep).toArray();
-		const read = async (hash: string) => {
+		const trees = new Map<string, TreeEntry[]>();
+		let heldEntries = 0;
+		let heldBytes = 0;
+		const read = async (hash: string): Promise<TreeEntry[] | null> => {
+			const cached = trees.get(hash);
+			if (cached) return cached;
 			const tree = await repo.readTree(hash);
 			if (!tree) throw new Error(`Tree ${hash} is missing`);
+			// UTF-16 strings plus conservative room for objects, arrays and apply's maps/name set.
+			let bytes = 0;
+			for (const entry of tree) bytes += 256 + 2 * (entry.name.length + entry.hash.length + entry.mode.length + entry.type.length);
+			if (heldBytes + bytes > this.limits.bytesReadPerStep) return null;
+			trees.set(hash, tree);
+			heldEntries += tree.length;
+			heldBytes += bytes;
 			return tree;
 		};
-		const trees = await mapLimit(items, CONCURRENCY, (item) => Promise.all([item.before ? read(item.before) : [], read(item.after)]));
-		// From here to the save, nothing awaits: the step's writes land together.
-		const s = this.state();
-		const update = s.update;
-		if (!update?.walking) return;
 		let budget = this.limits.entriesPerStep;
-		for (const [i, item] of items.entries()) {
-			if (budget <= 0) break;
-			const done = this.apply(s, update, item, trees[i][0], trees[i][1], budget);
+		let applied = false;
+		for (const item of items) {
+			if (budget <= 0 || heldEntries >= this.limits.entriesReadPerStep || heldBytes >= this.limits.bytesReadPerStep) break;
+			// An earlier directory may have dropped this one (replaced it with a file).
+			if (this.sql.exec("SELECT 1 FROM tree_walk WHERE dir = ? AND after = ?", item.dir, item.after).toArray().length === 0) continue;
+			const before = item.before ? await read(item.before) : [];
+			const after = before ? await read(item.after) : null;
+			// Read state afresh: requests can queue a newer head while a tree is read.
+			const s = this.state();
+			const update = s.update;
+			if (!update?.walking) return;
+			if (!before || !after) {
+				// If other directories used the cache, retry this one with a fresh budget next step.
+				if (applied) break;
+				this.overflowed(s, update);
+				this.save(s);
+				return;
+			}
+			// From apply through save, nothing awaits: this directory's writes land together.
+			const done = this.apply(s, update, item, before, after, budget);
+			applied = true;
 			budget -= done.used;
 			if (done.overflow) {
 				this.overflowed(s, update);
@@ -237,17 +273,20 @@ export class TreeIndex {
 			}
 			if (done.cursor === null) this.sql.exec("DELETE FROM tree_walk WHERE dir = ?", item.dir);
 			else this.sql.exec("UPDATE tree_walk SET cursor = ? WHERE dir = ?", done.cursor, item.dir);
+			this.save(s);
 		}
-		if (this.sql.exec("SELECT 1 FROM tree_walk LIMIT 1").toArray().length === 0) {
+		const s = this.state();
+		const update = s.update;
+		if (update?.walking && this.sql.exec("SELECT 1 FROM tree_walk LIMIT 1").toArray().length === 0) {
 			update.walking = false;
 			s.commit = update.commit;
 			s.tree = update.tree;
+			this.save(s);
 		}
-		this.save(s);
 	}
 
 	/**
-	 * Too many entries to list from here. From nothing, the files queued so far are still read for
+	 * Too many entries or tree bytes to index from here. From nothing, the files queued so far are still read for
 	 * (partial) search. Partway through an update, directories not reached yet still hold deletions
 	 * never applied, so the commit starts over from nothing instead (and overflows again, cleanly).
 	 */

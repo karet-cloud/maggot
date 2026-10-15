@@ -245,6 +245,96 @@ test("an index too big to list gives partial search, and isn't rebuilt for the s
 	assert.equal(index.settled("c1"), true);
 });
 
+test("directories sharing one big subtree read it once per step, holding a bounded number of entries", async () => {
+	const { index, store } = setup({ maxEntries: 100 });
+	const shared: Record<string, string> = {};
+	for (let i = 0; i < 200; i++) shared[`f${i}.txt`] = `${i}\n`;
+	const sub = store.tree(shared);
+	const root = Array.from({ length: 64 }, (_, i) => ({ name: `d${String(i).padStart(2, "0")}`, mode: "40000", type: "tree" as const, hash: sub }));
+	const rootHash = sha("tree shared-root");
+	store.trees.set(rootHash, root);
+	// Entries handed back by readTree, per step: what a step holds in memory.
+	let held = 0;
+	let subReads = 0;
+	const reader: ObjectReader = {
+		readTree: async (hash) => {
+			const tree = await store.readTree(hash);
+			held += tree?.length ?? 0;
+			if (hash === sub) subReads++;
+			return tree;
+		},
+		readBlob: (hash) => store.readBlob(hash),
+		readCommit: () => store.readCommit(),
+	};
+	index.target("c1", rootHash);
+	let most = 0;
+	let mostSubReads = 0;
+	while (await index.step(reader)) {
+		most = Math.max(most, held);
+		mostSubReads = Math.max(mostSubReads, subReads);
+		held = 0;
+		subReads = 0;
+	}
+	assert.ok(most <= 64 + 200, `a step held ${most} entries, not one copy per directory`);
+	assert.equal(mostSubReads, 1, "the shared subtree is read once per step");
+	assert.equal(index.state().overflow, "c1", "and the cap still stops the index");
+	assert.equal(index.listing("c1", ""), null);
+});
+
+test("a step reuses a shared subtree across directories until its write budget is spent", async () => {
+	const { index, store } = setup({ entriesPerStep: 400 });
+	const sub = store.tree(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`f${i}`, `${i}\n`])));
+	store.trees.set("root", Array.from({ length: 64 }, (_, i) => ({ name: `d${String(i).padStart(2, "0")}`, mode: "40000", type: "tree" as const, hash: sub })));
+	index.target("c1", "root");
+	await index.step(store);
+	store.treeReads = 0;
+	await index.step(store);
+	assert.equal(store.treeReads, 1, "two directories use the same readTree result");
+	assert.equal(index.state().entries, 64 + 400);
+	assert.equal(index.state().overflow, null);
+});
+
+test("the entry write cap stops reads before fetching more distinct large subtrees", async () => {
+	const { index, store } = setup({ maxEntries: 100 });
+	const root: TreeEntry[] = [];
+	for (let i = 0; i < 64; i++) {
+		const entries = Object.fromEntries(Array.from({ length: 200 }, (_, j) => [`f${j}`, `${i}:${j}\n`]));
+		root.push({ name: `d${String(i).padStart(2, "0")}`, mode: "40000", type: "tree", hash: store.tree(entries) });
+	}
+	store.trees.set("root", root);
+	index.target("c1", "root");
+	await index.step(store);
+	assert.equal(store.treeReads, 1);
+	await index.step(store);
+	assert.equal(store.treeReads, 2, "overflow applies the first subtree before reading any others");
+	assert.equal(index.state().overflow, "c1");
+});
+
+test("long filenames exhaust the tree byte budget even when the entry quota has room", async () => {
+	const { index, store } = setup({ bytesReadPerStep: 3_000, entriesReadPerStep: 100_000 });
+	const files = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`d${i}/${"x".repeat(750)}`, `${i}\n`]));
+	const tree = store.tree(files);
+	index.target("c1", tree);
+	await index.step(store);
+	store.treeReads = 0;
+	await index.step(store);
+	assert.equal(store.treeReads, 2, "one directory fits; the next can't be retained, so the step yields");
+	assert.equal(index.state().entries, 5, "only the first directory was applied");
+	while (await index.step(store)) {}
+	assert.equal(index.current("c1"), true, "a fresh budget lets all later directories finish");
+	assert.equal(index.paths("c1", 10)?.paths.length, 4);
+});
+
+test("a single tree exceeding the byte cap falls back without retrying forever", async () => {
+	const { code, index, store } = setup({ bytesReadPerStep: 1_000 });
+	const tree = store.tree({ ["x".repeat(1_000)]: "big name\n" });
+	await update(index, store, "c1", tree);
+	assert.equal(index.state().overflow, "c1");
+	assert.equal(index.settled("c1"), true);
+	assert.equal(index.listing("c1", ""), null);
+	assert.equal(code.state()?.partial, true);
+});
+
 test("an overflow partway through an update starts that commit over, leaving no deleted file searchable", async () => {
 	const { code, index, store } = setup({ maxEntries: 12, dirsPerStep: 1 });
 	const one = store.tree({ "a/x.txt": "x\n", "z/gone.txt": "zebra\n" });

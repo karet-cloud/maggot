@@ -43,6 +43,7 @@ import { Wiki, type SavePageInput } from "./wiki.ts";
 import { Webhooks, type RepositoryRef } from "./hooks.ts";
 import { CodeIndex } from "./search.ts";
 import { TreeIndex } from "./tree-index.ts";
+import { JobSchedule } from "./alarm-jobs.ts";
 import { blame, fileHistory, type HistoryReader } from "./git/history.ts";
 import { repoStore, type RepoHandle, type RepoStore } from "./store.ts";
 import { CiRuns, type ChecksState, type PullTrigger, type ReportAck, type SequencedReport } from "./ci/runs.ts";
@@ -154,6 +155,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	private readonly store: RepoStore;
 	private readonly code: CodeIndex;
 	private readonly index: TreeIndex;
+	private readonly jobs: JobSchedule;
 	private readonly hooks: Webhooks;
 	private readonly ci: CiRuns;
 	private readonly wiki: Wiki;
@@ -238,6 +240,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 			}
 		}
 		ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
+		this.jobs = new JobSchedule(this.sql);
 		this.code = new CodeIndex(this.sql);
 		this.index = new TreeIndex(this.sql, this.code);
 		this.hooks = new Webhooks(this.sql);
@@ -1318,9 +1321,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const run = (name: string, job: () => Promise<void>) => job().catch((err) => console.error(`alarm: ${name} failed`, err));
 		// The index wakes the alarm every few seconds while it works; the other jobs (whose retries
 		// count attempts) run only when they asked to, not on each of those wake-ups.
-		const jobsDue = this.jobsDue();
-		if (jobsDue === null || jobsDue <= Date.now()) {
-			this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('jobsDue', ?)", String(Number.MAX_SAFE_INTEGER));
+		await this.jobs.run(Date.now(), async () => {
 			await Promise.all([
 				run("merges", () => this.drainMerges()),
 				run("provisioning", () => this.resumeProvisioning()),
@@ -1330,10 +1331,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					await this.ci.tick();
 				}),
 			]);
-		}
+		});
 		await run("indexing", () => this.indexIfWanted());
 		const pending = this.sql.exec<{ n: number }>(
-			"SELECT (SELECT COUNT(*) FROM tasks WHERE status = 'provisioning') + (SELECT COUNT(*) FROM cleanup) AS n",
+			"SELECT (SELECT COUNT(*) FROM tasks WHERE status IN ('provisioning', 'queued', 'merging')) + (SELECT COUNT(*) FROM queue) + (SELECT COUNT(*) FROM cleanup) AS n",
 		).one().n;
 		if (pending > 0) await this.scheduleAlarm(Date.now() + 5_000);
 		const due = this.hooks.nextDue();
@@ -1451,19 +1452,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		await this.scheduleAlarm(Date.now() + 1_000);
 	}
 
-	/** When the alarm's regular jobs next need to run; null if unknown (they run). */
-	private jobsDue(): number | null {
-		const row = this.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key = 'jobsDue'").toArray()[0];
-		return row ? Number(row.value) : null;
-	}
-
 	/** Moves the alarm earlier if needed; never postpones one that is already due sooner. */
 	private async scheduleAlarm(at: number, jobs = true): Promise<void> {
 		// `jobs`: the alarm's regular jobs are due by then. The index's own wake-ups pass false.
-		if (jobs) {
-			const due = this.jobsDue();
-			if (due === null || at < due) this.sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('jobsDue', ?)", String(at));
-		}
+		if (jobs) this.jobs.want(at);
 		const current = await this.ctx.storage.getAlarm();
 		if (current === null || current > at) await this.ctx.storage.setAlarm(at);
 	}

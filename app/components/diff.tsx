@@ -3,7 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { ChevronDown, ChevronRight, Columns2, FileCode2, Rows2 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { api, repoParams, type Diff, type DiffEntry, type DiffHunk, type FileDiff } from "../lib/api.ts";
-import { completeDiff, fileDiffKey, type StreamedDiff } from "../lib/diff-stream.ts";
+import { completeDiff, fileDiffKey, STREAMED, type StreamedDiff } from "../lib/diff-stream.ts";
 import { highlightLines, languageFor } from "../lib/highlight.ts";
 import { Button, cx, ErrorNote, Panel, Spinner } from "./ui.tsx";
 
@@ -99,7 +99,7 @@ export function DiffView({
 			</Panel>
 		);
 	}
-	const arrived = Object.keys(view.files).length;
+	const arrived = view.files.size;
 	const showIndex = indexOpen ?? view.list.length <= 12;
 	const streaming = !view.done && !error;
 	return (
@@ -146,7 +146,7 @@ export function DiffView({
 								<a href={`#diff-${encodeURIComponent(entry.path)}`} className="flex items-center gap-2 px-4 py-1 font-mono text-xs text-dim hover:bg-raised hover:text-fg">
 									<StatusMark status={entry.status} />
 									<span className="min-w-0 flex-1 truncate">{entry.path}</span>
-									{view.files[entry.path] && <Counts file={view.files[entry.path]} />}
+									<EntryCounts file={view.files.get(entry.path)} />
 								</a>
 							</li>
 						))}
@@ -174,7 +174,7 @@ export function DiffView({
 				<FileSection
 					key={entry.path}
 					entry={entry}
-					file={view.files[entry.path]}
+					file={view.files.get(entry.path)}
 					layout={layout}
 					project={project}
 					viewRef={viewRef}
@@ -207,6 +207,8 @@ function StatusMark({ status }: { status: FileDiff["status"] }) {
 	const s = { added: ["A", "text-emerald-300"], deleted: ["D", "text-rose-300"], modified: ["M", "text-amber-300"] }[status];
 	return <span className={cx("w-3 shrink-0 text-center font-mono text-[11px] font-semibold", s[1])}>{s[0]}</span>;
 }
+
+const EntryCounts = ({ file }: { file: FileDiff | undefined }) => (file ? <Counts file={file} /> : null);
 
 function Counts({ file }: { file: FileDiff }) {
 	if (file.binary) return <span className="text-[11px] text-faint">binary</span>;
@@ -262,6 +264,7 @@ function FileSection({
 	// Hunks the stream left out (or couldn't fit), fetched for this one file once it's opened.
 	const missing = Boolean(streamed && !streamed.binary && (streamed.deferred || streamed.tooLarge));
 	const loaded = useQuery({
+		meta: STREAMED,
 		queryKey: fileDiffKey(load?.source.key ?? [], load?.trees ?? { from: null, to: "" }, entry.path),
 		queryFn: () => api.diffFile(load?.source.path ?? "", entry.path, load?.trees ?? { from: null, to: "" }),
 		enabled: missing && open && Boolean(load),

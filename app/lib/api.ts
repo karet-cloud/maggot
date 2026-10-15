@@ -91,8 +91,12 @@ async function failure(res: Response): Promise<ApiError> {
 	return new ApiError(res.status, json?.error?.code ?? json?.code ?? "HTTP_ERROR", json?.error?.message ?? json?.message ?? res.statusText);
 }
 
-/** A diff endpoint (a path from `diffs`) streamed file by file; see readDiff. */
+/**
+ * A diff endpoint (a path from `diffs`) streamed file by file; see readDiff. Browser-only: a relative,
+ * cookie-authenticated fetch; queries using it carry `STREAMED` so server rendering leaves them alone.
+ */
 export async function* streamDiff<M>(path: string, signal?: AbortSignal): AsyncGenerator<DiffEvent<M>[]> {
+	if (typeof window === "undefined") throw new Error("Diffs stream in the browser only");
 	const res = await fetch(`/api${path}`, { credentials: "same-origin", headers: { accept: "application/x-ndjson" }, signal });
 	if (!res.ok || !res.body) throw await failure(res);
 	yield* readDiff<M>(res.body);

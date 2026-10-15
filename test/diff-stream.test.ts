@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { QueryClient } from "@tanstack/query-core";
-import { completeDiff, emptyDiff, fileDiffKey, readDiff, reduceDiff, StreamError, type StreamedDiff } from "../app/lib/diff-stream.ts";
+import { completeDiff, emptyDiff, fileDiffKey, readDiff, reduceDiff, STREAMED, StreamError, type StreamedDiff } from "../app/lib/diff-stream.ts";
+import { streamDiff } from "../app/lib/api.ts";
+import { diffQuery } from "../app/lib/queries.ts";
 import type { DiffEvent } from "../src/api.ts";
 import { DEFER_ABOVE, diffList, diffPath, diffStream, diffTrees, type CommitObject, type ObjectReader, type TreeEntry } from "../src/git/diff.ts";
 
@@ -119,7 +121,7 @@ test("a streamed diff arrives as the same files as the whole diff, with large an
 	assert.equal(diff.additions, whole.additions);
 	assert.equal(diff.deletions, whole.deletions);
 	for (const file of whole.files) {
-		const streamed = diff.files[file.path];
+		const streamed = diff.files.get(file.path)!;
 		assert.equal(streamed.additions, file.additions, file.path);
 		if (file.path === "big.txt") {
 			assert.equal(streamed.deferred, "large", "more than DEFER_ABOVE changed lines");
@@ -167,7 +169,7 @@ test("a file that fails partway ends the stream with an error line, keeping the 
 	await assert.rejects(async () => {
 		for await (const batch of readDiff(chunked(text, 11))) partial = reduceDiff(partial, batch);
 	}, /Storage went away/);
-	assert.deepEqual(Object.keys(partial.files), ["a.txt"], "what arrived before the error is kept for the page");
+	assert.deepEqual([...partial.files.keys()], ["a.txt"], "what arrived before the error is kept for the page");
 });
 
 test("a file loaded on its own is fetched again once the diff's trees change, not served from the old ones", async () => {
@@ -197,7 +199,7 @@ test("a whole diff takes the streamed shape, complete", async () => {
 	const view = completeDiff(whole);
 	assert.equal(view.done, true);
 	assert.deepEqual(view.list.map((e) => e.path), ["a", "b"]);
-	assert.equal(view.files.b, whole.files[1]);
+	assert.equal(view.files.get("b"), whole.files[1]);
 	assert.equal(view.additions, 2);
 });
 
@@ -219,7 +221,42 @@ test("folding events never changes the diff it was given", () => {
 	const after = reduceDiff(start, [header, { type: "file", file: { path: "a", status: "added", oldMode: null, newMode: "100644", additions: 1, deletions: 0, binary: false, tooLarge: false, hunks: [] } }]);
 	assert.deepEqual(start, emptyDiff<null>());
 	const again = reduceDiff(after, [{ type: "file", file: { path: "b", status: "added", oldMode: null, newMode: "100644", additions: 2, deletions: 0, binary: false, tooLarge: false, hunks: [] } }]);
-	assert.deepEqual(Object.keys(after.files), ["a"], "an earlier state keeps its files");
-	assert.deepEqual(Object.keys(again.files), ["a", "b"]);
+	assert.deepEqual([...after.files.keys()], ["a"], "an earlier state keeps its files");
+	assert.deepEqual([...again.files.keys()], ["a", "b"]);
 	assert.equal(again.additions, 3);
+});
+
+
+test("special filenames are absent until received and survive reducer copies and complete diffs", async () => {
+	const store = new Store();
+	const tree = store.tree({ toString: "one\n", ["__proto__"]: "two\n" });
+	const list = await diffList(store, null, tree);
+	const events = (await new Response(diffStream(store, list, { meta: null, trees: { from: null, to: tree } })).text())
+		.trim().split("\n").map((line) => JSON.parse(line) as DiffEvent<null>);
+	let view = reduceDiff(emptyDiff<null>(), [events[0]]);
+	assert.deepEqual(view.list.map((entry) => entry.path).sort(), ["__proto__", "toString"]);
+	for (const path of ["toString", "__proto__"]) assert.equal(view.files.get(path), undefined, "an inherited member isn't a file");
+	const header = view;
+	const states = [header];
+	for (const event of events.slice(1)) {
+		view = reduceDiff(view, [event]);
+		states.push(view);
+	}
+	assert.equal(header.files.size, 0);
+	assert.equal(states[1].files.size, 1, "a later batch does not mutate the preceding Map");
+	assert.equal(view.files.size, 2);
+	assert.equal(view.done, true);
+	const whole = completeDiff(await diffTrees(store, null, tree));
+	for (const path of ["toString", "__proto__"]) {
+		assert.equal(view.files.get(path)?.hunks.length, 1);
+		assert.deepEqual(view.files.get(path), whole.files.get(path));
+	}
+});
+
+test("diff queries carry the browserOnly SSR opt-out and streamDiff refuses a server fetch", async (t) => {
+	assert.deepEqual(diffQuery(["diff"], "/projects/o/r/compare").meta, { browserOnly: true });
+	assert.deepEqual(STREAMED, { browserOnly: true }, "also used by per-file Load diff queries");
+	const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("fetch must not run"); });
+	await assert.rejects(streamDiff("/projects/o/r/compare").next(), /browser only/);
+	assert.equal(fetch.mock.callCount(), 0);
 });

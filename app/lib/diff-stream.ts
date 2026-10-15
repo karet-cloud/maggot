@@ -9,8 +9,8 @@ export interface StreamedDiff<M = unknown> {
 	/** The root trees compared, for loading one file on its own; null for a diff that wasn't streamed. */
 	trees: { from: string | null; to: string } | null;
 	list: DiffEntry[];
-	/** Files that have arrived, by path. */
-	files: Record<string, FileDiff>;
+	/** Files that have arrived, by path. A Map: paths are any text, `__proto__` and `toString` included. */
+	files: ReadonlyMap<string, FileDiff>;
 	truncated: boolean;
 	additions: number;
 	deletions: number;
@@ -18,7 +18,7 @@ export interface StreamedDiff<M = unknown> {
 	done: boolean;
 }
 
-export const emptyDiff = <M>(): StreamedDiff<M> => ({ meta: null, trees: null, list: [], files: {}, truncated: false, additions: 0, deletions: 0, done: false });
+export const emptyDiff = <M>(): StreamedDiff<M> => ({ meta: null, trees: null, list: [], files: new Map(), truncated: false, additions: 0, deletions: 0, done: false });
 
 /** A whole diff (from a JSON answer) in the streamed shape. */
 export function completeDiff(diff: Diff): StreamedDiff<never> {
@@ -26,7 +26,7 @@ export function completeDiff(diff: Diff): StreamedDiff<never> {
 		meta: null,
 		trees: null,
 		list: diff.files.map(({ path, status, oldMode, newMode }) => ({ path, status, oldMode, newMode })),
-		files: Object.fromEntries(diff.files.map((f) => [f.path, f])),
+		files: new Map(diff.files.map((f) => [f.path, f])),
 		truncated: diff.truncated,
 		additions: diff.additions,
 		deletions: diff.deletions,
@@ -35,6 +35,17 @@ export function completeDiff(diff: Diff): StreamedDiff<never> {
 }
 
 export class StreamError extends Error {}
+
+/**
+ * The `meta` of queries that stream (diffQuery). They're browser-only: such a query succeeds at its
+ * first chunk while still fetching, so data fetched or dehydrated on the server would be cut short and
+ * the browser would never resume it. Server rendering must neither prefetch nor dehydrate them.
+ */
+export const STREAMED = { browserOnly: true } as const;
+
+/** Whether a query (from the cache, or its options) streams, and so must stay out of server rendering. */
+export const isStreamedQuery = (query: { meta?: Record<string, unknown>; options?: { meta?: Record<string, unknown> } }) =>
+	(query.meta ?? query.options?.meta)?.browserOnly === true;
 
 /**
  * The query key for one file of a streamed diff loaded on its own: under the diff's key, and by the
@@ -46,14 +57,15 @@ export const fileDiffKey = (diffKey: readonly unknown[], trees: { from: string |
 /** Folds a batch of events into the diff, without changing `acc`. An error line throws. */
 export function reduceDiff<M>(acc: StreamedDiff<M>, events: DiffEvent<M>[]): StreamedDiff<M> {
 	let next = acc;
-	let files: Record<string, FileDiff> | null = null;
+	let files: Map<string, FileDiff> | null = null;
 	for (const event of events) {
 		if (event.type === "header") {
 			next = { ...emptyDiff<M>(), meta: event.meta, trees: event.trees, list: event.files, truncated: event.truncated };
 			files = null;
 		} else if (event.type === "file") {
-			files ??= { ...next.files };
-			files[event.file.path] = event.file;
+			// Copied once per batch, so the state before it is never changed.
+			files ??= new Map(next.files);
+			files.set(event.file.path, event.file);
 			next = { ...next, files, additions: next.additions + event.file.additions, deletions: next.deletions + event.file.deletions };
 		} else if (event.type === "end") {
 			// The server's totals, which the files' already add up to.
