@@ -1,13 +1,10 @@
 // Code search for one repository: the default branch's text files in an FTS5 trigram index inside the
-// repository's coordinator, so any substring of three or more characters matches. The index follows
-// the branch incrementally: each update reads only the files that changed since the indexed tree.
+// repository's coordinator, so any substring of three or more characters matches. The tree index
+// (tree-index.ts) keeps it following the branch: it puts and removes files as they change.
 import type { CodeSearch } from "./api.ts";
-import { changedFiles, mapLimit, type ObjectReader } from "./git/diff.ts";
 
 /** Files bigger than this aren't indexed (minified bundles, data files). */
-const MAX_FILE_BYTES = 256 * 1024;
-/** Changed files one update indexes; past it the index is marked partial. */
-const MAX_FILES_PER_UPDATE = 5_000;
+export const MAX_TEXT_BYTES = 256 * 1024;
 /** Text one repository's index may hold. */
 const MAX_INDEX_BYTES = 64 * 1024 * 1024;
 const MAX_RESULTS = 50;
@@ -17,8 +14,6 @@ const MAX_INDEX_FILES = 20_000;
 const FILE_OVERHEAD = 256;
 const utf8 = new TextEncoder();
 const cost = (path: string, text: string) => utf8.encode(text).length + utf8.encode(path).length + FILE_OVERHEAD;
-/** Files read and indexed together; contents are dropped after each batch. */
-const BATCH = 16;
 /** Longer phrases make FTS5's position matching expensive; nobody needs them to find code. */
 export const MAX_QUERY_LENGTH = 100;
 const MAX_LINES_PER_FILE = 5;
@@ -45,6 +40,7 @@ export class CodeIndex {
 	private readonly sql: Sql;
 	/** False where SQLite lacks FTS5; search then says it's unavailable. */
 	readonly available: boolean;
+	private totals: { files: number; bytes: number } | null = null;
 
 	constructor(sql: Sql) {
 		this.sql = sql;
@@ -74,57 +70,46 @@ export class CodeIndex {
 		return row ? (JSON.parse(row.value) as IndexState) : null;
 	}
 
-	/** Brings the index up to `commit` (whose root tree is `tree`). */
-	async update(repo: ObjectReader, commit: string, tree: string): Promise<void> {
+	/** Files and bytes held, kept here once counted: this index is the only writer of its tables. */
+	private held(): { files: number; bytes: number } {
+		this.totals ??= this.sql.exec<{ files: number; bytes: number }>("SELECT COUNT(*) AS files, COALESCE(SUM(bytes), 0) AS bytes FROM code_docs").one();
+		return this.totals;
+	}
+
+	/** Indexes `text` as the content of `path`, replacing what was there. False if the index is full, leaving the file out. */
+	put(path: string, text: string): boolean {
+		if (!this.available) return true;
+		this.remove(path);
+		const size = cost(path, text);
+		const held = this.held();
+		if (held.bytes + size > MAX_INDEX_BYTES || held.files >= MAX_INDEX_FILES) return false;
+		// The id comes from the ordinary table (FTS5 doesn't report rowids it assigns) and is given to FTS.
+		const { id } = this.sql.exec<{ id: number }>("INSERT INTO code_docs (path, bytes) VALUES (?, ?) RETURNING id", path, size).one();
+		this.sql.exec("INSERT INTO code (rowid, path, content) VALUES (?, ?, ?)", id, path, text);
+		held.files++;
+		held.bytes += size;
+		return true;
+	}
+
+	/** Drops `path`, or with `under`, every file below the directory `path`. */
+	remove(path: string, under = false): void {
 		if (!this.available) return;
-		let previous = this.state();
-		if (previous?.commit === commit) return;
-		let { changes, truncated } = await changedFiles(repo, previous?.tree ?? null, tree, MAX_FILES_PER_UPDATE, 20_000);
-		if (truncated && previous) {
-			// Too many changes to apply one by one: skipped ones would linger, so start over with a fresh
-			// (partial) index of the new tree instead of mixing two commits.
-			this.clear();
-			previous = null;
-			({ changes, truncated } = await changedFiles(repo, null, tree, MAX_FILES_PER_UPDATE, 20_000));
+		const rows = under
+			? this.sql.exec<{ id: number; bytes: number }>("SELECT id, bytes FROM code_docs WHERE path >= ? AND path < ?", `${path}/`, `${path}0`).toArray()
+			: this.sql.exec<{ id: number; bytes: number }>("SELECT id, bytes FROM code_docs WHERE path = ?", path).toArray();
+		const held = this.held();
+		for (const row of rows) {
+			this.sql.exec("DELETE FROM code WHERE rowid = ?", row.id);
+			this.sql.exec("DELETE FROM code_docs WHERE id = ?", row.id);
+			held.files--;
+			held.bytes -= row.bytes;
 		}
-		let bytes = previous?.bytes ?? 0;
-		let partial = (previous?.partial ?? false) || truncated;
-		// In batches, with the budget checked before a file is read, so memory holds one batch at a time.
-		for (let start = 0; start < changes.length; start += BATCH) {
-			const batch = changes.slice(start, start + BATCH);
-			for (const change of batch) {
-				const old = this.sql.exec<{ id: number; bytes: number }>("SELECT id, bytes FROM code_docs WHERE path = ?", change.path).toArray()[0];
-				if (!old) continue;
-				this.sql.exec("DELETE FROM code WHERE rowid = ?", old.id);
-				this.sql.exec("DELETE FROM code_docs WHERE id = ?", old.id);
-				bytes -= old.bytes;
-			}
-			const contents = await mapLimit(batch, 8, async (change) => {
-				if (!change.after || change.after.type === "gitlink" || change.after.type === "symlink") return null;
-				const blob = await repo.readBlob(change.after.hash);
-				if (!blob || blob.size > MAX_FILE_BYTES) return null;
-				const data = new Uint8Array(await blob.arrayBuffer());
-				// Binary files (a NUL in the first 8 KB, as git decides) aren't searchable text.
-				if (data.subarray(0, 8192).includes(0)) return null;
-				return new TextDecoder().decode(data);
-			});
-			let files = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM code_docs").one().n;
-			for (const [i, change] of batch.entries()) {
-				const text = contents[i];
-				if (text === null) continue;
-				const size = cost(change.path, text);
-				if (bytes + size > MAX_INDEX_BYTES || files >= MAX_INDEX_FILES) {
-					partial = true;
-					continue;
-				}
-				// The id comes from the ordinary table (FTS5 doesn't report rowids it assigns) and is given to FTS.
-				const { id } = this.sql.exec<{ id: number }>("INSERT INTO code_docs (path, bytes) VALUES (?, ?) RETURNING id", change.path, size).one();
-				this.sql.exec("INSERT INTO code (rowid, path, content) VALUES (?, ?, ?)", id, change.path, text);
-				bytes += size;
-				files++;
-			}
-		}
-		const files = this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM code_docs").one().n;
+	}
+
+	/** Records that the index now reflects `commit` (whose root tree is `tree`). */
+	finish(commit: string, tree: string, partial: boolean): void {
+		if (!this.available) return;
+		const { files, bytes } = this.held();
 		const next: IndexState = { commit, tree, files, bytes, partial, at: new Date().toISOString() };
 		this.sql.exec("INSERT OR REPLACE INTO code_state (key, value) VALUES ('state', ?)", JSON.stringify(next));
 	}
@@ -171,5 +156,6 @@ export class CodeIndex {
 	clear(): void {
 		if (!this.available) return;
 		this.sql.exec("DELETE FROM code; DELETE FROM code_docs; DELETE FROM code_state;");
+		this.totals = { files: 0, bytes: 0 };
 	}
 }

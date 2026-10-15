@@ -1,4 +1,5 @@
 // Browser client for the maggot API. Same origin; the session cookie set at login authenticates it.
+import { readDiff } from "./diff-stream.ts";
 import type {
 	Branches,
 	CodeSearch,
@@ -28,6 +29,8 @@ import type {
 	Tag,
 	Comparison,
 	Diff,
+	DiffEvent,
+	FileDiff,
 	GitCredentials,
 	Project,
 	ProjectEvent,
@@ -108,6 +111,25 @@ async function responseError(res: Response): Promise<ApiError> {
 		(res.status === 429 ? "Too many requests; try again in a minute" : `Something went wrong (HTTP ${res.status}); try again`);
 	return new ApiError(res.status, code, message);
 }
+
+/**
+ * A diff endpoint (a path from `diffs`) streamed file by file; see readDiff. Browser-only: a relative,
+ * cookie-authenticated fetch; queries using it carry `STREAMED` so server rendering leaves them alone.
+ */
+export async function* streamDiff<M>(path: string, signal?: AbortSignal): AsyncGenerator<DiffEvent<M>[]> {
+	if (typeof window === "undefined") throw new Error("Diffs stream in the browser only");
+	const res = await fetch(`/api${path}`, { credentials: "same-origin", headers: { accept: "application/x-ndjson" }, signal });
+	if (!res.ok || !res.body) throw await responseError(res);
+	yield* readDiff<M>(res.body);
+}
+
+/** The diff endpoints, which answer with JSON, a stream, or one file (see diffResponse in src/index.ts). */
+export const diffs = {
+	commit: (project: string, hash: string, ref?: string) => `${p(project)}/commits/${hash}${ref ? `?${new URLSearchParams({ ref })}` : ""}`,
+	compare: (project: string, base: string, head: string) => `${p(project)}/compare?${new URLSearchParams({ base, head })}`,
+	pullFiles: (project: string, number: number) => `${p(project)}/pulls/${number}/files`,
+	taskChanges: (project: string, id: string) => `${p(project)}/tasks/${id}/changes`,
+};
 
 /** `project` is a repository's full name, `owner/repo`. */
 const p = (project: string) => `/repos/${project.split("/").map(encodeURIComponent).join("/")}`;
@@ -224,7 +246,7 @@ export const api = {
 		call<PullList>("GET", `${p(project)}/pulls?${new URLSearchParams(Object.entries(filter).filter((e): e is [string, string] => Boolean(e[1])))}`),
 	pull: (project: string, number: number) =>
 		call<{ pull: Pull; comments: IssueComment[]; earlier: boolean; reviews: Review[]; reviewComments: ReviewComment[] }>("GET", `${p(project)}/pulls/${number}`),
-	pullFiles: (project: string, number: number) => call<{ comparison: Comparison }>("GET", `${p(project)}/pulls/${number}/files`).then((r) => r.comparison),
+	pullFiles: (project: string, number: number) => call<{ comparison: Comparison }>("GET", diffs.pullFiles(project, number)).then((r) => r.comparison),
 	pullPreview: (project: string, base: string, head: string, headRepo?: string) =>
 		call<{ comparison: Comparison }>("GET", `${p(project)}/pulls/compare?${new URLSearchParams({ base, head, ...(headRepo ? { headRepo } : {}) })}`).then((r) => r.comparison),
 	createPull: (project: string, input: { title: string; body: string; base: string; head: string; headRepo?: string }) =>
@@ -367,12 +389,12 @@ export const api = {
 		if (!res.ok) throw await responseError(res);
 		return res.text();
 	},
-	commit: (project: string, hash: string, ref?: string) =>
-		call<{ commit: CommitDetail; diff: Diff }>("GET", `${p(project)}/commits/${hash}${ref ? `?${new URLSearchParams({ ref })}` : ""}`),
-	compare: (project: string, base: string, head: string) =>
-		call<{ comparison: Comparison }>("GET", `${p(project)}/compare?${new URLSearchParams({ base, head })}`).then((r) => r.comparison),
-	taskChanges: (project: string, id: string) =>
-		call<{ comparison: Comparison }>("GET", `${p(project)}/tasks/${id}/changes`).then((r) => r.comparison),
+	commit: (project: string, hash: string, ref?: string) => call<{ commit: CommitDetail; diff: Diff }>("GET", diffs.commit(project, hash, ref)),
+	compare: (project: string, base: string, head: string) => call<{ comparison: Comparison }>("GET", diffs.compare(project, base, head)).then((r) => r.comparison),
+	taskChanges: (project: string, id: string) => call<{ comparison: Comparison }>("GET", diffs.taskChanges(project, id)).then((r) => r.comparison),
+	/** One file of a streamed diff with all its hunks ("Load diff"): `diff` is the diff's path, `trees` what its header named. */
+	diffFile: (diff: string, path: string, trees: { from: string | null; to: string }) =>
+		call<{ file: FileDiff }>("GET", `${diff}${diff.includes("?") ? "&" : "?"}${new URLSearchParams({ path, from: trees.from ?? "", to: trees.to })}`).then((r) => r.file),
 	branches: (project: string, counts = true) => call<Branches>("GET", `${p(project)}/branches${counts ? "" : "?counts=0"}`),
 	deleteBranch: (project: string, name: string) =>
 		call<{ deleted: true }>("DELETE", `${p(project)}/branches/${name.split("/").map(encodeURIComponent).join("/")}`),

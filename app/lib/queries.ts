@@ -1,5 +1,6 @@
-import { queryOptions, useQuery, type FetchInfiniteQueryOptions, type FetchQueryOptions, type QueryClient } from "@tanstack/react-query";
-import { api, keys } from "./api.ts";
+import { experimental_streamedQuery as streamedQuery, queryOptions, useQuery, type FetchInfiniteQueryOptions, type FetchQueryOptions, type QueryClient, type QueryKey } from "@tanstack/react-query";
+import { api, keys, streamDiff, type DiffEvent } from "./api.ts";
+import { emptyDiff, reduceDiff, STREAMED, type StreamedDiff } from "./diff-stream.ts";
 
 export const viewerQuery = queryOptions({ queryKey: keys.me, queryFn: api.me, staleTime: 60_000 });
 export const configQuery = queryOptions({ queryKey: keys.config, queryFn: api.config, staleTime: Infinity });
@@ -7,6 +8,26 @@ export const projectQuery = (project: string) => queryOptions({ queryKey: keys.p
 export const tasksQuery = (project: string) => queryOptions({ queryKey: keys.tasks(project), queryFn: () => api.tasks(project) });
 
 export const useProjectTasks = (project: string) => useQuery(tasksQuery(project));
+
+export { isStreamedQuery, STREAMED } from "./diff-stream.ts";
+
+/**
+ * A diff endpoint (`path`, from `diffs`) streamed into the cache: the query has data (the header's
+ * file list and `meta`) as soon as the first line arrives, and files fill in as they come; `done`
+ * says when all have. A refetch (say after a push) keeps showing the old diff until the new one is in.
+ * Browser-only (STREAMED).
+ */
+export const diffQuery = <M>(queryKey: QueryKey, path: string) =>
+	queryOptions({
+		queryKey,
+		meta: STREAMED,
+		queryFn: streamedQuery<DiffEvent<M>[], StreamedDiff<M>>({
+			streamFn: ({ signal }) => streamDiff<M>(path, signal),
+			reducer: reduceDiff,
+			initialValue: emptyDiff<M>(),
+			refetchMode: "replace",
+		}),
+	});
 
 /** How long a navigation waits for data it has never fetched before rendering with spinners instead. */
 const WAIT_MS = 300;
