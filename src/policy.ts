@@ -6,8 +6,15 @@ import { HttpError } from "./errors.ts";
 import { emailConfigured } from "./mail.ts";
 
 export interface Policy {
+	/**
+	 * Who may create an account: anyone ("open"), only people with an invite code from an admin
+	 * ("invite"), or nobody ("closed"). Requests carrying the admin API key may always sign up.
+	 */
+	signUps: "open" | "invite" | "closed";
 	/** Accounts per IP address per hour. */
 	signUpsPerHour: number;
+	/** Accounts created per day across the whole instance, however they were invited. */
+	signUpsPerDay: number;
 	/** Sign-in attempts per IP address per 5 minutes. */
 	signInsPerIp: number;
 	/** Sign-in attempts per username or email per 15 minutes, from anywhere. */
@@ -42,7 +49,9 @@ export interface Policy {
 const MB = 1024 * 1024;
 
 export const DEFAULT_POLICY: Policy = {
-	signUpsPerHour: 5,
+	signUps: "invite",
+	signUpsPerHour: 3,
+	signUpsPerDay: 20,
 	signInsPerIp: 20,
 	signInsPerAccount: 10,
 	emailsPerHour: 5,
@@ -72,6 +81,10 @@ export function policy(env: Env): Policy {
 			console.error("MAGGOT_POLICY is not valid JSON; using the defaults");
 		}
 		found = { ...DEFAULT_POLICY, ...overrides };
+		if (!["open", "invite", "closed"].includes(found.signUps)) {
+			console.error(`MAGGOT_POLICY.signUps must be "open", "invite" or "closed"; using "invite"`);
+			found.signUps = "invite";
+		}
 		parsed.set(raw, found);
 	}
 	return found;
@@ -212,9 +225,11 @@ export class Limiter extends DurableObject<Env> {
 
 const MINUTE = 60;
 const HOUR = 3600;
+const DAY = 24 * HOUR;
 
 export const rules = {
 	signUp: (p: Policy): Rule[] => [{ name: "sign-up", limit: p.signUpsPerHour, windowSeconds: HOUR }],
+	signUpGlobal: (p: Policy): Rule[] => [{ name: "sign-up", limit: p.signUpsPerDay, windowSeconds: DAY }],
 	signInIp: (p: Policy): Rule[] => [{ name: "sign-in", limit: p.signInsPerIp, windowSeconds: 5 * MINUTE }],
 	signInAccount: (p: Policy): Rule[] => [{ name: "sign-in", limit: p.signInsPerAccount, windowSeconds: 15 * MINUTE }],
 	email: (p: Policy): Rule[] => [{ name: "email", limit: p.emailsPerHour, windowSeconds: HOUR }],

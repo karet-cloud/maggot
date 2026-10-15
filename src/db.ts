@@ -74,6 +74,8 @@ const APP_SCHEMA = [
 	// People a repository's admins invited to it, with read, write or admin access.
 	`create table if not exists "repo_collaborator" ("repoId" text not null references "repo" ("id") on delete cascade, "userId" text not null references "user" ("id") on delete cascade, "permission" text not null check ("permission" in ('read', 'write', 'admin')), "state" text not null check ("state" in ('active', 'invited')), "invitedBy" text, "createdAt" text not null, primary key ("repoId", "userId"))`,
 	`create index if not exists "repo_collaborator_user_idx" on "repo_collaborator" ("userId")`,
+	// Sign-up invite codes an admin issued (see MAGGOT_POLICY.signUps). Only the code's hash is kept.
+	`create table if not exists "invite" ("id" text not null primary key, "hash" text not null unique, "prefix" text not null, "note" text not null, "uses" integer not null, "used" integer not null default 0, "expiresAt" text not null, "createdAt" text not null)`,
 ];
 
 /** Columns added after a table was first created; adding one that exists fails harmlessly. */
@@ -91,6 +93,8 @@ const COLUMNS = [
 	`alter table "issue" add column "isPull" integer not null default 0`,
 	// 'user' or 'org'.
 	`alter table "user" add column "kind" text not null default 'user'`,
+	// The invite an account signed up with, so a leaked code's accounts can be found.
+	`alter table "user" add column "inviteId" text`,
 ];
 
 /** Indexes on added columns, created once the columns exist. */
@@ -758,6 +762,77 @@ export async function userForToken(database: D1Database, token: string): Promise
 		await database.prepare(`update "token" set "lastUsedAt" = ? where "id" = ?`).bind(new Date().toISOString(), row.tokenId).run();
 	}
 	return { id: row.id, username: row.username, verified: Boolean(row.emailVerified) };
+}
+
+// ── Sign-up invites ──────────────────────────────────────────────────────────
+
+export const INVITE_PREFIX = "maggot_inv_";
+
+export interface InviteInfo {
+	id: string;
+	prefix: string;
+	note: string;
+	uses: number;
+	used: number;
+	expiresAt: string;
+	createdAt: string;
+}
+
+/** Mints an invite code good for `uses` sign-ups until it expires. Only its hash is stored. */
+export async function createInvite(database: D1Database, input: { note: string; uses: number; days: number }): Promise<{ code: string; info: InviteInfo }> {
+	const bytes = crypto.getRandomValues(new Uint8Array(16));
+	const code = INVITE_PREFIX + [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+	const now = Date.now();
+	const info: InviteInfo = {
+		id: crypto.randomUUID(),
+		prefix: code.slice(0, INVITE_PREFIX.length + 4),
+		note: input.note,
+		uses: input.uses,
+		used: 0,
+		expiresAt: new Date(now + input.days * 24 * 3600 * 1000).toISOString(),
+		createdAt: new Date(now).toISOString(),
+	};
+	await database
+		.prepare(`insert into "invite" ("id", "hash", "prefix", "note", "uses", "used", "expiresAt", "createdAt") values (?, ?, ?, ?, ?, 0, ?, ?)`)
+		.bind(info.id, await sha256(code), info.prefix, info.note, info.uses, info.expiresAt, info.createdAt)
+		.run();
+	return { code, info };
+}
+
+export async function listInvites(database: D1Database): Promise<(InviteInfo & { accounts: string[] })[]> {
+	const { results } = await database
+		.prepare(
+			`select i."id", i."prefix", i."note", i."uses", i."used", i."expiresAt", i."createdAt",
+			        coalesce((select json_group_array(u."username") from "user" u where u."inviteId" = i."id"), '[]') as "accounts"
+			 from "invite" i order by i."createdAt" desc limit 500`,
+		)
+		.all<InviteInfo & { accounts: string }>();
+	return results.map((r) => ({ ...r, accounts: JSON.parse(r.accounts) as string[] }));
+}
+
+export async function revokeInvite(database: D1Database, id: string): Promise<boolean> {
+	const result = await database.prepare(`delete from "invite" where "id" = ?`).bind(id).run();
+	return result.meta.changes > 0;
+}
+
+/** Takes one use of an invite code, returning its id, or null if it's unknown, used up or expired. */
+export async function claimInvite(database: D1Database, code: string): Promise<string | null> {
+	if (!code.startsWith(INVITE_PREFIX)) return null;
+	const row = await database
+		.prepare(`update "invite" set "used" = "used" + 1 where "hash" = ? and "used" < "uses" and "expiresAt" > ? returning "id"`)
+		.bind(await sha256(code), new Date().toISOString())
+		.first<{ id: string }>();
+	return row?.id ?? null;
+}
+
+/** Gives back a use taken by a sign-up that then failed (a taken username, say). */
+export async function releaseInvite(database: D1Database, id: string): Promise<void> {
+	await database.prepare(`update "invite" set "used" = "used" - 1 where "id" = ? and "used" > 0`).bind(id).run();
+}
+
+/** Records which invite an account signed up with. */
+export async function recordInvite(database: D1Database, username: string, inviteId: string): Promise<void> {
+	await database.prepare(`update "user" set "inviteId" = ? where "username" = ? and "inviteId" is null`).bind(inviteId, username).run();
 }
 
 // ── SSH keys ─────────────────────────────────────────────────────────────────

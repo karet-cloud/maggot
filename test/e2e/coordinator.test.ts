@@ -20,6 +20,7 @@ let api = "";
 const POLICY = {
 	requireVerifiedEmail: true,
 	signUpsPerHour: 10_000,
+	signUpsPerDay: 10_000,
 	signInsPerIp: 10_000,
 	emailsPerHour: 10_000,
 	apiPerMinute: 100_000,
@@ -309,9 +310,10 @@ async function adminLink(kind: "password-reset" | "verify-email", username: stri
 /** Signs up a user (verifying their email unless asked not to) and returns its session cookie and a personal access token. */
 async function newUser(prefix: string, { verify = true } = {}): Promise<{ username: string; cookie: string; token: string }> {
 	const username = `${prefix}${run}`.toLowerCase().slice(0, 39);
+	// Sign-ups are invite-only by default; the admin key skips that (the invite test covers it).
 	const signUp = await fetch(`${api}/api/auth/sign-up/email`, {
 		method: "POST",
-		headers: { "content-type": "application/json", origin: api },
+		headers: { "content-type": "application/json", origin: api, authorization: "Bearer dev" },
 		body: JSON.stringify({ email: `${username}@test.invalid`, password: "correct-horse-battery", name: username, username }),
 	});
 	assert.equal(signUp.status, 200, await signUp.clone().text());
@@ -2004,6 +2006,53 @@ test("shallow imports keep the requested history depth and reject invalid depths
 	const full = `fullhistory${run}`;
 	assert.equal((await call("POST", "/projects", { name: full, importUrl: `file://${source}` })).status, 201);
 	assert.equal((await call<{ commits: unknown[] }>("GET", `/projects/${full}/log`)).json.commits.length, 3);
+});
+
+test("sign-ups need an invite code, each code has a set number of uses, and the accounts are recorded on it", async () => {
+	// An address of its own, so the per-address sign-up limit is this test's alone.
+	const address = `203.0.113.${Math.floor(Math.random() * 250)}`;
+	const signUp = (username: string, inviteCode?: string) =>
+		fetch(`${api}/api/auth/sign-up/email`, {
+			method: "POST",
+			headers: { "content-type": "application/json", origin: api, "cf-connecting-ip": address },
+			body: JSON.stringify({ email: `${username}@test.invalid`, password: "correct-horse-battery", name: username, username, inviteCode }),
+		});
+	const admin = (method: string, path: string, body?: unknown) =>
+		fetch(`${api}/api/admin/invites${path}`, {
+			method,
+			headers: { "content-type": "application/json", authorization: "Bearer dev" },
+			body: body === undefined ? undefined : JSON.stringify(body),
+		});
+	assert.equal(((await (await fetch(`${api}/api/config`)).json()) as { signUps: string }).signUps, "invite");
+
+	const first = `invited${run}`.toLowerCase();
+	const missing = await signUp(first);
+	assert.equal(missing.status, 403);
+	assert.equal(((await missing.json()) as { error: { code: string } }).error.code, "INVITE_REQUIRED");
+	assert.equal((await signUp(first, "maggot_inv_0000")).status, 403);
+
+	const created = await admin("POST", "", { note: "e2e", uses: 1 });
+	assert.equal(created.status, 201);
+	const { code, url, invite } = (await created.json()) as { code: string; url: string; invite: { id: string } };
+	assert.ok(url.endsWith(`/signup?invite=${code}`));
+	// Someone without the admin key can't mint or list invites.
+	assert.equal((await fetch(`${api}/api/admin/invites`)).status, 401);
+
+	// A sign-up that fails (here, an invalid email) gives its use back.
+	const bad = await fetch(`${api}/api/auth/sign-up/email`, {
+		method: "POST",
+		headers: { "content-type": "application/json", origin: api, "cf-connecting-ip": address },
+		body: JSON.stringify({ email: "not-an-email", password: "correct-horse-battery", name: "x", username: first, inviteCode: code }),
+	});
+	assert.equal(bad.status, 400);
+	assert.equal((await signUp(first, code)).status, 200);
+	assert.equal((await signUp(`${first}b`, code)).status, 403);
+
+	const listed = ((await (await admin("GET", "")).json()) as { invites: { id: string; used: number; accounts: string[] }[] }).invites.find((i) => i.id === invite.id);
+	assert.equal(listed?.used, 1);
+	assert.deepEqual(listed?.accounts, [first]);
+	assert.equal((await admin("DELETE", `/${invite.id}`)).status, 200);
+	assert.equal((await admin("DELETE", `/${invite.id}`)).status, 404);
 });
 
 test("reserved names can't be taken through displayUsername, and re-adding a collaborator keeps their access", async () => {

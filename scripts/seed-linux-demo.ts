@@ -31,7 +31,7 @@ async function rootTree() {
 const firstLogin = await request("/api/auth/sign-in/email", { email, password });
 if (!firstLogin.ok) {
 	if (firstLogin.status !== 401) await failure(firstLogin, "Sign in mirror user");
-	const signup = await request("/api/auth/sign-up/email", { email, password, username, name: "Maggot OSS Mirrors" });
+	const signup = await request("/api/auth/sign-up/email", { email, password, username, name: "Maggot OSS Mirrors" }, { authorization: `Bearer ${adminKey}` });
 	if (!signup.ok) await failure(signup, "Create mirror user");
 }
 // Also recover accounts whose earlier signup was interrupted before verification.

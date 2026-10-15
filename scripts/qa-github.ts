@@ -23,6 +23,9 @@ import { promisify } from "node:util";
 const exec = promisify(execFile);
 const BASE = (process.env.MAGGOT_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const KEEP = process.env.KEEP === "1";
+// Sign-ups are invite-only by default; the admin key (or MAGGOT_INVITE, a code from /api/admin/invites) gets past that.
+const ADMIN_KEY = process.env.MAGGOT_API_KEY ?? "";
+const INVITE = process.env.MAGGOT_INVITE ?? "";
 
 interface Case {
 	github: string;
@@ -86,8 +89,8 @@ async function signUpQaUser() {
 	const name = `qa${Date.now().toString(36)}`;
 	const signUp = await fetch(`${BASE}/api/auth/sign-up/email`, {
 		method: "POST",
-		headers: { "content-type": "application/json", origin: BASE },
-		body: JSON.stringify({ email: `${name}@qa.maggot.invalid`, password: `qa-${crypto.randomUUID()}`, name: "QA", username: name }),
+		headers: { "content-type": "application/json", origin: BASE, ...(ADMIN_KEY ? { authorization: `Bearer ${ADMIN_KEY}` } : {}) },
+		body: JSON.stringify({ email: `${name}@qa.maggot.invalid`, password: `qa-${crypto.randomUUID()}`, name: "QA", username: name, ...(INVITE ? { inviteCode: INVITE } : {}) }),
 	});
 	if (!signUp.ok) throw new Error(`sign-up failed: ${signUp.status} ${await signUp.text()}`);
 	const cookie = (signUp.headers.getSetCookie?.() ?? [signUp.headers.get("set-cookie") ?? ""]).map((c) => c.split(";")[0]).join("; ");

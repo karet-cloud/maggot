@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import type { ApiError, PullChecks, Comparison, ComparisonMeta, Diff, FileList, IssueState, MergeMethod, OrgRole, Project, RepoInfo, ReviewState, SshInfo, TaskStatus, Visibility, WebhookEvent } from "./api.ts";
 import { protectionFor } from "./branch-rules.ts";
 import { archiveStream, listFiles, type ArchiveFormat } from "./archive.ts";
-import { auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, type Principal } from "./auth.ts";
+import { apiKey, auth, canAdmin, canRead, canWrite, issueLink, requireVerified, resolvePrincipal, safeEqual, type Principal } from "./auth.ts";
 import {
 	assertRepoName,
 	createToken,
@@ -17,6 +17,12 @@ import {
 	ownerInNetwork,
 	listRepos,
 	listTokens,
+	claimInvite,
+	createInvite,
+	listInvites,
+	recordInvite,
+	releaseInvite,
+	revokeInvite,
 	addRepoBytes,
 	addSshKey,
 	cancelTransfer,
@@ -141,7 +147,30 @@ app.use("/api/auth/*", async (c, next) => {
 		if (typeof fields?.username !== "string" || !fields.username.trim()) throw new HttpError(400, "INVALID_INPUT", "Choose a username");
 		const name = [field("username"), field("displayUsername")].find(reservedName);
 		if (name) throw new HttpError(400, "USERNAME_RESERVED", `${name} is reserved for maggot's own pages; pick another username`);
+		// Scripts and tests holding the admin key may always create accounts.
+		if (isAdminRequest(c)) return next();
+		if (p.signUps === "closed") throw new HttpError(403, "SIGN_UPS_CLOSED", "maggot isn't taking new accounts right now");
+		const code = typeof fields?.inviteCode === "string" ? fields.inviteCode.trim() : "";
+		if (p.signUps === "invite" && !code) throw new HttpError(403, "INVITE_REQUIRED", "Sign-ups need an invite code for now");
 		await limit(c.env, ip, rules.signUp(p), "Too many accounts created from your network");
+		if (p.signUps === "open") {
+			await limit(c.env, "global:sign-up", rules.signUpGlobal(p), "maggot has taken all the new accounts it can today");
+			return next();
+		}
+		// The invite is claimed before the instance-wide count, so junk codes can't use up the day's sign-ups.
+		await ensureSchema(db(c.env));
+		const inviteId = await claimInvite(db(c.env), code);
+		if (!inviteId) throw new HttpError(403, "INVALID_INVITE", "That invite code is unknown, used up or expired");
+		let created = false;
+		try {
+			await limit(c.env, "global:sign-up", rules.signUpGlobal(p), "maggot has taken all the new accounts it can today");
+			await next();
+			created = c.res.ok;
+		} finally {
+			if (created) await recordInvite(db(c.env), field("username"), inviteId);
+			else await releaseInvite(db(c.env), inviteId);
+		}
+		return;
 	} else if (action === "sign-in/username" || action === "sign-in/email") {
 		// The field the endpoint signs in with, resolved to the account, so a username and its email share one budget.
 		const given = field(action === "sign-in/username" ? "username" : "email");
@@ -205,6 +234,12 @@ function requireUser(c: Context<App>): Extract<Principal, { kind: "user" }> {
 	const p = c.var.principal;
 	if (p.kind !== "user") throw new HttpError(401, "UNAUTHORIZED", "Sign in first");
 	return p;
+}
+
+/** Whether the request carries the admin API key (for routes the principal middleware doesn't cover). */
+function isAdminRequest(c: Context<App>): boolean {
+	const header = c.req.header("authorization") ?? "";
+	return header.startsWith("Bearer ") && safeEqual(header.slice(7).trim(), apiKey(c.env));
 }
 
 function requireAdmin(c: Context<App>) {
@@ -287,7 +322,35 @@ app.get("/api/me", async (c) => {
 });
 
 /** What the sign-in pages need to know about this server, e.g. whether reset emails actually go out. */
-app.get("/api/config", (c) => c.json({ emailDelivery: emailConfigured(c.env), verificationRequired: verificationRequired(c.env) }));
+app.get("/api/config", (c) =>
+	c.json({ emailDelivery: emailConfigured(c.env), verificationRequired: verificationRequired(c.env), signUps: policy(c.env).signUps }),
+);
+
+// Sign-up invite codes (MAGGOT_POLICY.signUps "invite"). The code is returned once; only its hash is kept.
+app.post("/api/admin/invites", async (c) => {
+	requireAdmin(c);
+	const input = await body<{ note?: string; uses?: number; days?: number }>(c);
+	const uses = input.uses ?? 1;
+	const days = input.days ?? 14;
+	if (!Number.isInteger(uses) || uses < 1 || uses > 100) throw new HttpError(400, "INVALID_INPUT", "uses must be a whole number from 1 to 100");
+	if (!Number.isInteger(days) || days < 1 || days > 90) throw new HttpError(400, "INVALID_INPUT", "days must be a whole number from 1 to 90");
+	await ensureSchema(db(c.env));
+	const { code, info } = await createInvite(db(c.env), { note: (input.note ?? "").trim().slice(0, 200), uses, days });
+	return c.json({ code, url: `${new URL(c.req.url).origin}/signup?invite=${code}`, invite: info }, 201);
+});
+
+app.get("/api/admin/invites", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	return c.json({ invites: await listInvites(db(c.env)) });
+});
+
+app.delete("/api/admin/invites/:id", async (c) => {
+	requireAdmin(c);
+	await ensureSchema(db(c.env));
+	if (!(await revokeInvite(db(c.env), c.req.param("id")))) throw new HttpError(404, "NOT_FOUND", "No such invite");
+	return c.json({ deleted: true });
+});
 
 // Without email delivery, an admin can look a user up and hand them a one-time link: a password reset
 // (valid an hour) or an email verification (valid a day).

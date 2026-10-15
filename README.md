@@ -52,6 +52,12 @@ One Worker serves Git at `/<owner>/<repo>.git`, SSH at `/_ssh`, the API at `/api
 
 - **Accounts**: sign up with a username, email and password ([Better Auth](https://better-auth.com), stored
   in D1). Usernames are the first part of every repository URL, so they can't be changed.
+- **Who can sign up**: `MAGGOT_POLICY.signUps` is `"invite"` by default, so a new account needs an invite
+  code: `POST /api/admin/invites {"note": "…", "uses": 1, "days": 14}` with the admin key returns the code
+  and a `/signup?invite=…` link that fills it in. `GET /api/admin/invites` lists codes with the accounts
+  made from each; `DELETE /api/admin/invites/:id` revokes one. `"open"` lets anyone sign up and `"closed"`
+  nobody. Either way, at most `signUpsPerDay` accounts (20) are created instance-wide per day and
+  `signUpsPerHour` (3) per address. Requests carrying the admin key skip all of this.
 - **Passwords**: change it under Settings, or reset it from "Forgot your password?". The emailed link
   works once, for an hour, and signs the account out everywhere (personal access tokens keep working).
   Emails go out through Cloudflare Email Sending when the deploy sets `MAGGOT_EMAIL_FROM` (a sender on a
@@ -310,7 +316,7 @@ the owner); anything else needs the owner. A private repository someone can't re
 
 | Method | Path | Body / query | Returns |
 | --- | --- | --- | --- |
-| POST | `/auth/sign-up/email` | `{ email, password, name, username }` | Better Auth; sets the session cookie |
+| POST | `/auth/sign-up/email` | `{ email, password, name, username, inviteCode? }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-in/username` | `{ username, password }` | Better Auth; sets the session cookie |
 | POST | `/auth/sign-out` | | clears it |
 | POST | `/auth/request-password-reset` | `{ email, redirectTo: "/reset-password" }` | always the same answer; emails a one-hour link if the account exists |
@@ -320,6 +326,9 @@ the owner); anything else needs the owner. A private repository someone can't re
 | GET | `/config` | | `{ emailDelivery, verificationRequired }` |
 | POST | `/admin/password-reset` | `{ username }` or `{ email }` | `{ url }`: a reset link to hand over (admin key) |
 | POST | `/admin/verify-email` | `{ username }` or `{ email }` | `{ url }`: a verification link (admin key; 409 if already verified) |
+| POST | `/admin/invites` | `{ note?, uses? (1), days? (14) }` | `{ code, url, invite }`: a sign-up invite code, shown once (admin key) |
+| GET | `/admin/invites` | | `{ invites }`, each with `used`/`uses` and the `accounts` created with it (admin key) |
+| DELETE | `/admin/invites/:id` | | revokes an invite code (admin key) |
 | GET | `/me` | | `{ user: Viewer \| null }`, with `emailVerified` and quota `usage` |
 | GET / POST / DELETE | `/tokens`, `/tokens/:id` | `{ name }` | list, create (`{ token, info }`, plaintext once), revoke personal access tokens |
 | GET | `/repos` | `?owner=&starredBy=&q=&sort=stars&limit=` | `{ repos: RepoInfo[] }`: public ones, plus your own private ones |
