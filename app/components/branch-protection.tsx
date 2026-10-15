@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, ShieldCheck, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api, keys, type BranchRule } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { Button, Empty, ErrorNote, Field, Input, Panel, Spinner } from "./ui.tsx";
 
 const OPTIONS: { id: keyof Omit<BranchRule, "pattern" | "createdAt">; label: string; hint: string }[] = [
@@ -12,18 +13,32 @@ const OPTIONS: { id: keyof Omit<BranchRule, "pattern" | "createdAt">; label: str
 	{ id: "requireChecks", label: "Require Actions to pass", hint: "Changes land only through pull requests whose latest run of every maggot Actions workflow on the head commit succeeded: no direct pushes, web commits or merge queue" },
 ];
 
+export const branchRulesQuery = (project: string) => queryOptions({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
+
 /** A repository's branch protection rules: add, change and remove them. */
 export function BranchProtection({ project, defaultBranch }: { project: string; defaultBranch: string }) {
 	const queryClient = useQueryClient();
-	const rules = useQuery({ queryKey: keys.branchRules(project), queryFn: () => api.branchRules(project) });
+	const rules = useQuery(branchRulesQuery(project));
 	const [pattern, setPattern] = useState(defaultBranch);
 	const [flags, setFlags] = useState({ blockForcePushes: true, blockDeletions: true, requireMergeQueue: false, requireReview: false, requireChecks: false });
 	const set = (rules: BranchRule[]) => {
 		queryClient.setQueryData(keys.branchRules(project), rules);
 		void queryClient.invalidateQueries({ queryKey: keys.branches(project) });
 	};
+	// A new rule waits for the server, which checks the pattern; changing or removing one shows at once.
 	const save = useMutation({ mutationFn: (rule: Omit<BranchRule, "createdAt">) => api.setBranchRule(project, rule), onSuccess: set });
-	const remove = useMutation({ mutationFn: (p: string) => api.deleteBranchRule(project, p), onSuccess: set });
+	const change = useOptimistic({
+		mutationFn: (rule: BranchRule) => api.setBranchRule(project, rule),
+		apply: (rule) => [patch<BranchRule[]>(keys.branchRules(project), (old) => old.map((r) => (r.pattern === rule.pattern ? rule : r)))],
+		invalidate: () => [keys.branches(project)],
+		action: "change the rule",
+	});
+	const remove = useOptimistic({
+		mutationFn: (p: string) => api.deleteBranchRule(project, p),
+		apply: (p) => [patch<BranchRule[]>(keys.branchRules(project), (old) => old.filter((r) => r.pattern !== p))],
+		invalidate: () => [keys.branches(project)],
+		action: "remove the rule",
+	});
 
 	return (
 		<Panel title="Branch protection" actions={<span className="text-[11px] text-faint">The merge queue is never blocked</span>}>
@@ -46,7 +61,7 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 											// Turning off the last protection removes the rule.
 											if (!OPTIONS.some((option) => next[option.id])) {
 												if (confirm(`Stop protecting ${r.pattern}?`)) remove.mutate(r.pattern);
-											} else save.mutate(next);
+											} else change.mutate(next);
 										}}
 										className="rounded-full bg-raised px-2 py-0.5 text-[11px] text-dim hover:text-fg"
 									>
@@ -57,7 +72,6 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"
-								busy={remove.isPending && remove.variables === r.pattern}
 								onClick={() => confirm(`Stop protecting ${r.pattern}?`) && remove.mutate(r.pattern)}
 								aria-label={`Remove the rule for ${r.pattern}`}
 							>
@@ -94,7 +108,7 @@ export function BranchProtection({ project, defaultBranch }: { project: string; 
 						</label>
 					))}
 				</fieldset>
-				<ErrorNote error={save.error ?? remove.error ?? rules.error} />
+				<ErrorNote error={save.error ?? rules.error} />
 				<Button type="submit" busy={save.isPending}>
 					<Plus className="size-4" />
 					Save rule

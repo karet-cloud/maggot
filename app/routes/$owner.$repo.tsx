@@ -7,9 +7,17 @@ import { ArchivedBadge, ForkedFrom, VisibilityBadge } from "../components/repos.
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, repoParams, type RepoInfo } from "../lib/api.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
-import { LiveContext, useProjectLive } from "../lib/live.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery, tasksQuery } from "../lib/queries.ts";
+import { eventsQuery, LiveContext, useProjectLive } from "../lib/live.ts";
 
-export const Route = createFileRoute("/$owner/$repo")({ component: ProjectLayout });
+export const Route = createFileRoute("/$owner/$repo")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, projectQuery(project), tasksQuery(project), eventsQuery(project));
+	},
+	component: ProjectLayout,
+});
 
 function ProjectLayout() {
 	const { owner, repo } = Route.useParams();
@@ -17,8 +25,7 @@ function ProjectLayout() {
 	const live = useProjectLive(project);
 	// Pushes through maggot's git URL emit events, but poll the head too (quickly while the repo is empty).
 	const info = useQuery({
-		queryKey: keys.project(project),
-		queryFn: () => api.project(project),
+		...projectQuery(project),
 		refetchInterval: (q) => (q.state.data && !q.state.data.head ? 3000 : 15_000),
 	});
 	const [creating, setCreating] = useState(false);
@@ -166,22 +173,22 @@ function ProjectLayout() {
 
 function StarButton({ project, repo }: { project: string; repo: RepoInfo }) {
 	const viewer = useViewer();
-	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const star = useMutation({
+	const star = useOptimistic({
 		mutationFn: (starred: boolean) => api.star(project, starred),
-		onSuccess: ({ starred, stars }) => {
-			queryClient.setQueryData(keys.project(project), (old: Awaited<ReturnType<typeof api.project>> | undefined) =>
-				old ? { ...old, repo: { ...old.repo, starred, stars } } : old,
-			);
-			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+		apply: (starred) => {
+			const toggle = (r: RepoInfo): RepoInfo => (r.fullName === repo.fullName && r.starred !== starred ? { ...r, starred, stars: r.stars + (starred ? 1 : -1) } : r);
+			return [
+				patch<Awaited<ReturnType<typeof api.project>>>(keys.project(project), (old) => ({ ...old, repo: toggle(old.repo) }), true),
+				patch<RepoInfo[]>(["repos"], (old) => old.map(toggle)),
+			];
 		},
+		action: "star the repository",
 	});
 	return (
 		<div className="flex items-center">
 			<Button
 				onClick={() => (viewer.data ? star.mutate(!repo.starred) : navigate({ to: "/login" }))}
-				busy={star.isPending}
 				className="rounded-r-none"
 				title={viewer.data ? (repo.starred ? "Unstar" : "Star this repository") : "Sign in to star"}
 			>

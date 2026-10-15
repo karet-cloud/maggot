@@ -1,13 +1,28 @@
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { infiniteQueryOptions, useInfiniteQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { GitCommitHorizontal } from "lucide-react";
 import { pageTitle } from "../../src/wiki-pages.ts";
 import { Button, cx, ErrorNote, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
-import { WikiGate, WikiShell } from "../components/wiki.tsx";
+import { WikiGate, wikiQueries, WikiShell } from "../components/wiki.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 
 // The edits to one page, newest first, a page of history at a time.
-export const Route = createFileRoute("/$owner/$repo/wiki/_history/$page")({ component: WikiPageHistory });
+export const Route = createFileRoute("/$owner/$repo/wiki/_history/$page")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, ...wikiQueries(context.queryClient, project), historyQuery(project, params.page));
+	},
+	component: WikiPageHistory,
+});
+
+const historyQuery = (project: string, slug: string) =>
+	infiniteQueryOptions({
+		queryKey: keys.wikiHistory(project, slug),
+		queryFn: ({ pageParam }) => api.wikiHistory(project, slug, pageParam),
+		initialPageParam: undefined as string | undefined,
+		getNextPageParam: (last) => last.next ?? undefined,
+	});
 
 function WikiPageHistory() {
 	const { owner, repo, page } = Route.useParams();
@@ -24,12 +39,7 @@ function WikiPageHistory() {
 }
 
 function Edits({ project, slug }: { project: string; slug: string }) {
-	const history = useInfiniteQuery({
-		queryKey: keys.wikiHistory(project, slug),
-		queryFn: ({ pageParam }) => api.wikiHistory(project, slug, pageParam),
-		initialPageParam: undefined as string | undefined,
-		getNextPageParam: (last) => last.next ?? undefined,
-	});
+	const history = useInfiniteQuery(historyQuery(project, slug));
 	if (history.isPending) return <Spinner />;
 	if (history.error) return <ErrorNote error={history.error} />;
 	const commits = history.data.pages.flatMap((p) => p.commits);

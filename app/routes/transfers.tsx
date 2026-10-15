@@ -1,21 +1,27 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { ArrowRightLeft, BookMarked, Check, Users, X } from "lucide-react";
 import { useState } from "react";
 import { VisibilityBadge } from "../components/repos.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, ApiError, keys, type Invitation, type RepoTransfer } from "../lib/api.ts";
-import { useNeedsVerification, useViewer } from "./__root.tsx";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload } from "../lib/queries.ts";
+import { signedIn, useNeedsVerification, useViewer } from "./__root.tsx";
 
 export const Route = createFileRoute("/transfers")({
 	head: () => ({ meta: [{ title: "Invitations and transfers · maggot" }] }),
+	loader: ({ context }) => (signedIn(context.queryClient) ? preload(context.queryClient, transfersQuery, invitationsQuery) : undefined),
 	component: Transfers,
 });
 
+const transfersQuery = queryOptions({ queryKey: keys.transfers, queryFn: api.transfers });
+const invitationsQuery = queryOptions({ queryKey: keys.invitations, queryFn: api.invitations });
+
 function Transfers() {
 	const viewer = useViewer();
-	const list = useQuery({ queryKey: keys.transfers, queryFn: api.transfers, enabled: Boolean(viewer.data) });
-	const invitations = useQuery({ queryKey: keys.invitations, queryFn: api.invitations, enabled: Boolean(viewer.data) });
+	const list = useQuery({ ...transfersQuery, enabled: Boolean(viewer.data) });
+	const invitations = useQuery({ ...invitationsQuery, enabled: Boolean(viewer.data) });
 	if (viewer.isPending) return <Spinner className="m-8" />;
 	if (!viewer.data) {
 		return (
@@ -72,19 +78,25 @@ function InvitationCard({ invitation: i }: { invitation: Invitation }) {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const needsVerification = useNeedsVerification();
-	const answer = useMutation({
-		mutationFn: (accept: boolean) => api.answerInvitation(i, accept),
-		onSuccess: (_, accept) => {
+	// Accepting waits for the server, since it navigates into what was joined; declining just goes away.
+	const accept = useMutation({
+		mutationFn: () => api.answerInvitation(i, true),
+		onSuccess: () => {
 			void queryClient.invalidateQueries({ queryKey: keys.invitations });
 			void queryClient.invalidateQueries({ queryKey: ["repos"] });
 			void queryClient.invalidateQueries({ queryKey: keys.myOrgs });
-			if (!accept) return;
 			if (i.kind === "org") void navigate({ to: "/$owner", params: { owner: i.name } });
 			else {
 				const [owner, repo] = i.name.split("/");
 				void navigate({ to: "/$owner/$repo", params: { owner, repo } });
 			}
 		},
+	});
+	const decline = useOptimistic({
+		mutationFn: () => api.answerInvitation(i, false),
+		apply: () => [patch<Invitation[]>(keys.invitations, (old) => old.filter((x) => x.kind !== i.kind || x.id !== i.id))],
+		invalidate: () => [["repos"], keys.myOrgs],
+		action: "decline the invitation",
 	});
 	return (
 		<div className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-panel p-4">
@@ -101,12 +113,12 @@ function InvitationCard({ invitation: i }: { invitation: Invitation }) {
 					<TimeAgo at={i.createdAt} />
 				</p>
 			</div>
-			<ErrorNote error={answer.error} />
-			<Button variant="primary" busy={answer.isPending && answer.variables === true} disabled={needsVerification} onClick={() => answer.mutate(true)}>
+			<ErrorNote error={accept.error} />
+			<Button variant="primary" busy={accept.isPending} disabled={needsVerification} onClick={() => accept.mutate()}>
 				<Check className="size-4" />
 				Accept
 			</Button>
-			<Button busy={answer.isPending && answer.variables === false} onClick={() => answer.mutate(false)}>
+			<Button disabled={accept.isPending} onClick={() => decline.mutate()}>
 				<X className="size-4" />
 				Decline
 			</Button>
@@ -119,19 +131,20 @@ function Offer({ transfer }: { transfer: RepoTransfer }) {
 	const navigate = useNavigate();
 	const needsVerification = useNeedsVerification();
 	const [name, setName] = useState(transfer.repo.split("/")[1] ?? "");
-	const done = () => {
-		void queryClient.invalidateQueries({ queryKey: keys.transfers });
-		void queryClient.invalidateQueries({ queryKey: ["repos"] });
-		void queryClient.invalidateQueries({ queryKey: keys.me });
-	};
 	const accept = useMutation({
 		mutationFn: () => api.acceptTransfer(transfer.id, name.trim()),
 		onSuccess: (repo) => {
-			done();
+			void queryClient.invalidateQueries({ queryKey: keys.transfers });
+			void queryClient.invalidateQueries({ queryKey: ["repos"] });
+			void queryClient.invalidateQueries({ queryKey: keys.me });
 			void navigate({ to: "/$owner/$repo", params: { owner: repo.owner, repo: repo.name } });
 		},
 	});
-	const decline = useMutation({ mutationFn: () => api.declineTransfer(transfer.id), onSuccess: done });
+	const decline = useOptimistic({
+		mutationFn: () => api.declineTransfer(transfer.id),
+		apply: () => [patch<RepoTransfer[]>(keys.transfers, (old) => old.filter((t) => t.id !== transfer.id))],
+		action: "decline the transfer",
+	});
 	// Only ask for a name when the repository's own one is taken in this account.
 	const clash = accept.error instanceof ApiError && accept.error.code === "ALREADY_EXISTS";
 	return (
@@ -151,13 +164,13 @@ function Offer({ transfer }: { transfer: RepoTransfer }) {
 				</Field>
 			)}
 			{needsVerification && <p className="text-xs text-amber-200">Verify your email address before accepting.</p>}
-			<ErrorNote error={accept.error ?? decline.error} />
+			<ErrorNote error={accept.error} />
 			<div className="flex gap-2">
 				<Button variant="primary" busy={accept.isPending} disabled={needsVerification} onClick={() => accept.mutate()}>
 					<Check className="size-4" />
 					Accept
 				</Button>
-				<Button busy={decline.isPending} onClick={() => decline.mutate()}>
+				<Button disabled={accept.isPending} onClick={() => decline.mutate()}>
 					<X className="size-4" />
 					Decline
 				</Button>

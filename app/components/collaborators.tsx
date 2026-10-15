@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, UserMinus, Users } from "lucide-react";
 import { useState } from "react";
-import { api, keys, type Permission } from "../lib/api.ts";
+import { api, keys, type Collaborator, type Permission } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { Button, Empty, ErrorNote, Input, Panel, Spinner } from "./ui.tsx";
 
 const HINT: Record<Permission, string> = {
@@ -10,19 +11,29 @@ const HINT: Record<Permission, string> = {
 	admin: "everything, including settings and collaborators",
 };
 
+export const collaboratorsQuery = (project: string) => queryOptions({ queryKey: keys.collaborators(project), queryFn: () => api.collaborators(project) });
+
 /** People invited to a repository with read, write or admin access. */
 export function Collaborators({ project }: { project: string }) {
 	const queryClient = useQueryClient();
-	const list = useQuery({ queryKey: keys.collaborators(project), queryFn: () => api.collaborators(project) });
+	const list = useQuery(collaboratorsQuery(project));
 	const [username, setUsername] = useState("");
 	const [permission, setPermission] = useState<Permission>("write");
-	const set = (next: Awaited<ReturnType<typeof api.collaborators>>) => queryClient.setQueryData(keys.collaborators(project), next);
+	// Inviting waits for the server, which looks the user up.
 	const add = useMutation({ mutationFn: () => api.setCollaborator(project, username.trim(), permission), onSuccess: (next) => {
-		set(next);
+		queryClient.setQueryData(keys.collaborators(project), next);
 		setUsername("");
 	} });
-	const change = useMutation({ mutationFn: ({ who, to }: { who: string; to: Permission }) => api.setCollaborator(project, who, to), onSuccess: set });
-	const remove = useMutation({ mutationFn: (who: string) => api.removeCollaborator(project, who), onSuccess: set });
+	const change = useOptimistic({
+		mutationFn: ({ who, to }: { who: string; to: Permission }) => api.setCollaborator(project, who, to),
+		apply: ({ who, to }) => [patch<Collaborator[]>(keys.collaborators(project), (old) => old.map((k) => (k.username === who ? { ...k, permission: to } : k)))],
+		action: "change their access",
+	});
+	const remove = useOptimistic({
+		mutationFn: (who: string) => api.removeCollaborator(project, who),
+		apply: (who) => [patch<Collaborator[]>(keys.collaborators(project), (old) => old.filter((k) => k.username !== who))],
+		action: "remove the collaborator",
+	});
 	return (
 		<Panel title="Collaborators" actions={<span className="text-[11px] text-faint">Invited people accept before they get access</span>}>
 			{list.isPending ? (
@@ -48,7 +59,6 @@ export function Collaborators({ project }: { project: string }) {
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"
-								busy={remove.isPending && remove.variables === k.username}
 								onClick={() => confirm(`Remove ${k.username}'s access?`) && remove.mutate(k.username)}
 								aria-label={`Remove ${k.username}`}
 							>
@@ -85,7 +95,7 @@ export function Collaborators({ project }: { project: string }) {
 				</Button>
 			</form>
 			<div className="px-4 pb-3">
-				<ErrorNote error={add.error ?? change.error ?? remove.error ?? list.error} />
+				<ErrorNote error={add.error ?? list.error} />
 			</div>
 		</Panel>
 	);

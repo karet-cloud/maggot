@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Download, Package, Pencil, Plus, Tag as TagIcon, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -7,19 +7,30 @@ import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { BranchSelect } from "../components/refs.tsx";
 import { Button, cx, Empty, ErrorNote, Field, Input, Modal, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type Release, type Tag } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { tab?: "tags" };
 
 export const Route = createFileRoute("/$owner/$repo/releases")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.tab === "tags" ? { tab: "tags" } : {}),
+	loaderDeps: ({ search }) => ({ tab: search.tab }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, deps.tab === "tags" ? tagsQuery(project) : releasesQuery(project, 20));
+	},
 	component: Releases,
 });
+
+type ReleasePage = Awaited<ReturnType<typeof api.releases>>;
+const releasesQuery = (project: string, limit: number) => queryOptions({ queryKey: [...keys.releases(project), limit], queryFn: () => api.releases(project, limit) });
+const tagsQuery = (project: string) => queryOptions({ queryKey: keys.tags(project), queryFn: () => api.tags(project) });
 
 function Releases() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const { tab } = Route.useSearch();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const writable = Boolean(info.data?.repo.canWrite && !info.data.repo.archivedAt);
 	const [creating, setCreating] = useState(false);
 	const sub = (active: boolean) =>
@@ -69,7 +80,7 @@ function Downloads({ project, refName }: { project: string; refName: string }) {
 
 function ReleaseList({ project, writable }: { project: string; writable: boolean }) {
 	const [limit, setLimit] = useState(20);
-	const page = useQuery({ queryKey: [...keys.releases(project), limit], queryFn: () => api.releases(project, limit), placeholderData: keepPreviousData });
+	const page = useQuery({ ...releasesQuery(project, limit), placeholderData: keepPreviousData });
 	const releases = { ...page, data: page.data?.releases };
 	if (releases.isPending) return <Spinner />;
 	if (releases.error) return <ErrorNote error={releases.error} />;
@@ -103,25 +114,25 @@ function ReleaseList({ project, writable }: { project: string; writable: boolean
 }
 
 function ReleaseCard({ project, release: r, latest, writable }: { project: string; release: Release; latest: boolean; writable: boolean }) {
-	const queryClient = useQueryClient();
 	const [editing, setEditing] = useState(false);
 	const [name, setName] = useState(r.name);
 	const [notes, setNotes] = useState(r.notes);
 	const [prerelease, setPrerelease] = useState(r.prerelease);
-	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.releases(project) });
-	const save = useMutation({
-		mutationFn: () => api.updateRelease(project, r.id, { name, notes, prerelease }),
-		onSuccess: () => {
-			setEditing(false);
-			refresh();
-		},
+	const releases = (update: (list: Release[]) => Release[]) => patch<ReleasePage>(keys.releases(project), (old) => ({ ...old, releases: update(old.releases) }));
+	const save = useOptimistic({
+		mutationFn: (edit: { name: string; notes: string; prerelease: boolean }) => api.updateRelease(project, r.id, edit),
+		apply: (edit) => [releases((list) => list.map((x) => (x.id === r.id ? { ...x, ...edit, name: edit.name.trim() || x.name } : x)))],
+		// Back to the form, with the draft still in it.
+		onError: () => setEditing(true),
+		action: "save the release",
 	});
-	const remove = useMutation({
+	const remove = useOptimistic({
 		mutationFn: (deleteTag: boolean) => api.deleteRelease(project, r.id, deleteTag),
-		onSuccess: () => {
-			refresh();
-			void queryClient.invalidateQueries({ queryKey: keys.tags(project) });
-		},
+		apply: (deleteTag) => [
+			releases((list) => list.filter((x) => x.id !== r.id)),
+			...(deleteTag ? [patch<Tag[]>(keys.tags(project), (old) => old.filter((t) => t.name !== r.tag))] : []),
+		],
+		action: "delete the release",
 	});
 	return (
 		<Panel>
@@ -159,7 +170,6 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"
-								busy={remove.isPending}
 								aria-label="Delete release"
 								onClick={() => {
 									if (!confirm(`Delete the release ${r.name}?`)) return;
@@ -175,7 +185,8 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 					<form
 						onSubmit={(e) => {
 							e.preventDefault();
-							save.mutate();
+							setEditing(false);
+							save.mutate({ name, notes, prerelease });
 						}}
 						className="space-y-3"
 					>
@@ -190,7 +201,7 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 						<ErrorNote error={save.error} />
 						<div className="flex justify-end gap-2">
 							<Button onClick={() => setEditing(false)}>Cancel</Button>
-							<Button type="submit" variant="primary" busy={save.isPending}>
+							<Button type="submit" variant="primary">
 								Save
 							</Button>
 						</div>
@@ -200,7 +211,6 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 				) : (
 					<p className="text-sm text-faint italic">No release notes.</p>
 				)}
-				<ErrorNote error={remove.error} />
 				{r.commit && (
 					<div className="border-t border-line pt-3">
 						<Downloads project={project} refName={`refs/tags/${r.tag}`} />
@@ -212,11 +222,13 @@ function ReleaseCard({ project, release: r, latest, writable }: { project: strin
 }
 
 function TagList({ project, writable }: { project: string; writable: boolean }) {
-	const queryClient = useQueryClient();
-	const tags = useQuery({ queryKey: keys.tags(project), queryFn: () => api.tags(project) });
-	const remove = useMutation({
+	const tags = useQuery(tagsQuery(project));
+	// Covers the tag names the ref pickers use too; releases of the tag lose their downloads on the refetch.
+	const remove = useOptimistic({
 		mutationFn: (name: string) => api.deleteTag(project, name),
-		onSuccess: () => void queryClient.invalidateQueries({ queryKey: keys.tags(project) }),
+		apply: (name) => [patch<Tag[]>(keys.tags(project), (old) => old.filter((t) => t.name !== name))],
+		invalidate: () => [keys.releases(project)],
+		action: "delete the tag",
 	});
 	if (tags.isPending) return <Spinner />;
 	if (tags.error) return <ErrorNote error={tags.error} />;
@@ -229,7 +241,6 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 	}
 	return (
 		<Panel>
-			<ErrorNote error={remove.error} />
 			<ul className="divide-y divide-line/60">
 				{tags.data.map((t: Tag) => (
 					<li key={t.name} className="flex flex-wrap items-center gap-3 px-4 py-3">
@@ -256,7 +267,6 @@ function TagList({ project, writable }: { project: string; writable: boolean }) 
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"
-								busy={remove.isPending && remove.variables === t.name}
 								onClick={() => confirm(`Delete the tag ${t.name}? Releases of it stay, without downloads.`) && remove.mutate(t.name)}
 								aria-label={`Delete ${t.name}`}
 							>
@@ -308,7 +318,7 @@ function NewTag({ project, onDone }: { project: string; onDone: () => void }) {
 
 function NewRelease({ project, onDone }: { project: string; onDone: () => void }) {
 	const queryClient = useQueryClient();
-	const tags = useQuery({ queryKey: keys.tags(project), queryFn: () => api.tags(project) });
+	const tags = useQuery(tagsQuery(project));
 	const [tag, setTag] = useState("");
 	const [target, setTarget] = useState<string | undefined>();
 	const [name, setName] = useState("");

@@ -1,10 +1,12 @@
 /// <reference types="vite/client" />
-import { QueryClientProvider, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation, useNavigate, useParams } from "@tanstack/react-router";
+import { QueryClientProvider, queryOptions, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { createRootRouteWithContext, HeadContent, Link, Outlet, Scripts, useLocation, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { Bell, KeyRound, LogOut, MailWarning, Plus, Search } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { Toaster } from "../components/toast.tsx";
 import { Button, buttonClass, ThemeToggle } from "../components/ui.tsx";
 import { api, keys } from "../lib/api.ts";
+import { configQuery, preload, viewerQuery } from "../lib/queries.ts";
 import { THEME_SCRIPT } from "../lib/theme.ts";
 import css from "../styles.css?url";
 
@@ -24,6 +26,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 			{ rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
 		],
 	}),
+	loader: ({ context }) => preload(context.queryClient, viewerQuery, configQuery),
 	shellComponent: Shell,
 	component: Root,
 	notFoundComponent: () => (
@@ -58,7 +61,9 @@ function Root() {
 	const { queryClient } = Route.useRouteContext();
 	return (
 		<QueryClientProvider client={queryClient}>
+			<NavProgress />
 			<Frame />
+			<Toaster />
 		</QueryClientProvider>
 	);
 }
@@ -104,11 +109,24 @@ function Footer() {
 
 /** The signed-in user, or null. Shared by every page through the query cache. */
 export function useViewer() {
-	return useQuery({ queryKey: keys.me, queryFn: api.me, staleTime: 60_000 });
+	return useQuery(viewerQuery);
 }
 
 export function useConfig() {
-	return useQuery({ queryKey: keys.config, queryFn: api.config, staleTime: Infinity });
+	return useQuery(configQuery);
+}
+
+/** Whether a loader may preload signed-in-only queries: only when the viewer is already known. */
+export const signedIn = (queryClient: QueryClient) => Boolean(queryClient.getQueryData(viewerQuery.queryKey));
+
+/** Unread or all notifications; both sit under keys.notifications, as does the bell's count. */
+export const notificationsQuery = (unread: boolean) =>
+	queryOptions({ queryKey: [...keys.notifications, unread ? "unread" : "all"], queryFn: () => api.notifications(unread) });
+
+/** A thin bar while a navigation waits on data it hasn't fetched yet; shown only past a short delay. */
+function NavProgress() {
+	const pending = useRouterState({ select: (s) => s.status === "pending" });
+	return <div aria-hidden className={pending ? "nav-progress" : "hidden"} />;
 }
 
 /** Whether the signed-in user still has to verify their email before creating or pushing. */
@@ -179,7 +197,7 @@ function SearchBox() {
 }
 
 function NotificationBell() {
-	const unread = useQuery({ queryKey: [...keys.notifications, "unread"], queryFn: () => api.notifications(true), refetchInterval: 60_000 });
+	const unread = useQuery({ ...notificationsQuery(true), refetchInterval: 60_000 });
 	const count = unread.data?.unread ?? 0;
 	return (
 		<Link

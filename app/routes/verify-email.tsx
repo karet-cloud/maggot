@@ -2,7 +2,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CheckCircle2, CircleAlert, MailWarning } from "lucide-react";
 import { useEffect } from "react";
-import { api, keys } from "../lib/api.ts";
+import { keys } from "../lib/api.ts";
+import { viewerQuery } from "../lib/queries.ts";
 import { Spinner } from "../components/ui.tsx";
 
 // Where the link in a verification email lands, after the server has checked it.
@@ -26,7 +27,7 @@ function VerifyEmail() {
 		void queryClient.invalidateQueries({ queryKey: keys.me });
 	}, [queryClient]);
 	// Landing here doesn't prove anything by itself: only the account says whether it's verified.
-	const me = useQuery({ queryKey: keys.me, queryFn: api.me, staleTime: 0 });
+	const me = useQuery({ ...viewerQuery, staleTime: 0 });
 	if (!error && me.isPending) return <Spinner className="mx-auto mt-24" />;
 	const verified = me.data?.emailVerified ?? false;
 	return (

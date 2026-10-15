@@ -309,3 +309,22 @@ body {
 .markdown hr {
 	@apply border-line;
 }
+
+/* Navigation progress: appears after 120ms so instant navigations never flash it. */
+.nav-progress {
+	position: fixed;
+	inset: 0 0 auto 0;
+	z-index: 60;
+	height: 2px;
+	background: var(--color-accent);
+	transform-origin: left;
+	animation: nav-progress 2s cubic-bezier(0.1, 0.7, 0.3, 1) 120ms both;
+}
+@keyframes nav-progress {
+	from {
+		transform: scaleX(0);
+	}
+	to {
+		transform: scaleX(0.9);
+	}
+}

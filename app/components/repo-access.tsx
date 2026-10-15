@@ -2,7 +2,8 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ChevronDown, Code2, Download, KeyRound, Terminal } from "lucide-react";
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { api, keys, type GitCredentials, type RepoInfo } from "../lib/api.ts";
+import { api, type GitCredentials, type RepoInfo } from "../lib/api.ts";
+import { viewerQuery } from "../lib/queries.ts";
 import { Button, buttonClass, CopyField, cx, ErrorNote, Modal } from "./ui.tsx";
 
 /** An Artifacts remote URL with the token as the password (task forks; agents use these directly). */
@@ -31,7 +32,7 @@ function withToken(cloneUrl: string, username: string, token: string) {
  * a username and password; the password is a personal access token, which can be generated here.
  */
 export function RepoCommands({ repo, empty }: { repo: RepoInfo; empty: boolean }) {
-	const viewer = useQuery({ queryKey: keys.me, queryFn: api.me, staleTime: 60_000 });
+	const viewer = useQuery(viewerQuery);
 	const token = useMutation({ mutationFn: () => api.createToken(`git for ${repo.fullName}`) });
 	const me = viewer.data;
 	const secret = token.data?.token;

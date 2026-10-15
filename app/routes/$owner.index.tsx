@@ -1,27 +1,40 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { BookMarked, Building2, Star, Users, UsersRound } from "lucide-react";
-import { OrgHeader, People, Teams } from "../components/org.tsx";
+import { OrgHeader, orgQuery, People, Teams } from "../components/org.tsx";
 import type { ReactNode } from "react";
 import { RepoList } from "../components/repos.tsx";
 import { ErrorNote, Spinner } from "../components/ui.tsx";
 import { api, keys, type RepoFilter } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 import { useViewer } from "./__root.tsx";
 
+type Tab = "stars" | "people" | "teams";
+
 export const Route = createFileRoute("/$owner/")({
-	validateSearch: (search: Record<string, unknown>): { tab?: "stars" | "people" | "teams" } =>
+	validateSearch: (search: Record<string, unknown>): { tab?: Tab } =>
 		search.tab === "stars" || search.tab === "people" || search.tab === "teams" ? { tab: search.tab } : {},
+	loaderDeps: ({ search }) => ({ tab: search.tab }),
+	loader: ({ context, params, deps }) =>
+		preload(context.queryClient, orgQuery(params.owner), deps.tab !== "people" && deps.tab !== "teams" && reposQuery(params.owner, deps.tab)),
 	component: Profile,
 });
+
+const reposQuery = (owner: string, tab?: Tab) => {
+	const filter: RepoFilter = tab === "stars" ? { starredBy: owner } : { owner };
+	return queryOptions({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+};
 
 function Profile() {
 	const { owner } = Route.useParams();
 	const { tab } = Route.useSearch();
 	const viewer = useViewer();
-	const filter: RepoFilter = tab === "stars" ? { starredBy: owner } : { owner };
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), enabled: tab !== "people" && tab !== "teams" });
+	const repos = useQuery({
+		...reposQuery(owner, tab),
+		enabled: tab !== "people" && tab !== "teams",
+	});
 	// The same URLs serve people and organizations; an organization answers this.
-	const org = useQuery({ queryKey: keys.org(owner), queryFn: () => api.org(owner), retry: false });
+	const org = useQuery(orgQuery(owner));
 	const self = viewer.data?.username === owner;
 	if (org.data) {
 		const o = org.data;
@@ -81,7 +94,7 @@ function Profile() {
 	);
 }
 
-function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: "stars" | "people" | "teams"; active: boolean; icon: ReactNode; label: string }) {
+function ProfileTab({ owner, tab, active, icon, label }: { owner: string; tab?: Tab; active: boolean; icon: ReactNode; label: string }) {
 	return (
 		<Link
 			to="/$owner"

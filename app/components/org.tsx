@@ -1,8 +1,13 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Building2, Plus, Trash2, UserMinus, Users, X } from "lucide-react";
 import { useState } from "react";
 import { api, keys, type Org, type OrgRole, type Permission } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { useViewer } from "../routes/__root.tsx";
 import { Button, Empty, ErrorNote, Input, Panel } from "./ui.tsx";
+
+/** A person's profile asks this too: only an organization answers it. */
+export const orgQuery = (name: string) => queryOptions({ queryKey: keys.org(name), queryFn: () => api.org(name), retry: false });
 
 export function OrgHeader({ org }: { org: Org }) {
 	return (
@@ -25,14 +30,37 @@ function useOrgMutation<T>(org: string, fn: (input: T) => Promise<Org>) {
 	return useMutation({ mutationFn: fn, onSuccess: (next) => queryClient.setQueryData(keys.org(org), next) });
 }
 
+/** An organization change whose result is known in advance: shown at once, then refetched. */
+function useOrgEdit<T>(org: string, fn: (input: T) => Promise<Org>, edit: (old: Org, input: T) => Org, action: string) {
+	return useOptimistic({ mutationFn: fn, apply: (input: T) => [patch<Org>(keys.org(org), (old) => edit(old, input), true)], action });
+}
+
+const editTeam = (org: Org, id: string, edit: (team: Org["teams"][number]) => Org["teams"][number]): Org => ({
+	...org,
+	teams: org.teams.map((t) => (t.id === id ? edit(t) : t)),
+});
+
 /** Members (and pending invitations, for members); owners invite, promote and remove. */
 export function People({ org }: { org: Org }) {
 	const owner = org.role === "owner";
+	const me = useViewer().data?.username;
+	// The server keeps one active owner at least: the last can't step down or be removed.
+	const lastOwner = (m: Org["members"][number]) => m.role === "owner" && m.state === "active" && org.members.filter((o) => o.role === "owner" && o.state === "active").length === 1;
 	const [username, setUsername] = useState("");
 	const [role, setRole] = useState<OrgRole>("member");
 	const invite = useOrgMutation(org.name, () => api.inviteMember(org.name, username.trim(), role));
-	const change = useOrgMutation(org.name, ({ who, to }: { who: string; to: OrgRole }) => api.setMemberRole(org.name, who, to));
-	const remove = useOrgMutation(org.name, (who: string) => api.removeMember(org.name, who));
+	const change = useOrgEdit(
+		org.name,
+		({ who, to }: { who: string; to: OrgRole }) => api.setMemberRole(org.name, who, to),
+		(old, { who, to }) => ({ ...old, role: who === me ? to : old.role, members: old.members.map((m) => (m.username === who ? { ...m, role: to } : m)) }),
+		"change the role",
+	);
+	const remove = useOrgEdit(
+		org.name,
+		(who: string) => api.removeMember(org.name, who),
+		(old, who) => ({ ...old, members: old.members.filter((m) => m.username !== who), teams: old.teams.map((t) => ({ ...t, members: t.members.filter((m) => m !== who) })) }),
+		"remove them",
+	);
 	return (
 		<Panel title={`People (${org.members.filter((m) => m.state === "active").length})`}>
 			<ul className="divide-y divide-line/60">
@@ -41,16 +69,15 @@ export function People({ org }: { org: Org }) {
 						<span className="font-mono">{m.username}</span>
 						{m.state === "invited" && <span className="rounded-full bg-amber-400/15 px-2 py-0.5 text-[11px] text-amber-300">invited</span>}
 						<span className="ml-auto text-xs text-dim">{m.role}</span>
-						{owner && m.state === "active" && (
-							<Button className="text-xs" busy={change.isPending && change.variables?.who === m.username} onClick={() => change.mutate({ who: m.username, to: m.role === "owner" ? "member" : "owner" })}>
+						{owner && m.state === "active" && !lastOwner(m) && (
+							<Button className="text-xs" onClick={() => change.mutate({ who: m.username, to: m.role === "owner" ? "member" : "owner" })}>
 								{m.role === "owner" ? "Make member" : "Make owner"}
 							</Button>
 						)}
-						{owner && (
+						{owner && !lastOwner(m) && (
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-red-300"
-								busy={remove.isPending && remove.variables === m.username}
 								onClick={() => confirm(m.state === "invited" ? `Withdraw ${m.username}'s invitation?` : `Remove ${m.username} from ${org.name}?`) && remove.mutate(m.username)}
 								aria-label={`Remove ${m.username}`}
 							>
@@ -80,7 +107,7 @@ export function People({ org }: { org: Org }) {
 				</form>
 			)}
 			<div className="px-4 pb-3">
-				<ErrorNote error={invite.error ?? change.error ?? remove.error} />
+				<ErrorNote error={invite.error} />
 			</div>
 		</Panel>
 	);
@@ -128,9 +155,23 @@ function TeamCard({ org, team, owner }: { org: Org; team: Org["teams"][number]; 
 	const [repo, setRepo] = useState("");
 	const [permission, setPermission] = useState<Permission>("write");
 	const repos = useQuery({ queryKey: keys.repos({ owner: org.name }), queryFn: () => api.repos({ owner: org.name }), enabled: owner });
-	const members = useOrgMutation(org.name, ({ who, add }: { who: string; add: boolean }) => api.setTeamMember(org.name, team.id, who, add));
-	const access = useOrgMutation(org.name, ({ name, to }: { name: string; to: Permission | null }) => api.setTeamRepo(org.name, team.id, name, to));
-	const remove = useOrgMutation(org.name, () => api.deleteTeam(org.name, team.id));
+	const members = useOrgEdit(
+		org.name,
+		({ who, add }: { who: string; add: boolean }) => api.setTeamMember(org.name, team.id, who, add),
+		(old, { who, add }) => editTeam(old, team.id, (t) => ({ ...t, members: add ? [...t.members.filter((m) => m !== who), who] : t.members.filter((m) => m !== who) })),
+		"change the team's members",
+	);
+	const access = useOrgEdit(
+		org.name,
+		({ name, to }: { name: string; to: Permission | null }) => api.setTeamRepo(org.name, team.id, name, to),
+		(old, { name, to }) =>
+			editTeam(old, team.id, (t) => {
+				const rest = t.repos.filter((r) => r.repo !== name);
+				return { ...t, repos: to === null ? rest : t.repos.some((r) => r.repo === name) ? t.repos.map((r) => (r.repo === name ? { ...r, permission: to } : r)) : [...rest, { repo: name, permission: to }] };
+			}),
+		"change the team's access",
+	);
+	const remove = useOrgEdit(org.name, () => api.deleteTeam(org.name, team.id), (old) => ({ ...old, teams: old.teams.filter((t) => t.id !== team.id) }), "delete the team");
 	const candidates = org.members.filter((m) => m.state === "active" && !team.members.includes(m.username));
 	const addable = repos.data?.filter((r) => !team.repos.some((x) => x.repo === r.name)) ?? [];
 	return (
@@ -138,7 +179,7 @@ function TeamCard({ org, team, owner }: { org: Org; team: Org["teams"][number]; 
 			title={team.name}
 			actions={
 				owner && (
-					<Button variant="ghost" className="px-2 text-xs hover:text-red-300" busy={remove.isPending} onClick={() => confirm(`Delete the team ${team.name}?`) && remove.mutate()} aria-label={`Delete ${team.name}`}>
+					<Button variant="ghost" className="px-2 text-xs hover:text-red-300" onClick={() => confirm(`Delete the team ${team.name}?`) && remove.mutate()} aria-label={`Delete ${team.name}`}>
 						<Trash2 className="size-3.5" />
 					</Button>
 				)
@@ -170,7 +211,14 @@ function TeamCard({ org, team, owner }: { org: Org; team: Org["teams"][number]; 
 									</option>
 								))}
 							</select>
-							<Button className="text-xs" disabled={!member} busy={members.isPending} onClick={() => members.mutate({ who: member, add: true }, { onSuccess: () => setMember("") })}>
+							<Button
+								className="text-xs"
+								disabled={!member}
+								onClick={() => {
+									members.mutate({ who: member, add: true });
+									setMember("");
+								}}
+							>
 								Add
 							</Button>
 						</div>
@@ -219,15 +267,19 @@ function TeamCard({ org, team, owner }: { org: Org; team: Org["teams"][number]; 
 									</option>
 								))}
 							</select>
-							<Button className="text-xs" disabled={!repo} busy={access.isPending} onClick={() => access.mutate({ name: repo, to: permission }, { onSuccess: () => setRepo("") })}>
+							<Button
+								className="text-xs"
+								disabled={!repo}
+								onClick={() => {
+									access.mutate({ name: repo, to: permission });
+									setRepo("");
+								}}
+							>
 								Add
 							</Button>
 						</div>
 					)}
 				</div>
-			</div>
-			<div className="px-4 pb-3">
-				<ErrorNote error={members.error ?? access.error ?? remove.error} />
 			</div>
 		</Panel>
 	);
