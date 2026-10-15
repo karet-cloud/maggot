@@ -5,6 +5,7 @@ import type {
 	IssueComment,
 	IssueList,
 	IssueState,
+	DashboardItem,
 	IssueSummary,
 	Notification,
 	NotificationKind,
@@ -19,6 +20,7 @@ import type {
 	SshKey,
 	Visibility,
 } from "./api.ts";
+import { DASHBOARD_LIMIT } from "./api.ts";
 import { HttpError } from "./errors.ts";
 
 // Generated from Better Auth 1.7 (email/password + username plugin) with getMigrations().compileMigrations().
@@ -94,7 +96,11 @@ const COLUMNS = [
 ];
 
 /** Indexes on added columns, created once the columns exist. */
-const LATE_INDEXES = [`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`];
+const LATE_INDEXES = [
+	`create index if not exists "repo_forkOf_idx" on "repo" ("forkOf")`,
+	// What someone opened, for their home page.
+	`create index if not exists "issue_author_idx" on "issue" ("authorId", "state", "isPull")`,
+];
 
 const VERSION_TABLE = `create table if not exists "maggot_schema" ("id" integer not null primary key check ("id" = 1), "version" text not null)`;
 
@@ -847,6 +853,33 @@ export interface IssueRow {
 
 const ISSUE = `select i.*, a."username" as "author", c."username" as "closedBy" from "issue" i
 	left join "user" a on a."id" = i."authorId" left join "user" c on c."id" = i."closedById"`;
+
+/**
+ * Open issues or pull requests for someone's home page: everything in repositories they can push to
+ * (owner, organization owner, or a team or collaborator grant of write or admin, as accessLevel counts
+ * them), and what they opened anywhere they can still read. It starts from the person's repositories and
+ * their own items, both indexed, rather than checking access on every open item on the site.
+ */
+export async function listDashboard(database: D1Database, userId: string, pulls: boolean, limit = DASHBOARD_LIMIT): Promise<{ items: DashboardItem[]; more: boolean }> {
+	const columns = `i.*, a."username" as "author", r."owner" || '/' || r."name" as "repo"`;
+	const from = `from "issue" i join "repo" r on r."id" = i."repoId" left join "user" a on a."id" = i."authorId"`;
+	const { results } = await database
+		.prepare(
+			`with "pushable" ("id") as (
+				select "id" from "repo" where "ownerId" = ?1
+				union select r."id" from "repo" r join "org_member" m on m."orgId" = r."ownerId" where m."userId" = ?1 and m."state" = 'active' and m."role" = 'owner'
+				union select tr."repoId" from "team_repo" tr join "team_member" tm on tm."teamId" = tr."teamId" where tm."userId" = ?1 and tr."permission" in ('write', 'admin')
+				union select "repoId" from "repo_collaborator" where "userId" = ?1 and "state" = 'active' and "permission" in ('write', 'admin')
+			)
+			select ${columns} ${from} where i."state" = 'open' and i."isPull" = ?2 and i."repoId" in (select "id" from "pushable")
+			union
+			select ${columns} ${from} where i."authorId" = ?1 and i."state" = 'open' and i."isPull" = ?2 and (r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)
+			order by "updatedAt" desc limit ?3`,
+		)
+		.bind(userId, pulls ? 1 : 0, limit + 1)
+		.all<IssueRow & { repo: string }>();
+	return { items: results.slice(0, limit).map((row) => ({ ...toIssueSummary(row), repo: row.repo })), more: results.length > limit };
+}
 
 export function toIssueSummary(row: IssueRow): IssueSummary {
 	return {

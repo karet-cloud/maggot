@@ -476,6 +476,24 @@ export interface IssueSummary {
 	closedAt: string | null;
 }
 
+/** An open issue or pull request on someone's home page, with the repository it's in. */
+export interface DashboardItem extends IssueSummary {
+	/** `owner/name`. */
+	repo: string;
+}
+
+/** How many of each the home page lists. */
+export const DASHBOARD_LIMIT = 20;
+
+/** What needs the signed-in user: open pull requests and issues, most recently updated first. */
+export interface Dashboard {
+	pulls: DashboardItem[];
+	issues: DashboardItem[];
+	/** Whether there are more than DASHBOARD_LIMIT of each. */
+	morePulls: boolean;
+	moreIssues: boolean;
+}
+
 export interface Issue extends IssueSummary {
 	/** Markdown. */
 	body: string;

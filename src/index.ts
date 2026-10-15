@@ -56,6 +56,7 @@ import {
 	closeIssuesByCommits,
 	type IssueRow,
 	type PullRow,
+	listDashboard,
 	listNotifications,
 	notifiedRecently,
 	markRead,
@@ -332,6 +333,14 @@ app.delete("/api/tokens/:id", async (c) => {
 });
 
 // ── Notifications ────────────────────────────────────────────────────────────
+
+// The signed-in user's home page: open pull requests and issues that involve them.
+app.get("/api/dashboard", async (c) => {
+	const user = requireUser(c);
+	await ensureSchema(db(c.env));
+	const [pulls, issues] = await Promise.all([listDashboard(db(c.env), user.id, true), listDashboard(db(c.env), user.id, false)]);
+	return c.json({ pulls: pulls.items, issues: issues.items, morePulls: pulls.more, moreIssues: issues.more });
+});
 
 app.get("/api/notifications", async (c) => {
 	const user = requireUser(c);

@@ -4,7 +4,7 @@ const NAME = /^[a-z0-9][a-z0-9_-]{1,39}$/;
 
 /** The first segment of each of the app's own pages (test/names.test.ts checks this against app/routes). */
 export const ROUTE_NAMES: ReadonlySet<string> = new Set([
-	"explore", "forgot-password", "login", "new", "notifications", "orgs", "parity", "reset-password", "search", "settings", "signup",
+	"explore", "forgot-password", "login", "new", "notifications", "orgs", "reset-password", "search", "settings", "signup",
 	"transfers", "verify-email",
 ]);
 
@@ -16,7 +16,7 @@ export const RESERVED_NAMES: ReadonlySet<string> = new Set([
 	...ROUTE_NAMES,
 	"api", "assets", "static", "public", "_build", "_serverfn", "_ssh", "ssh-proxy", "favicon.svg", "robots.txt", "sitemap.xml",
 	"about", "account", "admin", "administrator", "blog", "dashboard", "docs", "features", "help", "home", "invitations", "issues",
-	"join", "logout", "marketplace", "maggot", "organizations", "p", "pricing", "privacy", "pulls", "root", "security", "sessions",
+	"join", "logout", "marketplace", "maggot", "organizations", "p", "parity", "pricing", "privacy", "pulls", "root", "security", "sessions",
 	"signin", "signout", "site", "ssh", "stars", "status", "support", "system", "terms", "topics", "trending", "user", "users", "www",
 ]);
 
