@@ -1,12 +1,16 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { CircleDot, MessageSquare, Plus, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { IssueStateIcon, Label } from "../components/issues.tsx";
-import { cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
+import { buttonClass, cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams, type IssueState } from "../lib/api.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { state?: IssueState | "all"; q?: string; label?: string };
+
+const issuesQuery = (project: string, state: IssueState | "all", q?: string, label?: string) =>
+	queryOptions({ queryKey: [...keys.issues(project), state, q ?? "", label ?? ""], queryFn: () => api.issues(project, { state, q, label }) });
 
 export const Route = createFileRoute("/$owner/$repo/issues/")({
 	validateSearch: (s: Record<string, unknown>): Search => ({
@@ -14,6 +18,11 @@ export const Route = createFileRoute("/$owner/$repo/issues/")({
 		q: typeof s.q === "string" && s.q ? s.q : undefined,
 		label: typeof s.label === "string" && s.label ? s.label : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ state: search.state ?? "open", q: search.q, label: search.label }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, issuesQuery(project, deps.state, deps.q, deps.label), projectQuery(project));
+	},
 	component: Issues,
 });
 
@@ -23,12 +32,8 @@ function Issues() {
 	const search = Route.useSearch();
 	const navigate = useNavigate({ from: Route.fullPath });
 	const state = search.state ?? "open";
-	const list = useQuery({
-		queryKey: [...keys.issues(project), state, search.q ?? "", search.label ?? ""],
-		queryFn: () => api.issues(project, { state, q: search.q, label: search.label }),
-		placeholderData: keepPreviousData,
-	});
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const list = useQuery({ ...issuesQuery(project, state, search.q, search.label), placeholderData: keepPreviousData });
+	const info = useQuery(projectQuery(project));
 	const [q, setQ] = useState(search.q ?? "");
 	useEffect(() => setQ(search.q ?? ""), [search.q]);
 	const archived = Boolean(info.data?.repo.archivedAt);
@@ -64,7 +69,7 @@ function Issues() {
 					<Link
 						to="/$owner/$repo/issues/new"
 						params={repoParams(project)}
-						className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90"
+						className={buttonClass("primary")}
 					>
 						<Plus className="size-4" />
 						New issue

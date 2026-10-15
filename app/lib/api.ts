@@ -78,12 +78,35 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
 		headers: body === undefined ? undefined : { "content-type": "application/json" },
 		body: body === undefined ? undefined : JSON.stringify(body),
 	});
-	if (!res.ok) {
-		// Our API nests errors under `error`; Better Auth's /auth routes return { code, message } at the top.
-		const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string }; code?: string; message?: string } | null;
-		throw new ApiError(res.status, json?.error?.code ?? json?.code ?? "HTTP_ERROR", json?.error?.message ?? json?.message ?? res.statusText);
-	}
+	if (!res.ok) throw await responseError(res);
 	return (await res.json()) as T;
+}
+
+/**
+ * The error a failed response carries. Our API nests it under `error`; Better Auth's /auth routes put
+ * { code, message } at the top. Anything else (an HTML error page, an empty body) still gets a message:
+ * over HTTP/2 there's no status text to fall back on, and an empty message showed an empty error box.
+ */
+async function responseError(res: Response): Promise<ApiError> {
+	type Body = { error?: { code?: unknown; message?: unknown } | string; code?: unknown; message?: unknown } | null;
+	const text = await res.text().catch(() => "");
+	const json = ((): Body => {
+		try {
+			return JSON.parse(text) as Body;
+		} catch {
+			return null;
+		}
+	})();
+	const nested = typeof json?.error === "object" ? json.error : null;
+	const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
+	const code = str(nested?.code) ?? str(json?.code) ?? "HTTP_ERROR";
+	const message =
+		str(nested?.message) ??
+		str(json?.message) ??
+		str(json?.error) ??
+		str(res.statusText) ??
+		(res.status === 429 ? "Too many requests; try again in a minute" : `Something went wrong (HTTP ${res.status}); try again`);
+	return new ApiError(res.status, code, message);
 }
 
 /** `project` is a repository's full name, `owner/repo`. */
@@ -109,6 +132,7 @@ export interface RepoFilter {
 	starredBy?: string;
 	q?: string;
 	sort?: "created" | "stars";
+	visibility?: "public";
 }
 
 export interface CreateRepoInput {
@@ -334,10 +358,7 @@ export const api = {
 	file: async (project: string, path: string, ref?: string) => {
 		const q = ref ? `?${new URLSearchParams({ ref })}` : "";
 		const res = await fetch(`/api${p(project)}/files/${path.split("/").map(encodeURIComponent).join("/")}${q}`);
-		if (!res.ok) {
-			const json = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
-			throw new ApiError(res.status, json?.error?.code ?? "HTTP_ERROR", json?.error?.message ?? res.statusText);
-		}
+		if (!res.ok) throw await responseError(res);
 		return res.text();
 	},
 	commit: (project: string, hash: string, ref?: string) =>

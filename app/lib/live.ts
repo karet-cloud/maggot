@@ -1,6 +1,7 @@
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import { api, keys, type ProjectEvent } from "./api.ts";
+import { optimisticPending } from "./optimistic.ts";
 
 export type LiveStatus = "connecting" | "live" | "offline";
 
@@ -16,13 +17,17 @@ export const useLive = () => useContext(LiveContext);
 
 const FEED_LIMIT = 300;
 
+/** The feed's recent history; live events append to it. */
+export const eventsQuery = (project: string) =>
+	queryOptions({ queryKey: keys.events(project), queryFn: () => api.events(project, FEED_LIMIT), staleTime: Infinity });
+
 /**
  * Loads the newest events, then streams the rest over the project WebSocket (resuming from the last
  * seen seq after a reconnect) and invalidates the queries each event affects.
  */
 export function useProjectLive(project: string): Live {
 	const queryClient = useQueryClient();
-	const history = useQuery({ queryKey: keys.events(project), queryFn: () => api.events(project, FEED_LIMIT), staleTime: Infinity });
+	const history = useQuery(eventsQuery(project));
 	const [status, setStatus] = useState<LiveStatus>("connecting");
 	const [touched, setTouched] = useState(() => new Map<string, number>());
 	const lastSeq = useRef(0);
@@ -80,7 +85,7 @@ export function useProjectLive(project: string): Live {
 					invalidate(keys.graph(project));
 					invalidate(keys.tags(project));
 				}
-				if (event.type.startsWith("tag.") || event.type === "release.published") {
+				if (event.type.startsWith("tag.") || event.type.startsWith("release.")) {
 					invalidate(keys.tags(project));
 					invalidate(keys.releases(project));
 					invalidate(keys.graph(project));
@@ -128,10 +133,16 @@ function batchInvalidate(queryClient: QueryClient) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	return (queryKey: readonly unknown[], exact = false) => {
 		pending.set(JSON.stringify([queryKey, exact]), { queryKey, exact });
-		timer ??= setTimeout(() => {
+		const flush = () => {
+			// A refetch now could land over an optimistic edit still pending; its own refetch comes later.
+			if (optimisticPending(queryClient)) {
+				timer = setTimeout(flush, 150);
+				return;
+			}
 			timer = undefined;
 			for (const filter of pending.values()) void queryClient.invalidateQueries(filter);
 			pending.clear();
-		}, 150);
+		};
+		timer ??= setTimeout(flush, 150);
 	};
 }

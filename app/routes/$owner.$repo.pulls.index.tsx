@@ -1,14 +1,22 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { GitPullRequest, MessageSquare, Plus } from "lucide-react";
 import { Decision, PullStateIcon } from "../components/pulls.tsx";
-import { cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
+import { buttonClass, cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 
 type Search = { state?: "closed" | "all" };
 
+const pullsQuery = (project: string, state: "open" | "closed" | "all") => queryOptions({ queryKey: [...keys.pulls(project), state], queryFn: () => api.pulls(project, { state }) });
+
 export const Route = createFileRoute("/$owner/$repo/pulls/")({
 	validateSearch: (s: Record<string, unknown>): Search => (s.state === "closed" || s.state === "all" ? { state: s.state } : {}),
+	loaderDeps: ({ search }) => ({ state: search.state ?? ("open" as const) }),
+	loader: ({ context, params, deps }) => {
+		const project = `${params.owner}/${params.repo}`;
+		return preload(context.queryClient, pullsQuery(project, deps.state), projectQuery(project));
+	},
 	component: Pulls,
 });
 
@@ -17,14 +25,14 @@ function Pulls() {
 	const project = `${owner}/${repo}`;
 	const search = Route.useSearch();
 	const state = search.state ?? "open";
-	const list = useQuery({ queryKey: [...keys.pulls(project), state], queryFn: () => api.pulls(project, { state }), placeholderData: keepPreviousData });
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const list = useQuery({ ...pullsQuery(project, state), placeholderData: keepPreviousData });
+	const info = useQuery(projectQuery(project));
 	return (
 		<div className="space-y-3">
 			<div className="flex flex-wrap items-center justify-between gap-2">
 				<p className="text-sm text-dim">Propose changes from a branch or a fork, discuss them line by line, and merge them.</p>
 				{!info.data?.repo.archivedAt && (
-					<Link to="/$owner/$repo/pulls/new" params={repoParams(project)} className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90">
+					<Link to="/$owner/$repo/pulls/new" params={repoParams(project)} className={buttonClass("primary")}>
 						<Plus className="size-4" />
 						New pull request
 					</Link>
