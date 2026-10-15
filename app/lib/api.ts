@@ -174,7 +174,7 @@ export const api = {
 			defaultBranch: repo.defaultBranch,
 			repo,
 		})),
-	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean }) =>
+	updateRepo: (project: string, patch: { visibility?: Visibility; description?: string | null; name?: string; archived?: boolean; hasWiki?: boolean; defaultBranch?: string }) =>
 		call<{ repo: RepoInfo }>("PATCH", p(project), patch).then((r) => r.repo),
 	deleteRepo: (project: string) => call<{ deleted: true }>("DELETE", p(project)),
 	fileHistory: (project: string, path: string, ref?: string, from?: string) =>

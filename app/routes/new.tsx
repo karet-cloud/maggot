@@ -131,8 +131,11 @@ function NewRepo() {
 						body="Only you can see, clone and push it."
 					/>
 				</fieldset>
-				<Field label="Import from (optional)" hint="A public Git URL, such as https://github.com/owner/repo.git. Its history and default branch come along.">
-					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo.git" type="url" />
+				<Field
+					label="Import from (optional)"
+					hint="Any public Git URL: GitHub, GitLab, Codeberg, a self-hosted server. Its history and default branch come along; a link to a branch (…/tree/dev) imports that branch."
+				>
+					<Input value={importUrl} onChange={(e) => setImportUrl(e.target.value)} placeholder="https://github.com/owner/repo" inputMode="url" autoComplete="off" spellCheck={false} />
 				</Field>
 				{!importing && (
 					<>
