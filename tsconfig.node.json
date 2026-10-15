@@ -18,6 +18,7 @@
     "vite.config.ts"
   ],
   "exclude": [
+    "test/project-merges.test.ts",
     "test/ci-runs.test.ts",
     "test/ci-steps.test.ts",
     "test/sql.ts",

@@ -50,6 +50,8 @@ export interface LocalArtifactsOptions {
 	simulate?: {
 		/** Extra latency per fork (real forks take ~2-3s). */
 		forkDelayMs?: number;
+		/** Extra latency per fetch (git-upload-pack request), to hold a merge mid-way in tests. */
+		uploadPackDelayMs?: number;
 		/**
 		 * Fail forks while more than this many forks of the same source are in flight, the way real
 		 * Artifacts does: INTERNAL_ERROR, and the target name is left half-created (create says
@@ -72,7 +74,7 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 	let baseUrl = "";
 	const forksInFlight = new Map<string, number>();
 	const ghosts = new Set<string>();
-	const stats = { forks: 0, forkFailures: 0, maxConcurrentForks: 0 };
+	const stats = { forks: 0, forkFailures: 0, maxConcurrentForks: 0, uploadPacks: 0 };
 
 	const save = () => writeFile(statePath, JSON.stringify(state, null, 2));
 	const repoPath = (name: string) => join(reposDir, `${name}.git`);
@@ -148,7 +150,7 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 		},
 		async "POST /simulate"(body) {
 			opts.simulate = body;
-			Object.assign(stats, { forks: 0, forkFailures: 0, maxConcurrentForks: 0 });
+			Object.assign(stats, { forks: 0, forkFailures: 0, maxConcurrentForks: 0, uploadPacks: 0 });
 			return opts.simulate;
 		},
 		async "GET /repos/:name"(_b, _p, name) {
@@ -296,6 +298,10 @@ export async function startLocalArtifacts(opts: LocalArtifactsOptions): Promise<
 		if (!authorize(req, repo, pushing)) {
 			res.writeHead(401, { "WWW-Authenticate": 'Basic realm="artifacts"' });
 			return res.end("Unauthorized");
+		}
+		if (rest === "/git-upload-pack") {
+			stats.uploadPacks++;
+			if (opts.simulate?.uploadPackDelayMs) await new Promise((r) => setTimeout(r, opts.simulate?.uploadPackDelayMs));
 		}
 		const child = spawn("git", ["http-backend"], {
 			env: {

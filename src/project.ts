@@ -159,7 +159,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
 	/** Once the default branch has a commit it always will; skips re-checking on every task. */
 	private hasCommits = false;
 	private readonly forkSlots = new Semaphore(FORK_CONCURRENCY);
-	/** Merges (the queue's and pull requests') change branches through the workspace one at a time. */
+	/** Merges and branch-rule changes run one at a time, keeping protection stable through each push. */
 	private readonly mergeSlot = new Semaphore(1);
 	/** In-flight provisioning per task, so a request and the recovery alarm never fork twice. */
 	private readonly provisioning = new Map<string, Promise<ArtifactsCreateRepoResult | null>>();
@@ -792,10 +792,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		expectedHead?: string;
 		/** The pull request's number, for checking the branch's rules (reviews, Actions) right before pushing. */
 		pull?: number;
-	}): Promise<{ commit: string; changedFiles: string[] }> {
-		const meta = this.meta();
+	}): Promise<{ commit: string; changedFiles: string[]; onDefaultBranch: boolean }> {
 		this.assertWritable();
 		return this.mergeSlot.run(async () => {
+			const meta = this.meta();
 			const base = await this.baseAccess(meta);
 			const head = input.headRepo && input.headRepo !== meta.name ? await this.credentials(input.headRepo, input.headBranch, "read", INTERNAL_TOKEN_TTL) : null;
 			const headAccess = head ? { url: head.remote, token: head.token } : base;
@@ -829,9 +829,11 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					// required reviews or Actions since the API checked them.
 					if (input.pull !== undefined) await this.assertMergeable(input.pull, input.base, input.headRepo && input.headRepo !== meta.name ? input.headRepo : null, theirs);
 					if (await ws.push(base)) {
+						// Capture this before post-push work awaits anything else.
+						const onDefaultBranch = input.base === this.meta().defaultBranch;
 						// Like a push: events, webhooks, the code index, Actions and "fixes #n" all follow.
 						await this.pushed(input.author.name);
-						return { commit: outcome.oid, changedFiles: outcome.changedFiles };
+						return { commit: outcome.oid, changedFiles: outcome.changedFiles, onDefaultBranch };
 					}
 				}
 				throw new HttpError(409, "PUSH_REJECTED", `${input.base} kept moving; try again`);
@@ -842,7 +844,10 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		});
 	}
 
-	/** Refuses a pull request merge of `head` that `base`'s branch rules don't allow right now. */
+	/**
+	 * Refuses a pull request merge of `head` that `base`'s branch rules don't allow right now. Runs in
+	 * the merge slot, which rule changes also take, so the rules read here still hold at the push.
+	 */
 	private async assertMergeable(number: number, base: string, headRepo: string | null, head: string): Promise<void> {
 		const rule = protectionFor(this.branchRules(), base);
 		if (rule.requireReview) {
@@ -1422,6 +1427,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		if (current === null || current > at) await this.ctx.storage.setAlarm(at);
 	}
 
+	/** Why the queue may not merge into `branch` under its rules now, or null. */
+	private queueBlocked(branch: string): { code: string; message: string } | null {
+		const rule = protectionFor(this.branchRules(), branch);
+		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
+		if (rule.requireReview) {
+			return { code: "REVIEW_REQUIRED", message: `${branch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.` };
+		}
+		// The queue merges a fork's work without Actions having run on it, so a branch that wants them passed takes pull requests only.
+		if (rule.requireChecks) {
+			return { code: "CHECKS_REQUIRED", message: `${branch} requires Actions to pass, so changes reach it only through pull requests. Push the task's work to a branch and open one.` };
+		}
+		return null;
+	}
+
 	private mergeTask(id: string): Promise<void> {
 		return this.mergeSlot.run(() => this.mergeTaskNow(id));
 	}
@@ -1431,15 +1450,8 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		const row = this.row(id);
 		// "merging" here means a previous alarm died mid-merge; the merge is idempotent, so redo it.
 		if (row.status !== "queued" && row.status !== "merging") return;
-		// A branch that wants a review takes changes only through pull requests, which the queue isn't.
-		const rule = protectionFor(this.branchRules(), meta.defaultBranch);
-		if (rule.requireReview) {
-			return this.fail(id, "REVIEW_REQUIRED", `${meta.defaultBranch} requires an approving review, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
-		}
-		// The queue merges a fork's work without Actions having run on it, so a branch that wants them passed takes pull requests only.
-		if (rule.requireChecks) {
-			return this.fail(id, "CHECKS_REQUIRED", `${meta.defaultBranch} requires Actions to pass, so changes reach it only through pull requests. Push the task's work to a branch and open one.`);
-		}
+		const blocked = this.queueBlocked(meta.defaultBranch);
+		if (blocked) return this.fail(id, blocked.code, blocked.message);
 		this.setStatus(id, "merging");
 		this.emit("task.merging", id, {});
 
@@ -1486,6 +1498,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 					return;
 				}
 
+				// The rules as they are now, after the fetches and the merge (changes to them wait for this slot).
+				const blocked = this.queueBlocked(meta.defaultBranch);
+				if (blocked) return this.fail(id, blocked.code, blocked.message);
 				if (await ws.push(base)) {
 					this.markMerged(id, outcome.oid, outcome.changedFiles);
 					// The next push's "from" is this merge, not whatever was pushed before it.
@@ -1745,12 +1760,20 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.branchRules();
 	}
 
+	/**
+	 * Adds or replaces a rule. Rule changes take the merge slot, so a merge between checking the rules
+	 * and pushing never sees them change: one that started under the old rules finishes first.
+	 */
 	async setBranchRule(rule: Omit<BranchRule, "createdAt">): Promise<BranchRule[]> {
 		this.meta();
 		if (!validPattern(rule.pattern)) throw new HttpError(400, "INVALID_INPUT", "A pattern is a branch name, optionally with * (within a segment) or ** (across them)");
 		if (!rule.blockDeletions && !rule.blockForcePushes && !rule.requireMergeQueue && !rule.requireReview && !rule.requireChecks) {
 			throw new HttpError(400, "INVALID_INPUT", "Choose at least one protection");
 		}
+		return this.mergeSlot.run(async () => this.writeBranchRule(rule));
+	}
+
+	private writeBranchRule(rule: Omit<BranchRule, "createdAt">): BranchRule[] {
 		const existing = this.sql.exec<{ created_at: string }>("SELECT created_at FROM branch_rules WHERE pattern = ?", rule.pattern).toArray()[0];
 		if (!existing && this.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM branch_rules").one().n >= 50) {
 			throw new HttpError(403, "QUOTA_EXCEEDED", "A repository can have at most 50 branch rules");
@@ -1768,10 +1791,13 @@ export class ProjectCoordinator extends DurableObject<Env> {
 		return this.branchRules();
 	}
 
+	/** Removes a rule; through the merge slot, as setBranchRule. */
 	async deleteBranchRule(pattern: string): Promise<BranchRule[]> {
 		this.meta();
-		this.sql.exec("DELETE FROM branch_rules WHERE pattern = ?", pattern);
-		return this.branchRules();
+		return this.mergeSlot.run(async () => {
+			this.sql.exec("DELETE FROM branch_rules WHERE pattern = ?", pattern);
+			return this.branchRules();
+		});
 	}
 
 	/**

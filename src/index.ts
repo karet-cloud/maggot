@@ -2032,8 +2032,8 @@ repo.post("/pulls/:number/merge", async (c) => {
 	closedPull(c, row, pull.number, true);
 	// "Fixes #n" in the description closes those issues too, as GitHub does.
 	const fixes = [...new Set([...`${pull.title}\n${pull.body}`.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+#(\d+)\b/gi)].map((m) => Number(m[1])))];
-	// The row's default branch is the coordinator's (it's set once, at creation), without a trip to storage for the head.
-	if (fixes.length > 0 && pull.baseBranch === row.defaultBranch) {
+	// Whether the merge landed on the default branch, as the coordinator saw it when it pushed (not D1's copy, which can be changed meanwhile).
+	if (fixes.length > 0 && result.onDefaultBranch) {
 		c.executionCtx.waitUntil(closeIssuesByCommits(c.env, row.id, fixes.filter((n) => n !== pull.number).slice(0, 50).map((n) => [n, result.commit])).catch(() => []));
 	}
 	announcePull(c, row, pull, "pull.merged", user, { method, commit: result.commit });
