@@ -65,6 +65,7 @@ import {
 	sameNetwork,
 	setStar,
 	toRepoInfo,
+	unreadableRepos,
 	updateRepo,
 	type RepoListing,
 	type RepoRow,
@@ -1080,7 +1081,7 @@ repo.get("/events", async (c) => {
 	const limit = intParam(c.req.query("limit"), 100, 1000);
 	const after = c.req.query("after");
 	// Without `after`, returns the newest `limit` events (for a feed); with it, pages forward from `after`.
-	const events = after === undefined ? await project(c).recentEvents(limit) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit);
+	const events = after === undefined ? await project(c).recentEvents(limit, pullViewer(c.var.principal)) : await project(c).events(intParam(after, 0, Number.MAX_SAFE_INTEGER, 0), limit, pullViewer(c.var.principal));
 	return c.json({ events });
 });
 
@@ -1818,11 +1819,20 @@ function announcePull(c: Context<App>, row: RepoRow, pull: PullRow, type: "pull.
 					}),
 				),
 			);
+			// Keep the original for authorized feed readers; the coordinator redacts broadcasts and webhooks.
+			const fork = pull.headRepoId !== pull.repoId;
 			await project(c).recordPullEvent(type, {
-				pull: { number: pull.number, title: pull.title, base: pull.baseBranch, head: pull.headBranch, url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}` },
+				pull: {
+					number: pull.number,
+					title: pull.title,
+					base: pull.baseBranch,
+					head: pull.headBranch,
+					headRepo: !fork ? null : `${pull.headOwner}/${pull.headName}`,
+					url: `${origin(c)}/${row.owner}/${row.name}/pull/${pull.number}`,
+				},
 				sender: actor.username,
 				...extra,
-			});
+			}, fork ? pull.headRepoId ?? undefined : null);
 		})().catch((err) => console.error("announcing pull request activity failed", err)),
 	);
 }
@@ -1849,16 +1859,19 @@ function pullTrigger(c: Context<App>, row: RepoRow, pull: PullRow, head: string)
 
 /**
  * Starts a pull request's pull_request workflows for its head commit, in the background. They wait for
- * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here.
+ * approval unless whoever opened (or reopened) it can merge, whether it's from a fork or a branch here,
+ * and can read the fork: approving runs a private fork's code where its logs and artifacts are kept.
  * If this doesn't get through, the pull request's checks show them missing, for a writer to start.
  */
 function startPullChecks(c: Context<App>, row: RepoRow, pull: PullRow, head: string, action: "opened" | "reopened") {
 	const trigger = pullTrigger(c, row, pull, head);
 	if (!trigger) return;
+	const p = c.var.principal;
 	c.executionCtx.waitUntil(
-		project(c)
-			.ciPull({ ...trigger, action, approved: canWrite(c.var.principal, row) })
-			.catch((err) => console.error("starting pull request Actions failed", err)),
+		(async () => {
+			const readsHead = pull.headRepoId === row.id || (await unreadableRepos(db(c.env), [pull.headRepoId as string], pullViewer(p))).size === 0;
+			await project(c).ciPull({ ...trigger, action, approved: canWrite(p, row) && readsHead });
+		})().catch((err) => console.error("starting pull request Actions failed", err)),
 	);
 }
 

@@ -1062,13 +1062,28 @@ export interface PullViewer {
  * hidden: a pull request into a repository you can read doesn't tell you what's in one you can't.
  */
 export async function hiddenHeads(database: D1Database, rows: PullRow[], viewer: PullViewer): Promise<Set<string>> {
-	const ids = [...new Set(rows.filter((r) => r.headRepoId && r.headRepoId !== r.repoId && r.headVisibility !== "public").map((r) => r.headRepoId as string))];
-	if (viewer.everything || ids.length === 0) return new Set();
-	const { results } = await database
-		.prepare(`select r."id" from "repo" r where r."id" in (${ids.map((_, i) => `?${i + 2}`).join(", ")}) and ${accessLevel("r", "?1")} = 0`)
-		.bind(viewer.viewerId ?? "", ...ids)
-		.all<{ id: string }>();
-	return new Set(results.map((r) => r.id));
+	return unreadableRepos(database, rows.filter((r) => r.headRepoId && r.headRepoId !== r.repoId && r.headVisibility !== "public").map((r) => r.headRepoId as string), viewer);
+}
+
+/**
+ * Which of these repository ids the viewer can't read: private ones they have no access to, and ones
+ * since deleted (nobody can say any more who could). `{ viewerId: null }` is nobody in particular, as
+ * for webhooks: every private repository is hidden then.
+ */
+export async function unreadableRepos(database: D1Database, ids: string[], viewer: PullViewer): Promise<Set<string>> {
+	const unique = [...new Set(ids)];
+	if (viewer.everything || unique.length === 0) return new Set();
+	const readable = new Set<string>();
+	// D1 permits at most 100 bound parameters per query.
+	for (let offset = 0; offset < unique.length; offset += 90) {
+		const batch = unique.slice(offset, offset + 90);
+		const { results } = await database
+			.prepare(`select r."id" from "repo" r where r."id" in (${batch.map((_, i) => `?${i + 2}`).join(", ")}) and (r."visibility" = 'public' or ${accessLevel("r", "?1")} > 0)`)
+			.bind(viewer.viewerId ?? "", ...batch)
+			.all<{ id: string }>();
+		for (const row of results) readable.add(row.id);
+	}
+	return new Set(unique.filter((id) => !readable.has(id)));
 }
 
 export function toPullSummary(row: PullRow, hidden?: Set<string>): PullSummary {

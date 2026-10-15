@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { createIssue, ensureSchema, getPull, hiddenHeads, insertRepo, listNetwork, listPulls, networkRoot, ownerInNetwork, sameNetwork, toPull, type RepoRow } from "../src/db.ts";
+import { createIssue, ensureSchema, getPull, hiddenHeads, insertRepo, listNetwork, listPulls, networkRoot, ownerInNetwork, sameNetwork, toPull, unreadableRepos, type RepoRow } from "../src/db.ts";
 import { d1Database } from "./sql.ts";
 
 const now = Date.parse("2026-10-01T00:00:00Z");
@@ -99,4 +99,17 @@ test("pull requests from a private fork don't name it to people who can't read i
 	const pull = (await getPull(database, "r-ada", 1))!;
 	const shown = toPull(pull, { edit: false, label: false, merge: false }, { review: false, checks: false }, await hiddenHeads(database, [pull], { viewerId: "bob" }));
 	assert.deepEqual([shown.headRepo, shown.head], ["(private fork)", ""]);
+});
+
+
+test("head access uses current view permissions and hides deleted repositories", async () => {
+	const { database } = await setup();
+	assert.deepEqual(await unreadableRepos(database, ["r-ada", "r-dee", "gone", "r-dee"], { viewerId: "ada" }), new Set(["r-dee", "gone"]));
+	assert.deepEqual(await unreadableRepos(database, ["r-dee"], { viewerId: "dee" }), new Set());
+	assert.deepEqual(await unreadableRepos(database, ["r-dee"], { viewerId: null }), new Set(["r-dee"]), "webhooks have no viewer");
+	assert.deepEqual(await unreadableRepos(database, ["r-dee"], { viewerId: null, everything: true }), new Set());
+	await database.prepare(`insert into "repo_collaborator" ("repoId", "userId", "permission", "state", "createdAt") values ('r-dee', 'ada', 'read', 'active', ?)`).bind(new Date().toISOString()).run();
+	assert.deepEqual(await unreadableRepos(database, ["r-dee"], { viewerId: "ada" }), new Set(), "view, not edit, is sufficient");
+	await database.prepare(`delete from "repo" where "id" = 'r-dee'`).run();
+	assert.deepEqual(await unreadableRepos(database, ["r-dee"], { viewerId: "dee" }), new Set(["r-dee"]));
 });
