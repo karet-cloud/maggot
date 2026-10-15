@@ -1,10 +1,11 @@
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { BookMarked, GitFork, Search as SearchIcon, Star } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ArchivedBadge, ForkedFrom } from "../components/repos.tsx";
 import { buttonClass, cx, Empty, ErrorNote, Input, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, type RepoInfo } from "../lib/api.ts";
+import { preload } from "../lib/queries.ts";
 
 type Search = { q?: string; sort?: "created" };
 
@@ -15,9 +16,17 @@ export const Route = createFileRoute("/explore")({
 		q: typeof s.q === "string" && s.q ? s.q : undefined,
 		sort: s.sort === "created" ? "created" : undefined,
 	}),
+	loaderDeps: ({ search }) => ({ q: search.q, sort: search.sort }),
+	// The list comes with the page, so it isn't fetched (behind a spinner) once the page is up.
+	loader: ({ context, deps }) => preload(context.queryClient, reposQuery(deps.q, deps.sort)),
 	head: () => ({ meta: [{ title: "Explore · maggot" }] }),
 	component: Explore,
 });
+
+const reposQuery = (q: string | undefined, sort: Search["sort"]) => {
+	const filter = { q, sort: sort ?? ("stars" as const), visibility: "public" as const };
+	return queryOptions({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter) });
+};
 
 const SORTS = [
 	[undefined, "Most stars"],
@@ -35,9 +44,8 @@ function Explore() {
 		const t = setTimeout(() => void navigate({ search: { q: text.trim() || undefined, sort }, replace: true }), 250);
 		return () => clearTimeout(t);
 	}, [text, q, sort, navigate]);
-	const filter = { q: q || undefined, sort: sort ?? ("stars" as const), visibility: "public" as const };
 	// The last list stays up while the next one loads, instead of blanking to a spinner.
-	const repos = useQuery({ queryKey: keys.repos(filter), queryFn: () => api.repos(filter), placeholderData: keepPreviousData });
+	const repos = useQuery({ ...reposQuery(q || undefined, sort), placeholderData: keepPreviousData });
 	const count = repos.data?.length ?? 0;
 	return (
 		<main className="mx-auto max-w-[1080px] px-5">
