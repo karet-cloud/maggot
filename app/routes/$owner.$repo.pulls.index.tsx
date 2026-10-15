@@ -2,7 +2,7 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { GitPullRequest, MessageSquare, Plus } from "lucide-react";
 import { Decision, PullStateIcon } from "../components/pulls.tsx";
-import { cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
+import { buttonClass, cx, Empty, ErrorNote, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 
 type Search = { state?: "closed" | "all" };
@@ -24,7 +24,7 @@ function Pulls() {
 			<div className="flex flex-wrap items-center justify-between gap-2">
 				<p className="text-sm text-dim">Propose changes from a branch or a fork, discuss them line by line, and merge them.</p>
 				{!info.data?.repo.archivedAt && (
-					<Link to="/$owner/$repo/pulls/new" params={repoParams(project)} className="flex items-center gap-1.5 rounded-md bg-btn px-3 py-1.5 text-sm font-semibold text-btn-fg transition-colors hover:bg-accent hover:text-on-accent">
+					<Link to="/$owner/$repo/pulls/new" params={repoParams(project)} className={buttonClass("primary")}>
 						<Plus className="size-4" />
 						New pull request
 					</Link>

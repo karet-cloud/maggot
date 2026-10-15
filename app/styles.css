@@ -5,7 +5,24 @@
  * follows the system unless the visitor picks a theme; a script in <head> puts `light` or `dark` on
  * <html> before the first paint (see app/lib/theme.ts). The values below are the light theme, and
  * `.dark` swaps them.
+ *
+ * The frame shadow and the commit graph's lane colours are plain variables rather than theme values:
+ * Tailwind copies a theme shadow's value into its utility, which would leave the dark one unused.
  */
+:root {
+	--header-h: 57px;
+	--shadow-frame: 0 1px 0 rgba(15, 17, 21, 0.04), 0 24px 48px -32px rgba(15, 17, 21, 0.25);
+	--lane-0: #15803d;
+	--lane-1: #2563eb;
+	--lane-2: #c026d3;
+	--lane-3: #b45309;
+	--lane-4: #0891b2;
+	--lane-5: #7c3aed;
+	--lane-6: #e11d48;
+	--lane-7: #4d7c0f;
+	--lane-8: #ea580c;
+	--lane-9: #0d9488;
+}
 @theme {
 	--font-sans: "Instrument Sans", "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 	--font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -22,7 +39,6 @@
 	--color-on-accent: #ffffff;
 	--color-btn: #0f1115;
 	--color-btn-fg: #ffffff;
-	--shadow-frame: 0 1px 0 rgba(15, 17, 21, 0.04), 0 24px 48px -32px rgba(15, 17, 21, 0.25);
 	--animate-fresh: fresh 2.4s ease-out;
 	--animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
 }
@@ -42,6 +58,16 @@
 	--color-btn: #e6e8eb;
 	--color-btn-fg: #0b0d10;
 	--shadow-frame: 0 1px 0 rgba(0, 0, 0, 0.3), 0 24px 48px -32px rgba(0, 0, 0, 0.8);
+	--lane-0: #4ade80;
+	--lane-1: #60a5fa;
+	--lane-2: #f472b6;
+	--lane-3: #fbbf24;
+	--lane-4: #22d3ee;
+	--lane-5: #a78bfa;
+	--lane-6: #fb7185;
+	--lane-7: #a3e635;
+	--lane-8: #fb923c;
+	--lane-9: #2dd4bf;
 	color-scheme: dark;
 }
 

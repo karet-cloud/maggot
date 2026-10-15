@@ -4,7 +4,7 @@ import { ArrowLeft, GitCompareArrows } from "lucide-react";
 import { CommitList } from "../components/commits.tsx";
 import { DiffView } from "../components/diff.tsx";
 import { BranchSelect } from "../components/refs.tsx";
-import { Empty, ErrorNote, Panel, Spinner } from "../components/ui.tsx";
+import { buttonClass, Empty, ErrorNote, Panel, Spinner } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
 
@@ -73,7 +73,7 @@ function ComparePage() {
 								to="/$owner/$repo/pulls/new"
 								params={repoParams(project)}
 								search={{ base, head }}
-								className="rounded-md bg-btn px-3 py-1.5 text-sm font-semibold text-btn-fg transition-colors hover:bg-accent hover:text-on-accent"
+								className={buttonClass("primary")}
 							>
 								Open a pull request
 							</Link>

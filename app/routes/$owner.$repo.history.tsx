@@ -104,7 +104,8 @@ function FileCommits({ project, refName, path }: { project: string; refName?: st
 
 const ROW = 36;
 const LANE = 14;
-const COLORS = ["#818cf8", "#34d399", "#f472b6", "#fbbf24", "#38bdf8", "#a78bfa", "#fb7185", "#4ade80", "#f97316", "#22d3ee"];
+// Lane colours come from styles.css, so each theme gets shades that read on its background.
+const COLORS = Array.from({ length: 10 }, (_, i) => `var(--lane-${i})`);
 const laneX = (i: number) => LANE / 2 + i * LANE + 4;
 const color = (i: number) => COLORS[i % COLORS.length];
 
@@ -147,9 +148,9 @@ function GraphCell({ row, width, merge }: { row: GraphRow; width: number; merge:
 	return (
 		<svg width={width} height={ROW} className="shrink-0" aria-hidden>
 			{lines.map((l, k) => (
-				<path key={k} d={l.d} stroke={color(l.lane)} strokeWidth={2} fill="none" />
+				<path key={k} d={l.d} style={{ stroke: color(l.lane) }} strokeWidth={2} fill="none" />
 			))}
-			<circle cx={x} cy={mid} r={merge ? 3.5 : 4} fill={merge ? "var(--color-bg, #0b0d10)" : color(row.col)} stroke={color(row.col)} strokeWidth={2} />
+			<circle cx={x} cy={mid} r={merge ? 3.5 : 4} style={{ fill: merge ? "var(--color-bg)" : color(row.col), stroke: color(row.col) }} strokeWidth={2} />
 		</svg>
 	);
 }

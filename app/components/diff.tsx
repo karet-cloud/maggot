@@ -143,7 +143,7 @@ function FileSection({ file, layout, project, viewRef, notes, links }: { file: F
 	const parent = file.path.split("/").slice(0, -1).join("/") || undefined;
 	return (
 		<section id={`diff-${encodeURIComponent(file.path)}`} className="scroll-mt-16 overflow-clip rounded-lg border border-line bg-panel">
-			<header className="sticky top-[49px] z-[1] flex items-center gap-2 border-b border-line bg-panel px-3 py-2">
+			<header className="sticky top-(--header-h) z-[1] flex items-center gap-2 border-b border-line bg-panel px-3 py-2">
 				<button type="button" onClick={() => setOpen(!open)} className="text-faint hover:text-fg" aria-label={open ? "Collapse" : "Expand"}>
 					{open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
 				</button>

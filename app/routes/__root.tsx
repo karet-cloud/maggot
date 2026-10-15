@@ -58,33 +58,30 @@ function Root() {
 	const { queryClient } = Route.useRouteContext();
 	return (
 		<QueryClientProvider client={queryClient}>
-			<Chrome />
-			<div className="flex-1">
-				<Outlet />
-			</div>
-			<Footer />
+			<Frame />
 		</QueryClientProvider>
 	);
 }
 
-/** The top bar and banners, except on the signed-out home page, which brings its own header. */
-function Chrome() {
+/** The top bar, banners and footer, except on the signed-out home page, which brings its own. */
+function Frame() {
 	const home = useLocation({ select: (l) => l.pathname === "/" });
 	const viewer = useViewer();
-	if (home && !viewer.data) return null;
+	const landing = home && !viewer.data;
 	return (
 		<>
-			<TopBar />
-			<VerifyBanner />
+			{!landing && <TopBar />}
+			{!landing && <VerifyBanner />}
+			<div className="flex-1">
+				<Outlet />
+			</div>
+			{!landing && <Footer />}
 		</>
 	);
 }
 
-/** The landing page's footer, on every page but the landing page, which has its own. */
+/** The landing page's footer, for every other page. */
 function Footer() {
-	const home = useLocation({ select: (l) => l.pathname === "/" });
-	const viewer = useViewer();
-	if (home && !viewer.data) return null;
 	return (
 		<footer className="mt-16 border-t border-line">
 			<div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-3 px-5 py-8 text-[12.5px] text-faint">
@@ -214,6 +211,7 @@ function TopBar() {
 	});
 	const me = viewer.data;
 	return (
+		// 56px plus its border: --header-h in styles.css, which sticky elements below it use.
 		<header className="sticky top-0 z-30 border-b border-line bg-bg/85 backdrop-blur">
 			<div className="mx-auto flex h-14 max-w-[1600px] items-center gap-3 px-3 sm:px-5">
 				<Link to="/" className="shrink-0 text-[15px] font-semibold">

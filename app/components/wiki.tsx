@@ -6,7 +6,7 @@ import { pageNameProblem, pageSlug, pageTitle } from "../../src/wiki-pages.ts";
 import { api, ApiError, keys, repoParams, type WikiIndex, type WikiPage } from "../lib/api.ts";
 import { useNeedsVerification } from "../routes/__root.tsx";
 import { Markdown } from "./markdown.tsx";
-import { Button, CopyField, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
+import { Button, buttonClass, CopyField, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 const MAX_PAGE_BYTES = 1024 * 1024;
 
@@ -204,7 +204,7 @@ export function WikiWelcome({ project, canEdit }: { project: string; canEdit: bo
 					to="/$owner/$repo/wiki/_new"
 					params={repoParams(project)}
 					search={{ title: "Home" }}
-					className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-btn px-3 py-1.5 text-sm font-semibold text-btn-fg transition-colors hover:bg-accent hover:text-on-accent"
+					className={buttonClass("primary", "mt-3")}
 				>
 					<FilePlus2 className="size-4" />
 					Create the first page
