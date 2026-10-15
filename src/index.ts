@@ -339,7 +339,7 @@ app.get("/api/dashboard", async (c) => {
 	const user = requireUser(c);
 	await ensureSchema(db(c.env));
 	const [pulls, issues] = await Promise.all([listDashboard(db(c.env), user.id, true), listDashboard(db(c.env), user.id, false)]);
-	return c.json({ pulls, issues });
+	return c.json({ pulls: pulls.items, issues: issues.items, morePulls: pulls.more, moreIssues: issues.more });
 });
 
 app.get("/api/notifications", async (c) => {

@@ -2143,13 +2143,13 @@ test("the home dashboard lists open issues in repositories you can push to, and 
 		assert.equal((await as(who)("/repos", { method: "POST", body: JSON.stringify({ name, visibility, readme: true }) })).status, 201);
 	const open = async (who: { token: string }, repo: string, title: string) =>
 		assert.equal((await as(who)(`/repos/${repo}/issues`, { method: "POST", body: JSON.stringify({ title }) })).status, 201);
-	const titles = async (who: { token: string }) => {
+	type Dashboard = { pulls: { title: string }[]; issues: { title: string }[]; morePulls: boolean; moreIssues: boolean };
+	const dashboard = async (who: { token: string }) => {
 		const res = await as(who)("/dashboard");
 		assert.equal(res.status, 200);
-		const body = (await res.json()) as { pulls: unknown[]; issues: { title: string; repo: string }[] };
-		assert.ok(Array.isArray(body.pulls));
-		return body.issues.map((i) => i.title).sort();
+		return (await res.json()) as Dashboard;
 	};
+	const titles = async (who: { token: string }) => (await dashboard(who)).issues.map((i) => i.title).sort();
 	await create(ada, "secret", "private");
 	await create(ada, "open", "public");
 	await create(bob, "own", "public");
@@ -2161,13 +2161,43 @@ test("the home dashboard lists open issues in repositories you can push to, and 
 	assert.deepEqual(await titles(ada), ["bob asks ada", "private work"]);
 	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own"]);
 
-	// Write access to the private repository brings its issues; losing it takes them away.
-	assert.ok((await as(ada)(`/repos/${ada.username}/secret/collaborators/${bob.username}`, { method: "PUT", body: JSON.stringify({ permission: "write" }) })).ok);
+	// Reading the private repository isn't enough; write access brings its issues, and losing it takes them away.
+	const grant = (permission: string) => as(ada)(`/repos/${ada.username}/secret/collaborators/${bob.username}`, { method: "PUT", body: JSON.stringify({ permission }) });
+	assert.ok((await grant("read")).ok);
 	const invites = (await (await as(bob)("/invitations")).json()) as { invitations: { kind: string; id: string }[] };
 	for (const i of invites.invitations) assert.equal((await as(bob)(`/invitations/${i.kind}/${i.id}/accept`, { method: "POST" })).status, 200);
+	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own"]);
+	assert.ok((await grant("write")).ok);
 	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own", "private work"]);
 	assert.ok((await as(ada)(`/repos/${ada.username}/secret/collaborators/${bob.username}`, { method: "DELETE" })).ok);
 	assert.deepEqual(await titles(bob), ["bob asks ada", "bob's own"]);
+
+	// Pull requests are listed apart from issues: Ada's branch, opened as a pull request in her repository.
+	const exec = promisify(execFile);
+	const remote = new URL(`${api}/${ada.username}/open.git`);
+	remote.username = ada.username;
+	remote.password = ada.token;
+	const dir = join(root, "dashboard");
+	const git = (...args: string[]) => exec("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...args], { cwd: dir, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+	await exec("git", ["clone", "-q", remote.toString(), dir]);
+	await git("checkout", "-q", "-b", "tweak");
+	await writeFile(join(dir, "tweak.txt"), "tweak\n");
+	await git("add", "-A");
+	await git("commit", "-q", "-m", "Tweak");
+	await git("push", "-q", "origin", "tweak");
+	const opened = await as(ada)(`/repos/${ada.username}/open/pulls`, { method: "POST", body: JSON.stringify({ title: "a tweak", base: "master", head: "tweak" }) });
+	assert.equal(opened.status, 201, await opened.clone().text());
+	const mine = await dashboard(ada);
+	assert.deepEqual(mine.pulls.map((p) => p.title), ["a tweak"]);
+	assert.ok(!mine.issues.some((i) => i.title === "a tweak"));
+	assert.deepEqual((await dashboard(bob)).pulls, []);
+
+	// Past the limit, the newest come back and say there are more.
+	for (let n = 0; n < 20; n++) await open(ada, `${ada.username}/open`, `filler ${n}`);
+	const full = await dashboard(ada);
+	assert.equal(full.issues.length, 20);
+	assert.equal(full.moreIssues, true);
+	assert.equal(full.morePulls, false);
 
 	assert.equal((await fetch(`${api}/api/dashboard`)).status, 401);
 });

@@ -21,7 +21,9 @@ export const Route = createFileRoute("/")({
 });
 
 const reposQuery = (owner?: string) => queryOptions({ queryKey: keys.repos(owner), queryFn: () => api.repos(owner) });
-const dashboardQuery = queryOptions({ queryKey: keys.dashboard, queryFn: api.dashboard });
+// Issues and pull requests change on other pages and in other repositories, so home asks again each
+// time it's shown (the last lists stay up meanwhile).
+const dashboardQuery = queryOptions({ queryKey: keys.dashboard, queryFn: api.dashboard, staleTime: 0 });
 
 // Signed in, home is your repositories beside the open pull requests and issues that involve you.
 // Public repositories from everyone are on /explore.
@@ -52,14 +54,19 @@ function Home() {
 				</div>
 				{mine.isPending ? <Spinner /> : <ErrorNote error={mine.error} />}
 				{mine.data && <RepoList repos={mine.data} empty={{ title: "No repositories yet", body: "Create one, then push to it with git." }} />}
+				<Link to="/explore" className="inline-block pt-1 text-[13px] text-accent hover:underline">
+					Explore public repositories →
+				</Link>
 			</section>
 
-			<aside className="min-w-0 space-y-5">
-				{dashboard.error && <ErrorNote error={dashboard.error} />}
+			{/* On phones the work comes first, above what may be a long list of repositories. */}
+			<aside className="order-first min-w-0 space-y-5 lg:order-none">
 				<WorkList
 					title="Pull requests"
 					icon={<GitPullRequest className="size-4 text-dim" />}
 					items={dashboard.data?.pulls}
+					more={dashboard.data?.morePulls}
+					error={dashboard.error}
 					pending={dashboard.isPending}
 					empty="No open pull requests in your repositories, and none of yours are waiting."
 					kind="pull"
@@ -68,6 +75,8 @@ function Home() {
 					title="Issues"
 					icon={<CircleDot className="size-4 text-dim" />}
 					items={dashboard.data?.issues}
+					more={dashboard.data?.moreIssues}
+					error={dashboard.error}
 					pending={dashboard.isPending}
 					empty="No open issues in your repositories, and none you've opened elsewhere."
 					kind="issue"
@@ -82,6 +91,8 @@ function WorkList({
 	title,
 	icon,
 	items,
+	more,
+	error,
 	pending,
 	empty,
 	kind,
@@ -89,6 +100,8 @@ function WorkList({
 	title: string;
 	icon: ReactNode;
 	items: DashboardItem[] | undefined;
+	more: boolean | undefined;
+	error: unknown;
 	pending: boolean;
 	empty: string;
 	kind: "pull" | "issue";
@@ -101,9 +114,14 @@ function WorkList({
 					{title}
 				</span>
 			}
-			actions={items && items.length > 0 ? <span className="text-[11px] text-faint">{items.length === 20 ? "20 most recent" : `${items.length} open`}</span> : undefined}
+			actions={items && items.length > 0 ? <span className="text-[11px] text-faint">{more ? `${items.length} most recent` : `${items.length} open`}</span> : undefined}
 		>
 			{pending && <Spinner className="m-4" />}
+			{error ? (
+				<div className="p-3">
+					<ErrorNote error={error} />
+				</div>
+			) : null}
 			{items && items.length === 0 && <p className="px-4 py-6 text-center text-[13px] text-dim">{empty}</p>}
 			{items && items.length > 0 && (
 				<ul className="divide-y divide-line/60">
@@ -117,7 +135,7 @@ function WorkList({
 									<Link
 										to={kind === "pull" ? "/$owner/$repo/pull/$number" : "/$owner/$repo/issues/$number"}
 										params={params}
-										className="text-[14px] leading-snug font-medium text-fg hover:text-accent"
+										className="text-[14px] leading-snug font-medium [overflow-wrap:anywhere] text-fg hover:text-accent"
 									>
 										{item.title}
 									</Link>
@@ -126,6 +144,7 @@ function WorkList({
 											{item.labels.slice(0, 3).map((l) => (
 												<Label key={l} name={l} />
 											))}
+											{item.labels.length > 3 && <span className="text-[11px] text-faint" title={item.labels.slice(3).join(", ")}>+{item.labels.length - 3}</span>}
 										</span>
 									)}
 									<p className="mt-0.5 truncate text-[12px] text-faint">
