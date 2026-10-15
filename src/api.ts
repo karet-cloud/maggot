@@ -102,6 +102,7 @@ export interface QueueEntry {
 export type EventType =
 	| "project.created"
 	| "repo.pushed"
+	| "repo.default_branch"
 	| "task.created"
 	| "task.ready"
 	| "task.submitted"

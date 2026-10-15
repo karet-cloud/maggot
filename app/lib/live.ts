@@ -66,6 +66,8 @@ export function useProjectLive(project: string): Live {
 					setTouched((prev) => new Map(prev).set(id, Date.now()));
 					invalidate(keys.task(project, id));
 				}
+				// Most of what the project's pages show depends on which branch is the default.
+				if (event.type === "repo.default_branch") invalidate(["project", project]);
 				invalidate(keys.project(project), true);
 				invalidate(keys.tasks(project));
 				invalidate(keys.queue(project));

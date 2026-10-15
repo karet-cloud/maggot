@@ -1637,6 +1637,7 @@ test("the default branch can be switched, and clones (protocol v0 and v2) and fo
 
 	const patch = (body: unknown) => as(ada)(`/repos/${ada.username}/switch`, { method: "PATCH", body: JSON.stringify(body) });
 	assert.equal((await patch({ defaultBranch: "nope" })).status, 404);
+	assert.equal((await patch({ defaultBranch: "maggot-incoming/test" })).status, 400);
 	const switched = await patch({ defaultBranch: "dev" });
 	assert.equal(switched.status, 200, await switched.clone().text());
 	assert.equal(((await switched.json()) as { repo: { defaultBranch: string } }).repo.defaultBranch, "dev");
@@ -1665,6 +1666,77 @@ test("the default branch can be switched, and clones (protocol v0 and v2) and fo
 	const back = join(root, "switch-back");
 	await git(["clone", "-q", url(ada.username, "switch"), back]);
 	assert.equal((await git(["rev-parse", "--abbrev-ref", "HEAD"], back)).stdout.trim(), "master");
+
+	// Every viewer hears about a switch, so their pages refresh.
+	const events = ((await (await as(ada)(`/repos/${ada.username}/switch/events`)).json()) as { events: { type: string; data: { from?: string; to?: string } }[] }).events;
+	assert.deepEqual(
+		events.filter((e) => e.type === "repo.default_branch").map((e) => [e.data.from, e.data.to]),
+		[["master", "dev"], ["dev", "master"]],
+	);
+
+	// A task created while the default switches works from whichever branch is the default once it exists:
+	// either the switch is refused because the task is active, or the task starts from the new default.
+	const repoPath = `/repos/${ada.username}/switch`;
+	const currentDefault = async () => ((await (await as(ada)(repoPath)).json()) as { repo: { defaultBranch: string } }).repo.defaultBranch;
+	for (let round = 0; round < 4; round++) {
+		const target = (await currentDefault()) === "master" ? "dev" : "master";
+		const [created, switching] = await Promise.all([
+			as(ada)(`${repoPath}/tasks?wait=25`, { method: "POST", body: JSON.stringify({ title: `race ${round}` }) }),
+			patch({ defaultBranch: target }),
+		]);
+		assert.ok(created.status === 201 || created.status === 202, await created.clone().text());
+		assert.ok(switching.status === 200 || switching.status === 409, await switching.clone().text());
+		const initial = (await created.json()) as TaskAccess;
+		const { task } = initial;
+		const ready = await until(async () => {
+			const { task: now } = (await (await as(ada)(`${repoPath}/tasks/${task.id}`)).json()) as { task: Task };
+			return now.status === "open" ? now : undefined;
+		});
+		const access = (await (await as(ada)(`${repoPath}/tasks/${task.id}/access`, { method: "POST" })).json()) as TaskAccess;
+		const base = await currentDefault();
+		assert.equal(base, switching.status === 200 ? target : target === "dev" ? "master" : "dev");
+		assert.equal(access.fork?.branch, base, `round ${round}: the task's fork follows the default it was created on`);
+		assert.equal(access.base?.branch, base);
+		if (initial.fork) {
+			assert.equal(initial.fork.branch, base, "the creation response has matching fork credentials");
+			assert.equal(initial.base?.branch, base);
+		}
+		assert.equal(ready.baseOid, (await git(["rev-parse", base], dir)).stdout.trim(), "the fork was provisioned from the captured default");
+		assert.equal((await as(ada)(`${repoPath}/tasks/${task.id}/abandon`, { method: "POST" })).status, 200);
+	}
+	if ((await currentDefault()) !== "master") assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+
+	// Deleting a branch while it becomes the default: one of them wins, never both.
+	for (let round = 0; round < 3; round++) {
+		const branch = `doomed-${round}`;
+		await git(["push", "-q", url(ada.username, "switch"), `master:${branch}`], dir);
+		const [deleted, switching] = await Promise.all([as(ada)(`${repoPath}/branches/${branch}`, { method: "DELETE" }), patch({ defaultBranch: branch })]);
+		const outcome = [deleted.status, switching.status];
+		assert.ok(
+			(deleted.ok && switching.status === 404) || (deleted.status === 400 && switching.ok),
+			`round ${round}: delete ${outcome[0]}, switch ${outcome[1]}`,
+		);
+		if (switching.ok) {
+			assert.equal(await currentDefault(), branch);
+			assert.equal((await patch({ defaultBranch: "master" })).status, 200);
+		}
+	}
+});
+
+test("branch names git accepts can be default branches", async () => {
+	const ada = await newUser("refnames");
+	const create = (name: string, defaultBranch: string) =>
+		fetch(`${api}/api/repos`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${ada.token}` },
+			body: JSON.stringify({ name, defaultBranch, visibility: "public" }),
+		});
+	const created = await create("plus", "release+2026");
+	assert.equal(created.status, 201, await created.clone().text());
+	assert.equal(((await created.json()) as { repo: { defaultBranch: string } }).repo.defaultBranch, "release+2026");
+	for (const bad of ["a..b", "a b", "a:b", "-x", "x.lock", "a//b", "@", "x@{1}"]) {
+		assert.equal((await create("bad", bad)).status, 400, bad);
+	}
 });
 
 test("shallow imports keep the requested history depth and reject invalid depths", async () => {

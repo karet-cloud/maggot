@@ -70,6 +70,7 @@ import { emailConfigured } from "./mail.ts";
 import { assertProjectName, wikiRepoName } from "./names.ts";
 import { WIKI_BRANCH } from "./wiki-pages.ts";
 import { measureRepository, probeRemote } from "./git/protocol.ts";
+import { isGitBranchName, MAX_BRANCH_BYTES } from "./git/refname.ts";
 import { validateHookUrl } from "./hooks.ts";
 import { MAX_QUERY_LENGTH } from "./search.ts";
 import jobApi from "./ci/job-api.ts";
@@ -614,7 +615,7 @@ interface NewRepo {
 }
 
 function assertBranchName(name: string): string {
-	if (!/^[A-Za-z0-9._/-]{1,100}$/.test(name) || name.includes("..") || name.startsWith("/") || name.endsWith("/")) throw new HttpError(400, "INVALID_INPUT", `Invalid branch name: ${name}`);
+	if (!isGitBranchName(name)) throw new HttpError(400, "INVALID_INPUT", `Invalid branch name: ${JSON.stringify(name.slice(0, MAX_BRANCH_BYTES))}`);
 	return name;
 }
 
