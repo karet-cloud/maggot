@@ -100,9 +100,6 @@ function Footer() {
 					<Link to="/explore" className="hover:text-fg">
 						Explore
 					</Link>
-					<Link to="/parity" className="hover:text-fg">
-						GitHub parity
-					</Link>
 					<span>Git hosting on Cloudflare.</span>
 				</nav>
 			</div>
@@ -258,11 +255,6 @@ function TopBar() {
 					<Link to="/explore" className="hidden rounded-md px-2.5 py-1.5 text-[13.5px] text-dim hover:text-fg sm:block">
 						Explore
 					</Link>
-					{me && (
-						<Link to="/parity" className="hidden rounded-md px-2.5 py-1.5 text-[13.5px] text-dim hover:text-fg lg:block">
-							GitHub parity
-						</Link>
-					)}
 					<SearchBox />
 					<ThemeToggle />
 					<Link to="/search" className="rounded-md p-2 text-dim hover:bg-raised hover:text-fg md:hidden" title="Search repositories">

@@ -531,3 +531,7 @@ accounting and refresh repository views. This avoids large uploads through the W
 mirrors are left unchanged; this is a demo snapshot, not continuous upstream synchronization.
 The repository creation API accepts optional `importDepth` (1–10,000) for shallow imports;
 omitting it keeps the existing full-history import behavior.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
