@@ -1,47 +1,84 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CircleCheck, CircleDot, Pencil, Tags, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { IssueStateBadge, Label } from "../components/issues.tsx";
+import { IssueStateBadge, Label, listPatches, openCountPatch, pendingComment, stateChange } from "../components/issues.tsx";
 import { Markdown } from "../components/markdown.tsx";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { Button, Empty, ErrorNote, Input, Spinner, TimeAgo } from "../components/ui.tsx";
-import { api, ApiError, keys, repoParams, type Issue, type IssueComment } from "../lib/api.ts";
+import { api, ApiError, keys, repoParams, type Issue, type IssueComment, type IssueState, type IssueSummary } from "../lib/api.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
-export const Route = createFileRoute("/$owner/$repo/issues/$number")({ component: IssuePage });
+const issueQuery = (project: string, number: number) => queryOptions({ queryKey: keys.issue(project, number), queryFn: () => api.issue(project, number) });
+
+type IssueData = Awaited<ReturnType<typeof api.issue>>;
+
+/** Edits the issue's page and its row in every cached list. */
+const issuePatches = (project: string, number: number, edit: (data: IssueData) => IssueData, row: (row: IssueSummary) => Partial<IssueSummary>) => [
+	patch<IssueData>(keys.issue(project, number), edit, true),
+	...listPatches(keys.issues(project), "issues", number, row),
+];
+
+export const Route = createFileRoute("/$owner/$repo/issues/$number")({
+	loader: ({ context, params }) => {
+		const project = `${params.owner}/${params.repo}`;
+		const number = Number(params.number);
+		return preload(context.queryClient, projectQuery(project), Number.isInteger(number) && issueQuery(project, number));
+	},
+	component: IssuePage,
+});
 
 function IssuePage() {
 	const { owner, repo, number: raw } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const number = Number(raw);
-	const queryClient = useQueryClient();
 	const viewer = useViewer();
 	const needsVerification = useNeedsVerification();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
-	const data = useQuery({ queryKey: keys.issue(project, number), queryFn: () => api.issue(project, number), enabled: Number.isInteger(number) });
-	const refresh = () => {
-		void queryClient.invalidateQueries({ queryKey: keys.issues(project) });
-		void queryClient.invalidateQueries({ queryKey: keys.project(project) });
-	};
-	const update = useMutation({
-		mutationFn: (patch: Parameters<typeof api.updateIssue>[2]) => api.updateIssue(project, number, patch),
-		onSuccess: refresh,
+	const info = useQuery(projectQuery(project));
+	const data = useQuery({ ...issueQuery(project, number), enabled: Number.isInteger(number) });
+	const [editingTitle, setEditingTitle] = useState<string | null>(null);
+	const rename = useOptimistic({
+		mutationFn: (title: string) => api.updateIssue(project, number, { title }),
+		apply: (title) => issuePatches(project, number, (old) => ({ ...old, issue: { ...old.issue, title } }), () => ({ title })),
+		onError: (_error, title) => setEditingTitle((t) => t ?? title),
+		action: "rename the issue",
 	});
 	const [reply, setReply] = useState("");
 	// One request either way, so a failure can't leave the comment posted and the state unchanged (and a retry post it twice).
-	const comment = useMutation({
-		mutationFn: async (toggle: boolean) => {
-			const state = toggle && data.data ? (data.data.issue.state === "open" ? "closed" : "open") : undefined;
-			if (reply.trim()) await api.comment(project, number, reply, state);
+	const comment = useOptimistic({
+		mutationFn: async ({ body, state }: { body: string; state?: IssueState }) => {
+			if (body.trim()) await api.comment(project, number, body, state);
 			else if (state) await api.updateIssue(project, number, { state });
 		},
-		onSuccess: () => {
-			setReply("");
-			refresh();
+		apply: ({ body, state }) => {
+			const by = viewer.data?.username ?? null;
+			const posted = body.trim() ? pendingComment(body, by) : null;
+			const change = state ? { ...stateChange(state, by), closedByCommit: null } : {};
+			return [
+				...openCountPatch(project, "openIssues", state),
+				...issuePatches(
+					project,
+					number,
+					(old) => ({
+						...old,
+						issue: { ...old.issue, ...change, comments: old.issue.comments + (posted ? 1 : 0) },
+						comments: posted ? [...old.comments, posted] : old.comments,
+					}),
+					(row) => ({ ...change, comments: row.comments + (posted ? 1 : 0) }),
+				),
+			];
 		},
+		// The draft comes back unless another has been started since.
+		onError: (_error, { body }) => setReply((r) => r || body),
+		action: "update the issue",
 	});
-	const [editingTitle, setEditingTitle] = useState<string | null>(null);
+	const send = (toggle: boolean) => {
+		const state = toggle && data.data ? (data.data.issue.state === "open" ? "closed" : "open") : undefined;
+		comment.mutate({ body: reply, state });
+		setReply("");
+	};
 	// Comments before the newest page, loaded on request.
 	const [earlier, setEarlier] = useState<IssueComment[]>([]);
 	const [earlierMore, setEarlierMore] = useState(false);
@@ -84,7 +121,7 @@ function IssuePage() {
 			<header className="space-y-2 border-b border-line pb-4">
 				{editingTitle === null ? (
 					<div className="flex flex-wrap items-start gap-3">
-						<h1 className="min-w-0 flex-1 text-xl font-semibold break-words">
+						<h1 className="min-w-0 flex-1 text-2xl font-semibold tracking-tight break-words">
 							{issue.title} <span className="font-normal text-faint">#{issue.number}</span>
 						</h1>
 						{issue.canEdit && !archived && (
@@ -98,12 +135,13 @@ function IssuePage() {
 					<form
 						onSubmit={(e) => {
 							e.preventDefault();
-							update.mutate({ title: editingTitle.trim() }, { onSuccess: () => setEditingTitle(null) });
+							rename.mutate(editingTitle.trim());
+							setEditingTitle(null);
 						}}
 						className="flex gap-2"
 					>
 						<Input value={editingTitle} onChange={(e) => setEditingTitle(e.target.value)} maxLength={256} required autoFocus aria-label="Title" />
-						<Button type="submit" variant="primary" busy={update.isPending}>
+						<Button type="submit" variant="primary">
 							Save
 						</Button>
 						<Button onClick={() => setEditingTitle(null)}>Cancel</Button>
@@ -148,20 +186,18 @@ function IssuePage() {
 					{comments.map((c) => (
 						<Comment key={c.id} project={project} number={number} comment={c} archived={archived} />
 					))}
-					<ErrorNote error={update.error} />
 					{canPost ? (
 						<div className="space-y-2">
 							<MarkdownEditor value={reply} onChange={setReply} project={project} label="Comment" placeholder="Leave a comment" rows={5} />
 							{needsVerification && <p className="text-xs text-amber-200">Verify your email address before commenting.</p>}
-							<ErrorNote error={comment.error} />
 							<div className="flex justify-end gap-2">
 								{issue.canEdit && (
-									<Button busy={comment.isPending && comment.variables === true} onClick={() => comment.mutate(true)} disabled={needsVerification && Boolean(reply.trim())}>
+									<Button onClick={() => send(true)} disabled={needsVerification && Boolean(reply.trim())}>
 										{issue.state === "open" ? <CircleCheck className="size-4 text-violet-300" /> : <CircleDot className="size-4 text-emerald-300" />}
 										{issue.state === "open" ? (reply.trim() ? "Close with comment" : "Close issue") : reply.trim() ? "Reopen with comment" : "Reopen issue"}
 									</Button>
 								)}
-								<Button variant="primary" busy={comment.isPending && comment.variables === false} disabled={!reply.trim() || needsVerification} onClick={() => comment.mutate(false)}>
+								<Button variant="primary" disabled={!reply.trim() || needsVerification} onClick={() => send(false)}>
 									Comment
 								</Button>
 							</div>
@@ -190,14 +226,12 @@ function IssuePage() {
 }
 
 function Body({ project, issue, archived }: { project: string; issue: Issue; archived: boolean }) {
-	const queryClient = useQueryClient();
 	const [draft, setDraft] = useState<string | null>(null);
-	const save = useMutation({
-		mutationFn: () => api.updateIssue(project, issue.number, { body: draft ?? "" }),
-		onSuccess: () => {
-			setDraft(null);
-			void queryClient.invalidateQueries({ queryKey: keys.issue(project, issue.number) });
-		},
+	const save = useOptimistic({
+		mutationFn: (body: string) => api.updateIssue(project, issue.number, { body }),
+		apply: (body) => [patch<IssueData>(keys.issue(project, issue.number), (old) => ({ ...old, issue: { ...old.issue, body } }), true)],
+		onError: (_error, body) => setDraft((d) => d ?? body),
+		action: "save the description",
 	});
 	return (
 		<Card
@@ -215,10 +249,15 @@ function Body({ project, issue, archived }: { project: string; issue: Issue; arc
 			{draft !== null ? (
 				<div className="space-y-2">
 					<MarkdownEditor value={draft} onChange={setDraft} project={project} label="Description" autoFocus />
-					<ErrorNote error={save.error} />
 					<div className="flex justify-end gap-2">
 						<Button onClick={() => setDraft(null)}>Cancel</Button>
-						<Button variant="primary" busy={save.isPending} onClick={() => save.mutate()}>
+						<Button
+							variant="primary"
+							onClick={() => {
+								save.mutate(draft);
+								setDraft(null);
+							}}
+						>
 							Save
 						</Button>
 					</div>
@@ -233,18 +272,31 @@ function Body({ project, issue, archived }: { project: string; issue: Issue; arc
 }
 
 function Comment({ project, number, comment, archived }: { project: string; number: number; comment: IssueComment; archived: boolean }) {
-	const queryClient = useQueryClient();
 	const viewer = useViewer();
 	const [draft, setDraft] = useState<string | null>(null);
-	const refresh = () => void queryClient.invalidateQueries({ queryKey: keys.issue(project, number) });
-	const save = useMutation({
-		mutationFn: () => api.editComment(project, number, comment.id, draft ?? ""),
-		onSuccess: () => {
-			setDraft(null);
-			refresh();
-		},
+	const save = useOptimistic({
+		mutationFn: (body: string) => api.editComment(project, number, comment.id, body),
+		apply: (body) => [
+			patch<IssueData>(
+				keys.issue(project, number),
+				(old) => ({ ...old, comments: old.comments.map((c) => (c.id === comment.id ? { ...c, body, updatedAt: new Date().toISOString() } : c)) }),
+				true,
+			),
+		],
+		onError: (_error, body) => setDraft((d) => d ?? body),
+		action: "save the comment",
 	});
-	const remove = useMutation({ mutationFn: () => api.deleteComment(project, number, comment.id), onSuccess: refresh });
+	const remove = useOptimistic({
+		mutationFn: () => api.deleteComment(project, number, comment.id),
+		apply: () =>
+			issuePatches(
+				project,
+				number,
+				(old) => ({ ...old, issue: { ...old.issue, comments: old.issue.comments - 1 }, comments: old.comments.filter((c) => c.id !== comment.id) }),
+				(row) => ({ comments: row.comments - 1 }),
+			),
+		action: "delete the comment",
+	});
 	const mine = viewer.data?.username === comment.author;
 	return (
 		<Card
@@ -274,10 +326,16 @@ function Comment({ project, number, comment, archived }: { project: string; numb
 			{draft !== null ? (
 				<div className="space-y-2">
 					<MarkdownEditor value={draft} onChange={setDraft} project={project} label="Comment" autoFocus rows={5} />
-					<ErrorNote error={save.error} />
 					<div className="flex justify-end gap-2">
 						<Button onClick={() => setDraft(null)}>Cancel</Button>
-						<Button variant="primary" busy={save.isPending} disabled={!draft.trim()} onClick={() => save.mutate()}>
+						<Button
+							variant="primary"
+							disabled={!draft.trim()}
+							onClick={() => {
+								save.mutate(draft);
+								setDraft(null);
+							}}
+						>
 							Save
 						</Button>
 					</div>
@@ -285,7 +343,6 @@ function Comment({ project, number, comment, archived }: { project: string; numb
 			) : (
 				<Markdown source={comment.body} project={project} path="" />
 			)}
-			<ErrorNote error={remove.error} />
 		</Card>
 	);
 }
@@ -305,14 +362,12 @@ function Card({ author, at, edited, actions, children }: { author: string | null
 }
 
 function Labels({ project, issue, editable }: { project: string; issue: Issue; editable: boolean }) {
-	const queryClient = useQueryClient();
 	const [draft, setDraft] = useState<string | null>(null);
-	const save = useMutation({
-		mutationFn: () => api.updateIssue(project, issue.number, { labels: (draft ?? "").split(",").map((l) => l.trim()).filter(Boolean) }),
-		onSuccess: () => {
-			setDraft(null);
-			void queryClient.invalidateQueries({ queryKey: keys.issues(project) });
-		},
+	const save = useOptimistic({
+		mutationFn: (labels: string[]) => api.updateIssue(project, issue.number, { labels }),
+		apply: (labels) => issuePatches(project, issue.number, (old) => ({ ...old, issue: { ...old.issue, labels } }), () => ({ labels })),
+		onError: (_error, labels) => setDraft((d) => d ?? labels.join(", ")),
+		action: "save the labels",
 	});
 	return (
 		<div className="space-y-2 border-b border-line pb-3">
@@ -331,14 +386,14 @@ function Labels({ project, issue, editable }: { project: string; issue: Issue; e
 				<form
 					onSubmit={(e) => {
 						e.preventDefault();
-						save.mutate();
+						save.mutate(draft.split(",").map((l) => l.trim()).filter(Boolean));
+						setDraft(null);
 					}}
 					className="space-y-2"
 				>
 					<Input value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="bug, help wanted" aria-label="Labels, comma-separated" autoFocus />
-					<ErrorNote error={save.error} />
 					<div className="flex gap-2">
-						<Button type="submit" variant="primary" className="text-xs" busy={save.isPending}>
+						<Button type="submit" variant="primary" className="text-xs">
 							Save
 						</Button>
 						<Button className="text-xs" onClick={() => setDraft(null)}>

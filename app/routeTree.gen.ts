@@ -29,6 +29,7 @@ import { Route as SettingsPasswordRouteImport } from './routes/settings.password
 import { Route as SettingsSshRouteImport } from './routes/settings.ssh'
 import { Route as SettingsTokensRouteImport } from './routes/settings.tokens'
 import { Route as OwnerRepoIndexRouteImport } from './routes/$owner.$repo.index'
+import { Route as OwnerRepoActivityRouteImport } from './routes/$owner.$repo.activity'
 import { Route as OwnerRepoAgentsRouteImport } from './routes/$owner.$repo.agents'
 import { Route as OwnerRepoBranchesRouteImport } from './routes/$owner.$repo.branches'
 import { Route as OwnerRepoCompareRouteImport } from './routes/$owner.$repo.compare'
@@ -153,6 +154,11 @@ const SettingsTokensRoute = SettingsTokensRouteImport.update({
 const OwnerRepoIndexRoute = OwnerRepoIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => OwnerRepoRoute,
+} as any)
+const OwnerRepoActivityRoute = OwnerRepoActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
   getParentRoute: () => OwnerRepoRoute,
 } as any)
 const OwnerRepoAgentsRoute = OwnerRepoAgentsRouteImport.update({
@@ -305,6 +311,7 @@ export interface FileRoutesByFullPath {
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -351,6 +358,7 @@ export interface FileRoutesByTo {
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner': typeof OwnerIndexRoute
   '/settings': typeof SettingsIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -399,6 +407,7 @@ export interface FileRoutesById {
   '/settings/tokens': typeof SettingsTokensRoute
   '/$owner/': typeof OwnerIndexRoute
   '/settings/': typeof SettingsIndexRoute
+  '/$owner/$repo/activity': typeof OwnerRepoActivityRoute
   '/$owner/$repo/agents': typeof OwnerRepoAgentsRoute
   '/$owner/$repo/branches': typeof OwnerRepoBranchesRoute
   '/$owner/$repo/compare': typeof OwnerRepoCompareRoute
@@ -448,6 +457,7 @@ export interface FileRouteTypes {
     | '/settings/tokens'
     | '/$owner/'
     | '/settings/'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -494,6 +504,7 @@ export interface FileRouteTypes {
     | '/settings/tokens'
     | '/$owner'
     | '/settings'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -541,6 +552,7 @@ export interface FileRouteTypes {
     | '/settings/tokens'
     | '/$owner/'
     | '/settings/'
+    | '/$owner/$repo/activity'
     | '/$owner/$repo/agents'
     | '/$owner/$repo/branches'
     | '/$owner/$repo/compare'
@@ -733,6 +745,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OwnerRepoIndexRouteImport
       parentRoute: typeof OwnerRepoRoute
     }
+    '/$owner/$repo/activity': {
+      id: '/$owner/$repo/activity'
+      path: '/activity'
+      fullPath: '/$owner/$repo/activity'
+      preLoaderRoute: typeof OwnerRepoActivityRouteImport
+      parentRoute: typeof OwnerRepoRoute
+    }
     '/$owner/$repo/agents': {
       id: '/$owner/$repo/agents'
       path: '/agents'
@@ -912,6 +931,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface OwnerRepoRouteChildren {
+  OwnerRepoActivityRoute: typeof OwnerRepoActivityRoute
   OwnerRepoAgentsRoute: typeof OwnerRepoAgentsRoute
   OwnerRepoBranchesRoute: typeof OwnerRepoBranchesRoute
   OwnerRepoCompareRoute: typeof OwnerRepoCompareRoute
@@ -941,6 +961,7 @@ interface OwnerRepoRouteChildren {
 }
 
 const OwnerRepoRouteChildren: OwnerRepoRouteChildren = {
+  OwnerRepoActivityRoute: OwnerRepoActivityRoute,
   OwnerRepoAgentsRoute: OwnerRepoAgentsRoute,
   OwnerRepoBranchesRoute: OwnerRepoBranchesRoute,
   OwnerRepoCompareRoute: OwnerRepoCompareRoute,
@@ -999,6 +1020,7 @@ const rootRouteChildren: RootRouteChildren = {
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
+
 
 import type { getRouter } from './router.tsx'
 import type { createStart } from '@tanstack/react-start'

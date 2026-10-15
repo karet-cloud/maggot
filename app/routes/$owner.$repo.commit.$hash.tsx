@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { FolderCode } from "lucide-react";
 import { ChecksBadge } from "../components/actions.tsx";
@@ -6,13 +6,19 @@ import { DiffView } from "../components/diff.tsx";
 import { ErrorNote, Oid, Panel, Spinner, TimeAgo } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
 import { shortOid } from "../lib/format.ts";
+import { preload } from "../lib/queries.ts";
 
 type Search = { ref?: string };
 
 export const Route = createFileRoute("/$owner/$repo/commit/$hash")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ ref: typeof s.ref === "string" && s.ref ? s.ref : undefined }),
+	loaderDeps: ({ search }) => ({ ref: search.ref }),
+	loader: ({ context, params, deps }) => preload(context.queryClient, commitQuery(`${params.owner}/${params.repo}`, params.hash, deps.ref)),
 	component: CommitPage,
 });
+
+const commitQuery = (project: string, hash: string, ref?: string) =>
+	queryOptions({ queryKey: [...keys.commit(project, hash), ref ?? ""], queryFn: () => api.commit(project, hash, ref), staleTime: Infinity });
 
 const TASK_MERGE = /^Merge task (t[0-9a-f]+): /;
 
@@ -20,7 +26,7 @@ function CommitPage() {
 	const { owner, repo, hash } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const { ref } = Route.useSearch();
-	const result = useQuery({ queryKey: [...keys.commit(project, hash), ref ?? ""], queryFn: () => api.commit(project, hash, ref), staleTime: Infinity });
+	const result = useQuery(commitQuery(project, hash, ref));
 
 	if (result.isPending) return <Spinner />;
 	if (result.error) return <ErrorNote error={result.error} />;

@@ -1,12 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { Empty } from "../components/ui.tsx";
-import { WikiEditor, WikiGate, WikiShell } from "../components/wiki.tsx";
+import { WikiEditor, WikiGate, wikiQueries, WikiShell } from "../components/wiki.tsx";
+import { preload } from "../lib/queries.ts";
 
 type Search = { title?: string };
 
 // A new page; `title` comes from a link to a page that doesn't exist yet. "_new" can't be a page's name.
 export const Route = createFileRoute("/$owner/$repo/wiki/_new")({
 	validateSearch: (s: Record<string, unknown>): Search => ({ title: typeof s.title === "string" && s.title ? s.title : undefined }),
+	loader: ({ context, params }) => preload(context.queryClient, ...wikiQueries(context.queryClient, `${params.owner}/${params.repo}`)),
 	component: NewWikiPage,
 });
 

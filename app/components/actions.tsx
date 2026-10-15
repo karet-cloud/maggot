@@ -1,9 +1,10 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Archive, Ban, CircleCheck, CircleDashed, CircleMinus, CirclePause, CircleX, Database, Download, KeyRound, LoaderCircle, Play, Plus, ShieldCheck, Trash2, Workflow } from "lucide-react";
 import { useState } from "react";
-import { api, ApiError, keys, repoParams, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
+import { api, ApiError, keys, repoParams, type CiArtifact, type CiCache, type CiConclusion, type CiRunner, type CiRunSummary, type CiSettings, type CiStatus, type PullChecks } from "../lib/api.ts";
 import { duration, formatBytes } from "../lib/format.ts";
+import { patch, useOptimistic } from "../lib/optimistic.ts";
 import { Button, cx, Empty, ErrorNote, Field, Input, Panel, Spinner, TimeAgo } from "./ui.tsx";
 
 /** One word for where a run, job or step stands: its conclusion once finished, else its status. */
@@ -226,12 +227,18 @@ export function PullChecksBox({ project, number, checks, canApprove }: { project
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
+export const ciSettingsQuery = (project: string) => queryOptions({ queryKey: keys.ciSettings(project), queryFn: () => api.ciSettings(project) });
+
 /** Settings → Actions: the default runner, the Depot connection and secrets. Admins only; values are never sent back. */
 export function ActionsSettings({ project, archived }: { project: string; archived: boolean }) {
 	const queryClient = useQueryClient();
-	const settings = useQuery({ queryKey: keys.ciSettings(project), queryFn: () => api.ciSettings(project) });
+	const settings = useQuery(ciSettingsQuery(project));
 	const set = (s: CiSettings) => queryClient.setQueryData(keys.ciSettings(project), s);
-	const runner = useMutation({ mutationFn: (r: CiRunner) => api.ciSetDefaultRunner(project, r), onSuccess: set });
+	const runner = useOptimistic({
+		mutationFn: (r: CiRunner) => api.ciSetDefaultRunner(project, r),
+		apply: (r) => [patch<CiSettings>(keys.ciSettings(project), (old) => ({ ...old, defaultRunner: r }))],
+		action: "change the default runner",
+	});
 	const s = settings.data;
 	return (
 		<Panel title="Actions" actions={<span className="text-[11px] text-faint">Workflows live in .maggot/workflows</span>}>
@@ -256,7 +263,7 @@ export function ActionsSettings({ project, archived }: { project: string; archiv
 							<select
 								value={s.defaultRunner}
 								onChange={(e) => runner.mutate(e.target.value as CiRunner)}
-								disabled={archived || runner.isPending}
+								disabled={archived}
 								className="w-full rounded-md border border-line-strong bg-bg px-3 py-2 text-sm text-fg"
 							>
 								<option value="cloudflare" disabled={!s.cloudflareAvailable}>
@@ -268,7 +275,6 @@ export function ActionsSettings({ project, archived }: { project: string; archiv
 						{!s.cloudflareAvailable && (
 							<p className="text-xs text-amber-200">This server doesn't run Cloudflare containers for CI, so jobs need Depot.</p>
 						)}
-						<ErrorNote error={runner.error} />
 					</div>
 					{archived && (
 						<p className="p-4 text-xs text-amber-200">
@@ -293,7 +299,11 @@ function DepotSettings({ project, settings, onSaved, archived }: { project: stri
 			onSaved(s);
 		},
 	});
-	const disconnect = useMutation({ mutationFn: () => api.ciRemoveDepot(project), onSuccess: onSaved });
+	const disconnect = useOptimistic({
+		mutationFn: () => api.ciRemoveDepot(project),
+		apply: () => [patch<CiSettings>(keys.ciSettings(project), (old) => ({ ...old, depot: { configured: false, orgId: null } }))],
+		action: "disconnect Depot",
+	});
 	return (
 		<form
 			onSubmit={(e) => {
@@ -332,7 +342,7 @@ function DepotSettings({ project, settings, onSaved, archived }: { project: stri
 					<Input value={org} onChange={(e) => setOrg(e.target.value)} pattern="[A-Za-z0-9_\-]{1,64}" className="font-mono" disabled={archived} />
 				</Field>
 			</div>
-			<ErrorNote error={connect.error ?? disconnect.error} />
+			<ErrorNote error={connect.error} />
 			<div className="flex flex-wrap gap-2">
 				<Button type="submit" busy={connect.isPending} disabled={archived || !token.trim()}>
 					{settings.depot.configured ? "Replace token" : "Connect Depot"}
@@ -341,7 +351,6 @@ function DepotSettings({ project, settings, onSaved, archived }: { project: stri
 					<Button
 						variant="ghost"
 						className="hover:text-rose-300"
-						busy={disconnect.isPending}
 						onClick={() => confirm("Disconnect Depot? Jobs that run on Depot will fail until you connect it again.") && disconnect.mutate()}
 					>
 						Disconnect
@@ -363,7 +372,11 @@ function Secrets({ project, settings, onSaved, archived }: { project: string; se
 			onSaved(s);
 		},
 	});
-	const remove = useMutation({ mutationFn: (n: string) => api.ciDeleteSecret(project, n), onSuccess: onSaved });
+	const remove = useOptimistic({
+		mutationFn: (n: string) => api.ciDeleteSecret(project, n),
+		apply: (n) => [patch<CiSettings>(keys.ciSettings(project), (old) => ({ ...old, secrets: old.secrets.filter((x) => x !== n) }))],
+		action: "delete the secret",
+	});
 	return (
 		<div className="space-y-3 p-4 text-sm">
 			<p className="font-medium text-fg">Secrets</p>
@@ -383,7 +396,6 @@ function Secrets({ project, settings, onSaved, archived }: { project: string; se
 							<Button
 								variant="ghost"
 								className="px-2 text-xs hover:text-rose-300"
-								busy={remove.isPending && remove.variables === s}
 								onClick={() => confirm(`Delete the secret ${s}?`) && remove.mutate(s)}
 								aria-label={`Delete ${s}`}
 							>
@@ -419,7 +431,7 @@ function Secrets({ project, settings, onSaved, archived }: { project: string; se
 					Save secret
 				</Button>
 				<div className="sm:col-span-3 empty:hidden">
-					<ErrorNote error={save.error ?? remove.error} />
+					<ErrorNote error={save.error} />
 				</div>
 			</form>
 		</div>
@@ -438,18 +450,19 @@ export function NoWorkflows({ project, branch }: { project: string; branch: stri
 	);
 }
 
+export const runArtifactsQuery = (project: string, run: number) => queryOptions({ queryKey: keys.ciArtifacts(project, run), queryFn: () => api.ciArtifacts(project, run) });
+
 /** The files a run uploaded (actions/upload-artifact): download links, and delete for people who can write. Nothing when there are none. */
 export function RunArtifacts({ project, run, active, canWrite }: { project: string; run: number; active: boolean; canWrite: boolean }) {
-	const queryClient = useQueryClient();
 	const artifacts = useQuery({
-		queryKey: keys.ciArtifacts(project, run),
-		queryFn: () => api.ciArtifacts(project, run),
+		...runArtifactsQuery(project, run),
 		// Jobs upload while they run; the live connection only says when runs start and finish.
 		refetchInterval: active ? 10_000 : false,
 	});
-	const remove = useMutation({
+	const remove = useOptimistic({
 		mutationFn: (id: string) => api.ciDeleteArtifact(project, run, id),
-		onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.ciArtifacts(project, run) }),
+		apply: (id) => [patch<CiArtifact[]>(keys.ciArtifacts(project, run), (old) => old.filter((a) => a.id !== id))],
+		action: "delete the artifact",
 	});
 	if (!artifacts.data?.length) return null;
 	return (
@@ -472,7 +485,6 @@ export function RunArtifacts({ project, run, active, canWrite }: { project: stri
 							<Button
 								variant="ghost"
 								className="text-xs"
-								busy={remove.isPending && remove.variables === a.id}
 								onClick={() => confirm(`Delete the artifact ${a.name}?`) && remove.mutate(a.id)}
 								aria-label={`Delete ${a.name}`}
 							>
@@ -482,21 +494,18 @@ export function RunArtifacts({ project, run, active, canWrite }: { project: stri
 					</li>
 				))}
 			</ul>
-			<div className="px-4 empty:hidden">
-				<ErrorNote error={remove.error} />
-			</div>
 		</Panel>
 	);
 }
 
 /** The repository's saved caches (actions/cache), newest use first, with delete (not while archived). For people who can write. */
 export function Caches({ project, canDelete }: { project: string; canDelete: boolean }) {
-	const queryClient = useQueryClient();
 	const [open, setOpen] = useState(false);
 	const caches = useQuery({ queryKey: keys.ciCaches(project), queryFn: () => api.ciCaches(project), enabled: open });
-	const remove = useMutation({
+	const remove = useOptimistic({
 		mutationFn: (id: string) => api.ciDeleteCache(project, id),
-		onSuccess: () => queryClient.invalidateQueries({ queryKey: keys.ciCaches(project) }),
+		apply: (id) => [patch<CiCache[]>(keys.ciCaches(project), (old) => old.filter((c) => c.id !== id))],
+		action: "delete the cache",
 	});
 	const total = caches.data?.reduce((n, c) => n + c.size, 0) ?? 0;
 	return (
@@ -535,7 +544,7 @@ export function Caches({ project, canDelete }: { project: string; canDelete: boo
 									{formatBytes(c.size)} · used <TimeAgo at={c.usedAt} />
 								</span>
 								{canDelete && (
-									<Button variant="ghost" className="text-xs" busy={remove.isPending && remove.variables === c.id} onClick={() => remove.mutate(c.id)} aria-label={`Delete the cache ${c.key}`}>
+									<Button variant="ghost" className="text-xs" onClick={() => remove.mutate(c.id)} aria-label={`Delete the cache ${c.key}`}>
 										<Trash2 className="size-3.5" />
 									</Button>
 								)}
@@ -544,9 +553,6 @@ export function Caches({ project, canDelete }: { project: string; canDelete: boo
 					</ul>
 				</>
 			)}
-			<div className="px-4 empty:hidden">
-				<ErrorNote error={remove.error} />
-			</div>
 		</Panel>
 	);
 }

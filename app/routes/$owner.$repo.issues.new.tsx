@@ -4,16 +4,20 @@ import { useState } from "react";
 import { MarkdownEditor } from "../components/markdown-editor.tsx";
 import { Button, Empty, ErrorNote, Field, Input, Panel } from "../components/ui.tsx";
 import { api, keys, repoParams } from "../lib/api.ts";
+import { preload, projectQuery } from "../lib/queries.ts";
 import { useNeedsVerification, useViewer } from "./__root.tsx";
 
-export const Route = createFileRoute("/$owner/$repo/issues/new")({ component: NewIssue });
+export const Route = createFileRoute("/$owner/$repo/issues/new")({
+	loader: ({ context, params }) => preload(context.queryClient, projectQuery(`${params.owner}/${params.repo}`)),
+	component: NewIssue,
+});
 
 function NewIssue() {
 	const { owner, repo } = Route.useParams();
 	const project = `${owner}/${repo}`;
 	const viewer = useViewer();
 	const needsVerification = useNeedsVerification();
-	const info = useQuery({ queryKey: keys.project(project), queryFn: () => api.project(project) });
+	const info = useQuery(projectQuery(project));
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
 	const [title, setTitle] = useState("");
