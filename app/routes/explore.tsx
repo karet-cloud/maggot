@@ -108,7 +108,7 @@ function Explore() {
 /** A public repository as a card: the landing page's framed boxes, linking to the repository. */
 function RepoCard({ repo: r }: { repo: RepoInfo }) {
 	return (
-		<li className="flex min-w-0 flex-col rounded-xl border border-line bg-panel p-5 shadow-frame transition-colors hover:border-line-strong">
+		<li className="flex min-w-0 flex-col rounded-xl border border-line bg-panel p-5 shadow-(--shadow-frame) transition-colors hover:border-line-strong">
 			<div className="flex min-w-0 items-center gap-2">
 				<Link to="/$owner/$repo" params={{ owner: r.owner, repo: r.name }} className="min-w-0 truncate font-mono text-[14px] hover:text-accent">
 					<span className="text-dim">{r.owner} / </span>

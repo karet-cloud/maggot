@@ -2,7 +2,7 @@ import { Check, Copy, LoaderCircle, Moon, Sun, X } from "lucide-react";
 import { useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from "react";
 import type { TaskStatus } from "../lib/api.ts";
 import { errorMessage, shortOid, STATUS, timeAgo } from "../lib/format.ts";
-import { saveTheme, savedTheme, systemTheme, type Theme } from "../lib/theme.ts";
+import { currentTheme, saveTheme } from "../lib/theme.ts";
 
 export const cx = (...classes: (string | false | null | undefined)[]) => classes.filter(Boolean).join(" ");
 
@@ -98,26 +98,21 @@ export function Button({ variant = "secondary", busy, className, children, disab
 	);
 }
 
-/** Switches between light and dark; the choice applies to every page. */
-export function ThemeToggle({ className }: { className?: string }) {
-	// The server can't know the theme, so the icon appears once the page is running.
-	const [current, setCurrent] = useState<Theme | null>(null);
-	useEffect(() => {
-		const sync = () => setCurrent(savedTheme() ?? systemTheme());
-		sync();
-		window.addEventListener("maggot-theme", sync);
-		return () => window.removeEventListener("maggot-theme", sync);
-	}, []);
-	const label = current === "dark" ? "Switch to light" : "Switch to dark";
+/**
+ * Switches between light and dark; the choice applies to every page. The icon follows `.dark` on <html>
+ * in CSS, so it's right from the first paint and whenever another tab or the system changes the theme.
+ */
+export function ThemeToggle() {
 	return (
 		<button
 			type="button"
-			onClick={() => current && saveTheme(current === "dark" ? "light" : "dark")}
-			className={cx("rounded-md p-2 text-dim hover:bg-raised hover:text-fg", className)}
-			title={label}
-			aria-label={label}
+			onClick={() => saveTheme(currentTheme() === "dark" ? "light" : "dark")}
+			className="rounded-md p-2 text-dim hover:bg-raised hover:text-fg"
+			title="Switch between light and dark"
+			aria-label="Switch between light and dark"
 		>
-			{current === "dark" ? <Sun className="size-4" /> : current === "light" ? <Moon className="size-4" /> : <span className="block size-4" />}
+			<Moon className="size-4 [.dark_&]:hidden" />
+			<Sun className="hidden size-4 [.dark_&]:block" />
 		</button>
 	);
 }
@@ -157,7 +152,7 @@ export function Modal({ open, onClose, title, children }: { open: boolean; onClo
 			ref={ref}
 			onClose={onClose}
 			onClick={(e) => e.target === ref.current && onClose()}
-			className="m-auto w-full max-w-lg rounded-xl border border-line bg-panel p-0 text-fg shadow-frame backdrop:bg-black/50 backdrop:backdrop-blur-sm"
+			className="m-auto w-full max-w-lg rounded-xl border border-line bg-panel p-0 text-fg shadow-(--shadow-frame) backdrop:bg-black/50 backdrop:backdrop-blur-sm"
 		>
 			<div className="flex items-center justify-between border-b border-line px-5 py-3.5">
 				<h2 className="text-[15px] font-semibold">{title}</h2>
